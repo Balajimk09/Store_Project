@@ -291,6 +291,44 @@ export function useStoreData(): StoreData & {
   }, []);
 
   const updateProductPrice = useCallback((upc: string, costPrice: number, sellPrice: number) => {
+    if (user && authStore && data.dataMode === 'cloud') {
+      // Capture original prices before optimistic update for potential rollback
+      const original = data.products.find((p) => p.upc === upc);
+      const origCost = original?.costPrice ?? costPrice;
+      const origSell = original?.sellPrice ?? sellPrice;
+
+      // Optimistic local update
+      setData((prev) => {
+        const next = prev.products.map((p) =>
+          p.upc === upc ? { ...p, costPrice, sellPrice } : p
+        );
+        return { ...prev, products: next, lowStockProducts: computeLowStock(next), cloudError: null };
+      });
+
+      supabase
+        .from('products')
+        .update({
+          cost_price: costPrice,
+          selling_price: sellPrice,
+          updated_at: new Date().toISOString(),
+        })
+        .eq('store_id', authStore.id)
+        .eq('upc', upc)
+        .then(({ error }) => {
+          if (error) {
+            // Roll back to original prices and surface the error
+            setData((prev) => {
+              const rolled = prev.products.map((p) =>
+                p.upc === upc ? { ...p, costPrice: origCost, sellPrice: origSell } : p
+              );
+              return { ...prev, products: rolled, lowStockProducts: computeLowStock(rolled), cloudError: `Price update failed: ${error.message}` };
+            });
+          }
+        });
+      return;
+    }
+
+    // Demo / localStorage Mode
     setData((prev) => {
       const next = prev.products.map((p) =>
         p.upc === upc ? { ...p, costPrice, sellPrice } : p
@@ -310,7 +348,7 @@ export function useStoreData(): StoreData & {
       return { ...prev, products: next, lowStockProducts: computeLowStock(next) };
     });
     window.dispatchEvent(new Event('storepulse:data-updated'));
-  }, []);
+  }, [user, authStore, data.dataMode, data.products]);
 
   return { ...data, resetToDemo, refresh, resetProductsToDemo, updateProductPrice };
 }

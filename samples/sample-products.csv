@@ -1,6 +1,6 @@
-UPC,Product Name,Category,Cost,Price
-012345678901,Coca Cola 20oz,Beverages,1.20,2.49
-012345678902,Pepsi 20oz,Beverages,1.15,2.39
-012345678903,Lays Classic Chips,Snacks,0.85,1.99
-012345678904,Marlboro Red,Tobacco,8.25,10.99
-012345678905,Red Bull 8.4oz,Energy Drinks,1.80,3.49
+upc,item_name,category,brand,cost_price,selling_price,stock,reorder_level,vendor
+012345678901,Coca Cola 20oz,Beverages,Coca-Cola,1.20,2.49,142,48,Coke Distributing
+012345678902,Pepsi 20oz,Beverages,PepsiCo,1.15,2.39,96,48,Pepsi Distributing
+012345678903,Lays Classic Chips,Snacks,Frito-Lay,0.85,1.99,38,40,Frito-Lay
+012345678904,Marlboro Red,Tobacco,Philip Morris,8.25,10.99,64,40,PM USA
+012345678905,Red Bull 8.4oz,Energy Drinks,Red Bull,1.80,3.49,12,40,Red Bull Dist

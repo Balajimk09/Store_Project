@@ -31,48 +31,47 @@ export interface StoreRow {
 export interface UploadBatchRow {
   id: string;
   store_id: string;
-  owner_id: string;
   upload_type: 'transactions' | 'products';
   file_name: string;
-  row_count: number;
-  valid_count: number;
-  invalid_count: number;
+  total_rows: number;
+  valid_rows: number;
+  invalid_rows: number;
   created_at: string;
 }
 
 export interface TransactionRow {
   id: string;
   store_id: string;
-  owner_id: string;
-  txn_id: string;
-  timestamp: string;
-  item: string | null;
-  category: string | null;
+  batch_id: string | null;
+  transaction_id: string;
+  transaction_time: string;
+  register_id: number | null;
   cashier_id: string | null;
-  cashier_name: string | null;
-  register: number;
-  payment_type: string | null;
-  amount: number;
-  txn_type: string;
   upc: string | null;
+  item_name: string | null;
+  category: string | null;
   quantity: number;
   unit_price: number;
   discount_amount: number;
+  total_amount: number;
+  payment_type: string | null;
+  transaction_type: string;
   created_at: string;
 }
 
 export interface ProductRow {
   id: string;
   store_id: string;
-  owner_id: string;
+  batch_id: string | null;
   upc: string;
-  name: string | null;
+  item_name: string | null;
   category: string | null;
-  brand: string;
+  brand: string | null;
   cost_price: number;
   selling_price: number;
   stock: number;
   reorder_level: number;
   vendor: string | null;
   created_at: string;
+  updated_at: string;
 }

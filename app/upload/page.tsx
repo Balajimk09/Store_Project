@@ -77,16 +77,26 @@ export default function UploadPage() {
     reader.readAsText(file);
   }, []);
 
-  const importTx = () => {
+  const importTx = async () => {
     if (!tx.result || tx.result.transactions.length === 0) return;
-    saveUploadedTransactions(tx.result.transactions, tx.fileName || 'transactions.csv');
+    setTx((s) => ({ ...s, error: null }));
+    const result = await saveUploadedTransactions(tx.result.transactions, tx.fileName || 'transactions.csv');
+    if (result.error) {
+      setTx((s) => ({ ...s, error: `Cloud save failed: ${result.error}` }));
+      return;
+    }
     setTx((s) => ({ ...s, imported: true, importedCount: s.result!.transactions.length }));
     store.refresh();
   };
 
-  const importProducts = () => {
+  const importProducts = async () => {
     if (!p.result || p.result.products.length === 0) return;
-    saveUploadedProducts(p.result.products, p.fileName || 'pricebook.csv');
+    setP((s) => ({ ...s, error: null }));
+    const result = await saveUploadedProducts(p.result.products, p.fileName || 'pricebook.csv');
+    if (result.error) {
+      setP((s) => ({ ...s, error: `Cloud save failed: ${result.error}` }));
+      return;
+    }
     setP((s) => ({ ...s, imported: true, importedCount: s.result!.products.length }));
     store.refresh();
   };

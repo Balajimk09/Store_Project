@@ -1,6 +1,6 @@
-Date,UPC,Product,Quantity,Unit Price,Total,Payment Method,Cashier
-2026-06-18,012345678901,Coca Cola 20oz,2,2.49,4.98,Cash,John
-2026-06-18,012345678902,Pepsi 20oz,1,2.39,2.39,Card,Sarah
-2026-06-18,012345678903,Lays Classic Chips,3,1.99,5.97,Cash,John
-2026-06-18,012345678904,Marlboro Red,1,10.99,10.99,Card,Mike
-2026-06-18,012345678905,Red Bull 8.4oz,2,3.49,6.98,Card,Sarah
+transaction_id,store_id,transaction_time,register_id,cashier_id,upc,item_name,category,quantity,unit_price,discount_amount,total_amount,payment_type,transaction_type
+TX0001,4127,2026-06-18T08:14:00,1,C001,012345678901,Coca Cola 20oz,Beverages,2,2.49,0,4.98,CASH,SALE
+TX0002,4127,2026-06-18T09:22:00,1,C002,012345678902,Pepsi 20oz,Beverages,1,2.39,0,2.39,CARD,SALE
+TX0003,4127,2026-06-18T10:05:00,2,C001,012345678903,Lays Classic Chips,Snacks,3,1.99,0,5.97,CASH,SALE
+TX0004,4127,2026-06-18T11:30:00,2,C003,012345678904,Marlboro Red,Tobacco,1,10.99,0,10.99,CARD,SALE
+TX0005,4127,2026-06-18T12:12:00,1,C002,012345678905,Red Bull 8.4oz,Energy Drinks,2,3.49,0,6.98,CARD,SALE

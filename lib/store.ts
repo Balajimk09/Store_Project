@@ -147,7 +147,7 @@ export function useStoreData(): StoreData & {
   updateProductPrice: (upc: string, costPrice: number, sellPrice: number) => void;
 } {
   const { user, store: authStore, loading: authLoading } = useAuth();
-  const [data, setData] = useState<StoreData>(buildDemo);
+  const [data, setData] = useState<StoreData>(() => ({ ...buildDemo(), loaded: false }));
   const [refreshCounter, setRefreshCounter] = useState(0);
 
   useEffect(() => {

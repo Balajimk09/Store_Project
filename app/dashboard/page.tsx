@@ -1,8 +1,8 @@
 'use client';
 
-import { DashboardShell, PageHeader } from '@/components/layout/sidebar';
+import { DashboardShell, PageHeader, PageLoading } from '@/components/layout/sidebar';
 import { Card } from '@/components/ui/card';
-import { TrendingUp, TrendingDown, DollarSign, Receipt, RotateCcw, Ban, CircleSlash, Sigma, AlertTriangle, Boxes, ArrowRight, Sparkles, Lightbulb } from 'lucide-react';
+import { TrendingUp, TrendingDown, DollarSign, Receipt, RotateCcw, Ban, CircleSlash, Sigma, TriangleAlert as AlertTriangle, Boxes, ArrowRight, Sparkles, Lightbulb } from 'lucide-react';
 import { CHART_COLORS } from '@/lib/mock-data';
 import { useStoreData } from '@/lib/store';
 import { generateInsights, type Severity } from '@/lib/insights';
@@ -88,11 +88,12 @@ function buildCards(stats: Stats) {
 }
 
 export default function DashboardPage() {
-  const { stats, categoryData, hourData, productData, paymentData, dailyData, meta, isDemo, lowStockProducts, isDemoProducts, productsMeta } = useStoreData();
+  const { stats, categoryData, hourData, productData, paymentData, dailyData, meta, isDemo, lowStockProducts, isDemoProducts, productsMeta, loaded } = useStoreData();
   const cards = buildCards(stats);
 
   return (
     <DashboardShell>
+      {!loaded ? <PageLoading /> : (<>
       <PageHeader title="Dashboard" description={`QuickStop #4127 · ${isDemo ? 'Demo data' : meta.fileName} · ${meta.rowCount.toLocaleString()} transactions`}>
         <div className="flex items-center gap-2 rounded-lg border border-border bg-card px-3 py-2 text-sm">
           <span className="relative flex h-2 w-2">
@@ -342,6 +343,7 @@ export default function DashboardPage() {
 
       {/* AI Insights */}
       <AIInsightsCard />
+      </>)}
     </DashboardShell>
   );
 }

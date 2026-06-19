@@ -1,9 +1,0 @@
-{
-  "/page": "app/page.js",
-  "/dashboard/page": "app/dashboard/page.js",
-  "/transactions/page": "app/transactions/page.js",
-  "/upload/page": "app/upload/page.js",
-  "/pricebook/page": "app/pricebook/page.js",
-  "/cashier-audit/page": "app/cashier-audit/page.js",
-  "/reports/page": "app/reports/page.js"
-}

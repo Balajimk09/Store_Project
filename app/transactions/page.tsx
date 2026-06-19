@@ -1,7 +1,7 @@
 'use client';
 
 import { useMemo, useState } from 'react';
-import { DashboardShell, PageHeader } from '@/components/layout/sidebar';
+import { DashboardShell, PageHeader, PageLoading } from '@/components/layout/sidebar';
 import { Card } from '@/components/ui/card';
 import { transactions as mockTransactions, type TransactionType, type PaymentType } from '@/lib/mock-data';
 import { useStoreData } from '@/lib/store';
@@ -23,7 +23,7 @@ const txTypes: TransactionType[] = ['Sale', 'Refund', 'Void', 'No-Sale'];
 const PAGE_SIZE = 14;
 
 export default function TransactionsPage() {
-  const { transactions, meta, isDemo } = useStoreData();
+  const { transactions, meta, isDemo, loaded } = useStoreData();
   const [query, setQuery] = useState('');
   const [typeFilter, setTypeFilter] = useState<TransactionType | 'All'>('All');
   const [paymentFilter, setPaymentFilter] = useState<PaymentType | 'All'>('All');
@@ -72,6 +72,7 @@ export default function TransactionsPage() {
 
   return (
     <DashboardShell>
+      {!loaded ? <PageLoading /> : (<>
       <PageHeader title="Live Transactions" description={`${transactions.length} transactions · ${isDemo ? 'demo data' : meta.fileName}`}>
         <Button variant="outline" size="sm" onClick={handleExport}>
           <Download className="mr-2 h-4 w-4" /> Export CSV
@@ -195,6 +196,7 @@ export default function TransactionsPage() {
           </div>
         </div>
       </Card>
+      </>)}
     </DashboardShell>
   );
 }

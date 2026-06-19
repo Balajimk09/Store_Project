@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useMemo, useState } from 'react';
-import { DashboardShell, PageHeader } from '@/components/layout/sidebar';
+import { DashboardShell, PageHeader, PageLoading } from '@/components/layout/sidebar';
 import { Card } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -9,11 +9,11 @@ import { useStoreData } from '@/lib/store';
 import type { Product } from '@/lib/mock-data';
 import { computeMargin } from '@/lib/csv';
 import { formatCurrency, exportToCsv } from '@/lib/format';
-import { Search, Download, Pencil, Check, X, Package, AlertTriangle, AlertCircle } from 'lucide-react';
+import { Search, Download, Pencil, Check, X, Package, TriangleAlert as AlertTriangle, CircleAlert as AlertCircle } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
 export default function PricebookPage() {
-  const { products: storeProducts, updateProductPrice, isDemoProducts, productsMeta, cloudError } = useStoreData();
+  const { products: storeProducts, updateProductPrice, isDemoProducts, productsMeta, cloudError, loaded } = useStoreData();
   const [items, setItems] = useState<Product[]>(storeProducts);
 
   // Sync local items when the store (localStorage) changes: imports, resets, edits from other tabs
@@ -93,6 +93,7 @@ export default function PricebookPage() {
 
   return (
     <DashboardShell>
+      {!loaded ? <PageLoading /> : (<>
       <PageHeader title="Pricebook" description={`${items.length} products · ${lowStockCount} below reorder level · ${isDemoProducts ? 'demo data' : productsMeta.fileName}`}>
         <Button variant="outline" size="sm" onClick={handleExport}>
           <Download className="mr-2 h-4 w-4" /> Export
@@ -250,6 +251,7 @@ export default function PricebookPage() {
           </table>
         </div>
       </Card>
+      </>)}
     </DashboardShell>
   );
 }

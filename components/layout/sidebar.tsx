@@ -1,7 +1,7 @@
 'use client';
 
 import Link from 'next/link';
-import { usePathname } from 'next/navigation';
+import { usePathname, useRouter } from 'next/navigation';
 import { useState } from 'react';
 import {
   LayoutDashboard,
@@ -15,9 +15,12 @@ import {
   Zap,
   Store,
   Upload,
+  LogOut,
+  Loader2,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
+import { useAuth } from '@/lib/auth';
 
 const navItems = [
   { href: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
@@ -28,6 +31,53 @@ const navItems = [
   { href: '/ai-assistant', label: 'AI Assistant', icon: Sparkles },
   { href: '/reports', label: 'Reports', icon: FileBarChart },
 ];
+
+function StoreCard({ onNavigate }: { onNavigate?: () => void }) {
+  const { user, store, signOut } = useAuth();
+  const router = useRouter();
+  const [signingOut, setSigningOut] = useState(false);
+
+  const handleLogout = async () => {
+    setSigningOut(true);
+    await signOut();
+    router.push('/login');
+  };
+
+  const storeName = store?.store_name ?? (user ? 'My Store' : 'QuickStop #4127');
+  const storeMode = user ? (store ? 'Cloud Mode' : 'Setup required') : 'Demo Mode';
+
+  return (
+    <div className="border-t border-sidebar-accent p-4 space-y-2">
+      <Link
+        href={user ? '/setup' : '/dashboard'}
+        onClick={onNavigate}
+        className="flex items-center gap-3 rounded-lg bg-sidebar-accent p-3 hover:bg-sidebar-accent/80 transition-colors"
+      >
+        <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-primary/15 text-primary">
+          <Store className="h-4 w-4" />
+        </div>
+        <div className="min-w-0">
+          <p className="truncate text-sm font-medium text-white">{storeName}</p>
+          <p className="truncate text-xs text-sidebar-foreground/60">{storeMode}</p>
+        </div>
+      </Link>
+      {user && (
+        <button
+          onClick={handleLogout}
+          disabled={signingOut}
+          className="flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-sm text-sidebar-foreground/60 hover:bg-sidebar-accent hover:text-white transition-colors disabled:opacity-50"
+        >
+          {signingOut ? (
+            <Loader2 className="h-4 w-4 shrink-0 animate-spin" />
+          ) : (
+            <LogOut className="h-4 w-4 shrink-0" />
+          )}
+          {signingOut ? 'Signing out…' : 'Log out'}
+        </button>
+      )}
+    </div>
+  );
+}
 
 export function Sidebar() {
   const pathname = usePathname();
@@ -58,7 +108,7 @@ export function Sidebar() {
       {mobileOpen && (
         <div className="fixed inset-0 z-50 lg:hidden">
           <div className="absolute inset-0 bg-black/60 animate-fade-in" onClick={() => setMobileOpen(false)} />
-          <aside className="absolute left-0 top-0 h-full w-72 bg-sidebar p-4 animate-slide-up">
+          <aside className="absolute left-0 top-0 h-full w-72 bg-sidebar p-4 animate-slide-up flex flex-col">
             <div className="flex items-center justify-between">
               <Link href="/dashboard" className="flex items-center gap-2 text-white" onClick={() => setMobileOpen(false)}>
                 <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-primary">
@@ -70,11 +120,12 @@ export function Sidebar() {
                 <X className="h-5 w-5" />
               </Button>
             </div>
-            <nav className="mt-8 space-y-1">
+            <nav className="mt-8 flex-1 space-y-1">
               {navItems.map((item) => (
                 <NavLink key={item.href} item={item} active={pathname === item.href} onClick={() => setMobileOpen(false)} />
               ))}
             </nav>
+            <StoreCard onNavigate={() => setMobileOpen(false)} />
           </aside>
         </div>
       )}
@@ -96,17 +147,7 @@ export function Sidebar() {
           ))}
         </nav>
 
-        <div className="border-t border-sidebar-accent p-4">
-          <div className="flex items-center gap-3 rounded-lg bg-sidebar-accent p-3">
-            <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-primary/15 text-primary">
-              <Store className="h-4 w-4" />
-            </div>
-            <div className="min-w-0">
-              <p className="truncate text-sm font-medium text-white">QuickStop #4127</p>
-              <p className="truncate text-xs text-sidebar-foreground/60">Demo Store</p>
-            </div>
-          </div>
-        </div>
+        <StoreCard />
       </aside>
     </>
   );
@@ -145,6 +186,23 @@ export function DashboardShell({ children }: { children: React.ReactNode }) {
       <Sidebar />
       <div className="lg:pl-64">
         <main className="mx-auto max-w-[1400px] px-4 py-6 sm:px-6 lg:px-8 lg:py-8">{children}</main>
+      </div>
+    </div>
+  );
+}
+
+export function PageLoading() {
+  return (
+    <div className="space-y-4 animate-pulse">
+      <div className="h-8 w-48 rounded-lg bg-muted" />
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+        {[...Array(4)].map((_, i) => (
+          <div key={i} className="h-28 rounded-xl bg-muted" />
+        ))}
+      </div>
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+        <div className="h-64 rounded-xl bg-muted" />
+        <div className="h-64 rounded-xl bg-muted" />
       </div>
     </div>
   );

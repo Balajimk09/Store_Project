@@ -9,11 +9,11 @@ import { useStoreData } from '@/lib/store';
 import type { Product } from '@/lib/mock-data';
 import { computeMargin } from '@/lib/csv';
 import { formatCurrency, exportToCsv } from '@/lib/format';
-import { Search, Download, Pencil, Check, X, Package, AlertTriangle } from 'lucide-react';
+import { Search, Download, Pencil, Check, X, Package, AlertTriangle, AlertCircle } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
 export default function PricebookPage() {
-  const { products: storeProducts, updateProductPrice, isDemoProducts, productsMeta } = useStoreData();
+  const { products: storeProducts, updateProductPrice, isDemoProducts, productsMeta, cloudError } = useStoreData();
   const [items, setItems] = useState<Product[]>(storeProducts);
 
   // Sync local items when the store (localStorage) changes: imports, resets, edits from other tabs
@@ -98,6 +98,13 @@ export default function PricebookPage() {
           <Download className="mr-2 h-4 w-4" /> Export
         </Button>
       </PageHeader>
+
+      {cloudError && (
+        <div className="mb-5 flex items-start gap-3 rounded-lg border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive">
+          <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+          <span>{cloudError}</span>
+        </div>
+      )}
 
       {/* Filters */}
       <Card className="mb-5 p-4">

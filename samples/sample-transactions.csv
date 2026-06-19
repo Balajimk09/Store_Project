@@ -1,0 +1,6 @@
+Date,UPC,Product,Quantity,Unit Price,Total,Payment Method,Cashier
+2026-06-18,012345678901,Coca Cola 20oz,2,2.49,4.98,Cash,John
+2026-06-18,012345678902,Pepsi 20oz,1,2.39,2.39,Card,Sarah
+2026-06-18,012345678903,Lays Classic Chips,3,1.99,5.97,Cash,John
+2026-06-18,012345678904,Marlboro Red,1,10.99,10.99,Card,Mike
+2026-06-18,012345678905,Red Bull 8.4oz,2,3.49,6.98,Card,Sarah

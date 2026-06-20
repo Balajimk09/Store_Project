@@ -72,17 +72,43 @@ export default function SetupPage() {
       has_fuel: hasFuel,
       register_count: regCount,
     };
-    let query;
-    if (store) {
-     query = supabase.from('stores').update(payload).eq('id', store.id);
-    } else {
-      query = supabase.from('stores').insert({
-        ...payload,
-        owner_id: user.id,
-      });
-    }
-    const { error: dbError } = await query;
+    const { data: sessionData, error: sessionError } = await supabase.auth.getSession();
 
+if (sessionError || !sessionData.session?.user?.id) {
+  setError('No active Supabase session found. Please log out, sign in again, and retry setup.');
+  setSaving(false);
+  return;
+}
+
+const ownerId = sessionData.session.user.id;
+
+console.log('SETUP DEBUG ownerId:', ownerId);
+
+let query;
+
+if (store) {
+  query = supabase
+    .from('stores')
+    .update(payload)
+    .eq('id', store.id)
+    .select('id, owner_id, store_name')
+    .single();
+} else {
+  query = supabase
+    .from('stores')
+    .insert({
+      ...payload,
+      owner_id: ownerId,
+    })
+    .select('id, owner_id, store_name')
+    .single();
+}
+
+const { data: savedStore, error: dbError } = await query;
+
+console.log('SETUP DEBUG savedStore:', savedStore);
+console.log('SETUP DEBUG dbError:', dbError);
+    
     if (dbError) {
       setError(dbError.message || 'Failed to save your store. Please try again.');
       setSaving(false);

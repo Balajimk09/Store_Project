@@ -72,7 +72,7 @@ export default function SetupPage() {
       has_fuel: hasFuel,
       register_count: regCount,
     };
-
+    let query;
     if (store) {
      query = supabase.from('stores').update(payload).eq('id', store.id);
     } else {

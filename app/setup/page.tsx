@@ -66,12 +66,12 @@ export default function SetupPage() {
 
     setSaving(true);
     const payload = {
-      store_name: storeName.trim(),
-      store_address: storeAddress.trim() || null,
-      pos_type: posType,
-      has_fuel: hasFuel,
-      register_count: regCount,
-    };
+  store_name: storeName.trim(),
+  store_address: storeAddress.trim() || null,
+  pos_type: posType,
+  has_fuel: hasFuel,
+  register_count: regCount,
+};
 
     let query;
     if (store) {

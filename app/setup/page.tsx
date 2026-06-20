@@ -66,20 +66,21 @@ export default function SetupPage() {
 
     setSaving(true);
     const payload = {
-  store_name: storeName.trim(),
-  store_address: storeAddress.trim() || null,
-  pos_type: posType,
-  has_fuel: hasFuel,
-  register_count: regCount,
-};
+      store_name: storeName.trim(),
+      store_address: storeAddress.trim() || null,
+      pos_type: posType,
+      has_fuel: hasFuel,
+      register_count: regCount,
+    };
 
-    let query;
     if (store) {
-      query = supabase.from('stores').update(payload).eq('id', store.id);
+     query = supabase.from('stores').update(payload).eq('id', store.id);
     } else {
-      query = supabase.from('stores').insert(payload);
+      query = supabase.from('stores').insert({
+        ...payload,
+        owner_id: user.id,
+      });
     }
-
     const { error: dbError } = await query;
 
     if (dbError) {

@@ -11,6 +11,13 @@ export interface Product {
   reorderLevel: number;
   brand?: string;
   vendor?: string;
+  department?: string;
+  sku?: string;
+  taxRate?: number;
+  taxCategory?: string;
+  taxable?: boolean;
+  isActive?: boolean;
+  notes?: string;
 }
 
 export interface Transaction {
@@ -26,6 +33,10 @@ export interface Transaction {
   amount: number;
   type: TransactionType;
   date: string;
+  upc?: string;
+  quantity?: number;
+  unitPrice?: number;
+  discountAmount?: number;
 }
 
 export interface Cashier {

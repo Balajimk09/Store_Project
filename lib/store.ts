@@ -28,6 +28,7 @@ const PRODUCTS_META_KEY = 'storepulse_products_meta_v1';
 
 function mapDbTransaction(row: TransactionRow): Transaction {
   const ts = new Date(row.transaction_time);
+
   return {
     id: row.transaction_id,
     timestamp: row.transaction_time,
@@ -41,20 +42,33 @@ function mapDbTransaction(row: TransactionRow): Transaction {
     paymentType: (row.payment_type ?? 'Cash') as PaymentType,
     amount: row.total_amount,
     type: (row.transaction_type ?? 'Sale') as TransactionType,
+    upc: row.upc ?? undefined,
+    quantity: row.quantity ?? 1,
+    unitPrice: row.unit_price ?? row.total_amount,
+    discountAmount: row.discount_amount ?? 0,
   };
 }
 
 function mapDbProduct(row: ProductRow): Product {
+  const category = row.category ?? row.department ?? 'Uncategorized';
+
   return {
     upc: row.upc,
     name: row.item_name ?? '',
-    category: row.category ?? 'Uncategorized',
+    category,
+    department: row.department ?? category,
+    sku: row.sku ?? undefined,
     brand: row.brand ?? 'Unknown',
     costPrice: row.cost_price,
     sellPrice: row.selling_price,
     stock: row.stock,
     reorderLevel: row.reorder_level,
     vendor: row.vendor ?? undefined,
+    taxRate: row.tax_rate ?? 0,
+    taxCategory: row.tax_category ?? 'standard',
+    taxable: row.taxable ?? true,
+    isActive: row.is_active ?? true,
+    notes: row.notes ?? undefined,
   };
 }
 
@@ -92,6 +106,11 @@ export interface StoreData {
   cloudError: string | null;
 }
 
+export interface SaveResult {
+  mode: 'cloud' | 'demo';
+  error?: string;
+}
+
 const DEMO_META: UploadMeta = {
   source: 'demo',
   fileName: 'Built-in demo data',
@@ -117,6 +136,76 @@ function aggregations(txns: Transaction[]) {
     paymentData: paymentTypeSplit(txns),
     dailyData: dailySales(txns),
   };
+}
+
+function normalizeProduct(product: Product): Product {
+  const category = (product.category || product.department || 'Uncategorized').trim();
+  const department = (product.department || product.category || category).trim();
+
+  return {
+    ...product,
+    upc: product.upc.trim(),
+    name: product.name.trim(),
+    category,
+    department,
+    brand: product.brand?.trim() || 'Unknown',
+    costPrice: Number(product.costPrice) || 0,
+    sellPrice: Number(product.sellPrice) || 0,
+    stock: Number(product.stock) || 0,
+    reorderLevel: Number(product.reorderLevel) || 10,
+    vendor: product.vendor?.trim() || undefined,
+    sku: product.sku?.trim() || undefined,
+    taxRate: Number(product.taxRate) || 0,
+    taxCategory: product.taxCategory?.trim() || 'standard',
+    taxable: product.taxable ?? true,
+    isActive: product.isActive ?? true,
+    notes: product.notes?.trim() || undefined,
+  };
+}
+
+function productToDbFields(product: Product) {
+  const p = normalizeProduct(product);
+
+  return {
+    item_name: p.name,
+    category: p.category,
+    department: p.department ?? p.category,
+    sku: p.sku ?? null,
+    brand: p.brand ?? 'Unknown',
+    cost_price: p.costPrice,
+    selling_price: p.sellPrice,
+    stock: p.stock,
+    reorder_level: p.reorderLevel,
+    vendor: p.vendor ?? null,
+    tax_rate: p.taxRate ?? 0,
+    tax_category: p.taxCategory ?? 'standard',
+    taxable: p.taxable ?? true,
+    is_active: p.isActive ?? true,
+    notes: p.notes ?? null,
+    updated_at: new Date().toISOString(),
+  };
+}
+
+function productToDbInsert(product: Product, storeId: string, batchId: string | null = null) {
+  const p = normalizeProduct(product);
+
+  return {
+    store_id: storeId,
+    batch_id: batchId,
+    upc: p.upc,
+    ...productToDbFields(p),
+  };
+}
+
+function upsertProductList(products: Product[], product: Product): Product[] {
+  const nextProduct = normalizeProduct(product);
+  const exists = products.some((p) => p.upc === nextProduct.upc);
+
+  if (exists) {
+    return products.map((p) => (p.upc === nextProduct.upc ? nextProduct : p));
+  }
+
+  return [nextProduct, ...products];
 }
 
 function computeLowStock(products: Product[]): Product[] {
@@ -145,17 +234,17 @@ export function useStoreData(): StoreData & {
   refresh: () => void;
   resetProductsToDemo: () => void;
   updateProductPrice: (upc: string, costPrice: number, sellPrice: number) => void;
+  updateProduct: (product: Product) => Promise<SaveResult>;
+  createProduct: (product: Product) => Promise<SaveResult>;
 } {
   const { user, store: authStore, loading: authLoading } = useAuth();
   const [data, setData] = useState<StoreData>(() => ({ ...buildDemo(), loaded: false }));
   const [refreshCounter, setRefreshCounter] = useState(0);
 
   useEffect(() => {
-    // Wait for auth to resolve before deciding which mode to use
     if (authLoading) return;
 
     if (user && authStore) {
-      // Cloud Mode: fetch from Supabase
       const storeId = authStore.id;
 
       Promise.all([
@@ -172,7 +261,12 @@ export function useStoreData(): StoreData & {
       ]).then(([txnResult, prodResult]) => {
         if (txnResult.error || prodResult.error) {
           const errMsg = txnResult.error?.message ?? prodResult.error?.message ?? 'Unknown error';
-          setData((prev) => ({ ...prev, loaded: true, cloudError: errMsg, dataMode: 'cloud' }));
+          setData((prev) => ({
+            ...prev,
+            loaded: true,
+            cloudError: errMsg,
+            dataMode: 'cloud',
+          }));
           return;
         }
 
@@ -185,6 +279,7 @@ export function useStoreData(): StoreData & {
           importedAt: new Date().toISOString(),
           rowCount: txns.length,
         };
+
         const cloudProductsMeta: ProductMeta = {
           source: 'upload',
           fileName: authStore.store_name,
@@ -205,16 +300,18 @@ export function useStoreData(): StoreData & {
           cloudError: null,
         });
       });
+
       return;
     }
 
-    // Demo / logged-out Mode: read from localStorage, falling back to mock data
     let txns = mockTransactions;
     let meta = DEMO_META;
     let isDemo = true;
+
     try {
       const raw = localStorage.getItem(STORAGE_KEY);
       const metaRaw = localStorage.getItem(STORAGE_META_KEY);
+
       if (raw) {
         txns = JSON.parse(raw) as Transaction[];
         meta = metaRaw ? JSON.parse(metaRaw) : DEMO_META;
@@ -227,9 +324,11 @@ export function useStoreData(): StoreData & {
     let products = mockProducts;
     let productsMeta = DEMO_PRODUCTS_META;
     let isDemoProducts = true;
+
     try {
       const praw = localStorage.getItem(PRODUCTS_KEY);
       const pmetaRaw = localStorage.getItem(PRODUCTS_META_KEY);
+
       if (praw) {
         products = JSON.parse(praw) as Product[];
         productsMeta = pmetaRaw ? JSON.parse(pmetaRaw) : DEMO_PRODUCTS_META;
@@ -253,11 +352,12 @@ export function useStoreData(): StoreData & {
     });
   }, [user, authStore, authLoading, refreshCounter]);
 
-  // Cross-tab + same-tab sync for price edits and uploads (demo mode only)
   useEffect(() => {
     const handler = () => setRefreshCounter((c) => c + 1);
+
     window.addEventListener('storepulse:data-updated', handler);
     window.addEventListener('storage', handler);
+
     return () => {
       window.removeEventListener('storepulse:data-updated', handler);
       window.removeEventListener('storage', handler);
@@ -271,6 +371,7 @@ export function useStoreData(): StoreData & {
     } catch {
       // ignore
     }
+
     setRefreshCounter((c) => c + 1);
     window.dispatchEvent(new Event('storepulse:data-updated'));
   }, []);
@@ -282,6 +383,7 @@ export function useStoreData(): StoreData & {
     } catch {
       // ignore
     }
+
     setRefreshCounter((c) => c + 1);
     window.dispatchEvent(new Event('storepulse:data-updated'));
   }, []);
@@ -290,90 +392,195 @@ export function useStoreData(): StoreData & {
     setRefreshCounter((c) => c + 1);
   }, []);
 
-  const updateProductPrice = useCallback((upc: string, costPrice: number, sellPrice: number) => {
-    if (user && authStore && data.dataMode === 'cloud') {
-      // Capture original prices before optimistic update for potential rollback
-      const original = data.products.find((p) => p.upc === upc);
-      const origCost = original?.costPrice ?? costPrice;
-      const origSell = original?.sellPrice ?? sellPrice;
+  const updateProduct = useCallback(
+    async (product: Product): Promise<SaveResult> => {
+      const nextProduct = normalizeProduct(product);
 
-      // Optimistic local update
+      if (!nextProduct.upc) {
+        return { mode: data.dataMode, error: 'UPC is required.' };
+      }
+
+      if (!nextProduct.name) {
+        return { mode: data.dataMode, error: 'Product name is required.' };
+      }
+
+      const previousProducts = data.products;
+
       setData((prev) => {
-        const next = prev.products.map((p) =>
-          p.upc === upc ? { ...p, costPrice, sellPrice } : p
-        );
-        return { ...prev, products: next, lowStockProducts: computeLowStock(next), cloudError: null };
+        const next = upsertProductList(prev.products, nextProduct);
+
+        try {
+          localStorage.setItem(PRODUCTS_KEY, JSON.stringify(next));
+          localStorage.setItem(
+            PRODUCTS_META_KEY,
+            JSON.stringify({
+              source: prev.isDemoProducts ? 'demo-edited' : 'upload-edited',
+              fileName: prev.productsMeta.fileName,
+              importedAt: prev.productsMeta.importedAt || new Date().toISOString(),
+              rowCount: next.length,
+            } as ProductMeta)
+          );
+        } catch {
+          // ignore local cache errors
+        }
+
+        return {
+          ...prev,
+          products: next,
+          productsMeta: {
+            ...prev.productsMeta,
+            rowCount: next.length,
+          },
+          lowStockProducts: computeLowStock(next),
+          cloudError: null,
+        };
       });
 
-      supabase
-        .from('products')
-        .update({
-          cost_price: costPrice,
-          selling_price: sellPrice,
-          updated_at: new Date().toISOString(),
-        })
-        .eq('store_id', authStore.id)
-        .eq('upc', upc)
-        .then(({ error }) => {
-          if (error) {
-            // Roll back to original prices and surface the error
-            setData((prev) => {
-              const rolled = prev.products.map((p) =>
-                p.upc === upc ? { ...p, costPrice: origCost, sellPrice: origSell } : p
-              );
-              return { ...prev, products: rolled, lowStockProducts: computeLowStock(rolled), cloudError: `Price update failed: ${error.message}` };
-            });
-          }
-        });
-      return;
-    }
+      if (user && authStore && data.dataMode === 'cloud') {
+        const { error } = await supabase
+          .from('products')
+          .update(productToDbFields(nextProduct))
+          .eq('store_id', authStore.id)
+          .eq('upc', nextProduct.upc);
 
-    // Demo / localStorage Mode
-    setData((prev) => {
-      const next = prev.products.map((p) =>
-        p.upc === upc ? { ...p, costPrice, sellPrice } : p
-      );
-      try {
-        localStorage.setItem(PRODUCTS_KEY, JSON.stringify(next));
-        const pmeta: ProductMeta = {
-          source: prev.isDemoProducts ? 'demo-edited' : 'upload-edited',
-          fileName: prev.productsMeta.fileName,
-          importedAt: prev.productsMeta.importedAt || new Date().toISOString(),
-          rowCount: next.length,
-        } as ProductMeta;
-        localStorage.setItem(PRODUCTS_META_KEY, JSON.stringify(pmeta));
-      } catch {
-        // ignore
+        if (error) {
+          setData((prev) => ({
+            ...prev,
+            products: previousProducts,
+            lowStockProducts: computeLowStock(previousProducts),
+            cloudError: `Product update failed: ${error.message}`,
+          }));
+
+          return { mode: 'cloud', error: error.message };
+        }
+
+        window.dispatchEvent(new Event('storepulse:data-updated'));
+        return { mode: 'cloud' };
       }
-      return { ...prev, products: next, lowStockProducts: computeLowStock(next) };
-    });
-    window.dispatchEvent(new Event('storepulse:data-updated'));
-  }, [user, authStore, data.dataMode, data.products]);
 
-  return { ...data, resetToDemo, refresh, resetProductsToDemo, updateProductPrice };
-}
+      window.dispatchEvent(new Event('storepulse:data-updated'));
+      return { mode: 'demo' };
+    },
+    [user, authStore, data.dataMode, data.products]
+  );
 
-export interface SaveResult {
-  mode: 'cloud' | 'demo';
-  error?: string;
+  const createProduct = useCallback(
+    async (product: Product): Promise<SaveResult> => {
+      const nextProduct = normalizeProduct(product);
+
+      if (!nextProduct.upc) {
+        return { mode: data.dataMode, error: 'UPC is required.' };
+      }
+
+      if (!nextProduct.name) {
+        return { mode: data.dataMode, error: 'Product name is required.' };
+      }
+
+      const previousProducts = data.products;
+
+      setData((prev) => {
+        const next = upsertProductList(prev.products, nextProduct);
+
+        try {
+          localStorage.setItem(PRODUCTS_KEY, JSON.stringify(next));
+          localStorage.setItem(
+            PRODUCTS_META_KEY,
+            JSON.stringify({
+              source: prev.isDemoProducts ? 'demo-edited' : 'upload-edited',
+              fileName: prev.productsMeta.fileName,
+              importedAt: prev.productsMeta.importedAt || new Date().toISOString(),
+              rowCount: next.length,
+            } as ProductMeta)
+          );
+        } catch {
+          // ignore local cache errors
+        }
+
+        return {
+          ...prev,
+          products: next,
+          productsMeta: {
+            ...prev.productsMeta,
+            rowCount: next.length,
+          },
+          lowStockProducts: computeLowStock(next),
+          cloudError: null,
+        };
+      });
+
+      if (user && authStore && data.dataMode === 'cloud') {
+        const { error } = await supabase
+          .from('products')
+          .upsert(productToDbInsert(nextProduct, authStore.id), { onConflict: 'store_id,upc' });
+
+        if (error) {
+          setData((prev) => ({
+            ...prev,
+            products: previousProducts,
+            lowStockProducts: computeLowStock(previousProducts),
+            cloudError: `Product create failed: ${error.message}`,
+          }));
+
+          return { mode: 'cloud', error: error.message };
+        }
+
+        window.dispatchEvent(new Event('storepulse:data-updated'));
+        return { mode: 'cloud' };
+      }
+
+      window.dispatchEvent(new Event('storepulse:data-updated'));
+      return { mode: 'demo' };
+    },
+    [user, authStore, data.dataMode, data.products]
+  );
+
+  const updateProductPrice = useCallback(
+    (upc: string, costPrice: number, sellPrice: number) => {
+      const product = data.products.find((p) => p.upc === upc);
+
+      if (!product) return;
+
+      void updateProduct({
+        ...product,
+        costPrice,
+        sellPrice,
+      });
+    },
+    [data.products, updateProduct]
+  );
+
+  return {
+    ...data,
+    resetToDemo,
+    refresh,
+    resetProductsToDemo,
+    updateProductPrice,
+    updateProduct,
+    createProduct,
+  };
 }
 
 export async function saveUploadedTransactions(txns: Transaction[], fileName: string): Promise<SaveResult> {
-  // Check auth first — outside try/catch so network errors don't mask auth state
   let userId: string | null = null;
+
   try {
-    const { data: { user } } = await supabase.auth.getUser();
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+
     userId = user?.id ?? null;
-  } catch { /* network error — treat as logged out */ }
+  } catch {
+    // network error — treat as logged out
+  }
 
   if (userId) {
-    // Authenticated path — errors are returned, not swallowed
     const { data: storeRow, error: storeErr } = await supabase
       .from('stores')
       .select('id')
       .eq('owner_id', userId)
       .limit(1)
       .maybeSingle();
+
     if (storeErr) return { mode: 'cloud', error: `Could not load store: ${storeErr.message}` };
     if (!storeRow) return { mode: 'cloud', error: 'No store found. Please complete store setup first.' };
 
@@ -391,6 +598,7 @@ export async function saveUploadedTransactions(txns: Transaction[], fileName: st
       })
       .select('id')
       .single();
+
     if (batchErr) return { mode: 'cloud', error: `Could not create upload record: ${batchErr.message}` };
 
     const rows = txns.map((t) => ({
@@ -405,41 +613,62 @@ export async function saveUploadedTransactions(txns: Transaction[], fileName: st
       payment_type: t.paymentType ?? null,
       total_amount: t.amount,
       transaction_type: t.type,
-      upc: null,
-      quantity: 1,
-      unit_price: t.amount,
-      discount_amount: 0,
+      upc: t.upc ?? null,
+      quantity: t.quantity ?? 1,
+      unit_price: t.unitPrice ?? t.amount,
+      discount_amount: t.discountAmount ?? 0,
     }));
 
-    const { error: insertErr } = await supabase
-  .from('transactions')
-  .upsert(rows, { onConflict: 'store_id,transaction_id' });
+    const { error: upsertErr } = await supabase
+      .from('transactions')
+      .upsert(rows, { onConflict: 'store_id,transaction_id' });
 
-if (insertErr) return { mode: 'cloud', error: `Transaction upsert failed: ${insertErr.message}` };
-    // Update local cache so dashboard reflects the import without a hard refresh
-    const meta: UploadMeta = { source: 'upload', fileName, importedAt: new Date().toISOString(), rowCount: txns.length };
+    if (upsertErr) return { mode: 'cloud', error: `Transaction upsert failed: ${upsertErr.message}` };
+
+    const meta: UploadMeta = {
+      source: 'upload',
+      fileName,
+      importedAt: new Date().toISOString(),
+      rowCount: txns.length,
+    };
+
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(txns));
       localStorage.setItem(STORAGE_META_KEY, JSON.stringify(meta));
-    } catch { /* ignore */ }
+    } catch {
+      // ignore
+    }
+
     window.dispatchEvent(new Event('storepulse:data-updated'));
     return { mode: 'cloud' };
   }
 
-  // Logged-out / no-auth Demo Mode fallback
-  const meta: UploadMeta = { source: 'upload', fileName, importedAt: new Date().toISOString(), rowCount: txns.length };
+  const meta: UploadMeta = {
+    source: 'upload',
+    fileName,
+    importedAt: new Date().toISOString(),
+    rowCount: txns.length,
+  };
+
   localStorage.setItem(STORAGE_KEY, JSON.stringify(txns));
   localStorage.setItem(STORAGE_META_KEY, JSON.stringify(meta));
   window.dispatchEvent(new Event('storepulse:data-updated'));
+
   return { mode: 'demo' };
 }
 
 export async function saveUploadedProducts(products: Product[], fileName: string): Promise<SaveResult> {
   let userId: string | null = null;
+
   try {
-    const { data: { user } } = await supabase.auth.getUser();
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+
     userId = user?.id ?? null;
-  } catch { /* network error — treat as logged out */ }
+  } catch {
+    // network error — treat as logged out
+  }
 
   if (userId) {
     const { data: storeRow, error: storeErr } = await supabase
@@ -448,6 +677,7 @@ export async function saveUploadedProducts(products: Product[], fileName: string
       .eq('owner_id', userId)
       .limit(1)
       .maybeSingle();
+
     if (storeErr) return { mode: 'cloud', error: `Could not load store: ${storeErr.message}` };
     if (!storeRow) return { mode: 'cloud', error: 'No store found. Please complete store setup first.' };
 
@@ -465,63 +695,74 @@ export async function saveUploadedProducts(products: Product[], fileName: string
       })
       .select('id')
       .single();
+
     if (batchErr) return { mode: 'cloud', error: `Could not create upload record: ${batchErr.message}` };
 
-    const rows = products.map((p) => ({
-      store_id: storeId,
-      batch_id: batch.id,
-      upc: p.upc,
-      item_name: p.name ?? null,
-      category: p.category ?? null,
-      brand: p.brand ?? 'Unknown',
-      cost_price: p.costPrice,
-      selling_price: p.sellPrice,
-      stock: p.stock ?? 0,
-      reorder_level: p.reorderLevel ?? 10,
-      vendor: p.vendor ?? null,
-    }));
+    const rows = products.map((p) => productToDbInsert(p, storeId, batch.id));
 
     const { error: upsertErr } = await supabase
       .from('products')
       .upsert(rows, { onConflict: 'store_id,upc' });
+
     if (upsertErr) return { mode: 'cloud', error: `Product upsert failed: ${upsertErr.message}` };
 
-    const meta: ProductMeta = { source: 'upload', fileName, importedAt: new Date().toISOString(), rowCount: products.length };
+    const meta: ProductMeta = {
+      source: 'upload',
+      fileName,
+      importedAt: new Date().toISOString(),
+      rowCount: products.length,
+    };
+
     try {
       localStorage.setItem(PRODUCTS_KEY, JSON.stringify(products));
       localStorage.setItem(PRODUCTS_META_KEY, JSON.stringify(meta));
-    } catch { /* ignore */ }
+    } catch {
+      // ignore
+    }
+
     window.dispatchEvent(new Event('storepulse:data-updated'));
     return { mode: 'cloud' };
   }
 
-  // Logged-out / no-auth Demo Mode fallback
-  const meta: ProductMeta = { source: 'upload', fileName, importedAt: new Date().toISOString(), rowCount: products.length };
+  const meta: ProductMeta = {
+    source: 'upload',
+    fileName,
+    importedAt: new Date().toISOString(),
+    rowCount: products.length,
+  };
+
   localStorage.setItem(PRODUCTS_KEY, JSON.stringify(products));
   localStorage.setItem(PRODUCTS_META_KEY, JSON.stringify(meta));
   window.dispatchEvent(new Event('storepulse:data-updated'));
+
   return { mode: 'demo' };
 }
 
 export function getActiveTransactions(): Transaction[] {
   if (typeof window === 'undefined') return mockTransactions;
+
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
+
     if (raw) return JSON.parse(raw) as Transaction[];
   } catch {
     // ignore
   }
+
   return mockTransactions;
 }
 
 export function getActiveProducts(): Product[] {
   if (typeof window === 'undefined') return mockProducts;
+
   try {
     const raw = localStorage.getItem(PRODUCTS_KEY);
+
     if (raw) return JSON.parse(raw) as Product[];
   } catch {
     // ignore
   }
+
   return mockProducts;
 }
 

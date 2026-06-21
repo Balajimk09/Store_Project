@@ -31,6 +31,7 @@ export interface StoreRow {
   register_count: number;
   created_at: string;
 }
+
 export interface UploadBatchRow {
   id: string;
   store_id: string;
@@ -69,12 +70,54 @@ export interface ProductRow {
   upc: string;
   item_name: string | null;
   category: string | null;
+  department: string | null;
+  sku: string | null;
   brand: string | null;
   cost_price: number;
   selling_price: number;
   stock: number;
   reorder_level: number;
   vendor: string | null;
+  tax_rate: number;
+  tax_category: string | null;
+  taxable: boolean;
+  is_active: boolean;
+  notes: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface StoreSettingsRow {
+  id: string;
+  store_id: string;
+  default_tax_rate: number;
+  default_tax_category: string;
+  default_reorder_level: number;
+  currency_code: string;
+  price_rounding: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface StoreDepartmentRow {
+  id: string;
+  store_id: string;
+  name: string;
+  description: string | null;
+  default_tax_rate: number;
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface TaxCategoryRow {
+  id: string;
+  store_id: string;
+  name: string;
+  rate: number;
+  description: string | null;
+  is_default: boolean;
+  is_active: boolean;
   created_at: string;
   updated_at: string;
 }

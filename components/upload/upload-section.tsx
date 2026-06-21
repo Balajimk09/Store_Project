@@ -1,42 +1,29 @@
 'use client';
 
-import { useCallback, useRef, useState } from 'react';
-import { useStoreData } from '@/lib/store';
-import {
-  parseTransactionsCsv,
-  downloadSampleCsv,
-  REQUIRED_COLUMNS,
-  type ParseResult,
-} from '@/lib/csv';
-import { formatCurrency, formatDateTime } from '@/lib/format';
+import { useCallback, type DragEvent, type ElementType, type RefObject } from 'react';
 import { useRouter } from 'next/navigation';
-import { Card } from '@/components/ui/card';
-import { Button } from '@/components/ui/button';
 import {
-  UploadCloud,
-  FileSpreadsheet,
-  CheckCircle2,
   AlertTriangle,
-  XCircle,
-  Download,
-  RefreshCw,
   ArrowRight,
+  CheckCircle2,
+  Download,
+  FileSpreadsheet,
   FileUp,
-  Database,
-  Receipt,
-  BookOpen,
+  UploadCloud,
+  XCircle,
 } from 'lucide-react';
+import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
+import { Card } from '@/components/ui/card';
 import { cn } from '@/lib/utils';
 
 interface Props {
   title: string;
   description: string;
-  icon: React.ElementType;
+  icon: ElementType;
   accept: string;
-  isDemo: boolean;
-  meta: { fileName: string; importedAt: string; rowCount: number };
   onDrop: (file: File) => void;
-  inputRef: React.RefObject<HTMLInputElement>;
+  inputRef: RefObject<HTMLInputElement>;
   dragging: boolean;
   setDragging: (v: boolean) => void;
   fileName: string | null;
@@ -49,13 +36,20 @@ interface Props {
   previewRows: { id: string; cells: { label: string; value: string }[] }[];
   previewColumns: string[];
   onImport: () => void;
-  onReset: () => void;
   imported: boolean;
   importedCount: number;
-  formatHelper: { columns: readonly string[]; rules: { label: string; value: string }[]; sampleFn: () => void; sampleLabel: string };
+  formatHelper: {
+    requiredColumns: readonly string[];
+    optionalColumns?: readonly string[];
+    rules: { label: string; value: string }[];
+    sampleFn: () => void;
+    sampleLabel: string;
+  };
   importLabel: string;
   successRedirect: string;
   redirectLabel: string;
+  emptyStateTitle: string;
+  emptyStateDescription: string;
 }
 
 export function UploadSection({
@@ -63,8 +57,6 @@ export function UploadSection({
   description,
   icon: Icon,
   accept,
-  isDemo,
-  meta,
   onDrop: onFile,
   inputRef,
   dragging,
@@ -79,219 +71,408 @@ export function UploadSection({
   previewRows,
   previewColumns,
   onImport,
-  onReset,
   imported,
   importedCount,
   formatHelper,
   importLabel,
   successRedirect,
   redirectLabel,
+  emptyStateTitle,
+  emptyStateDescription,
 }: Props) {
   const router = useRouter();
+
   const handleDrop = useCallback(
-    (e: React.DragEvent) => {
+    (e: DragEvent<HTMLDivElement>) => {
       e.preventDefault();
       setDragging(false);
+
       const file = e.dataTransfer.files?.[0];
-      if (file) onFile(file);
+
+      if (file) {
+        onFile(file);
+      }
     },
     [onFile, setDragging]
   );
 
+  const hasReviewedFile = parseOk !== null;
+  const showEmptyState = parseOk === false && missingColumns.length === 0 && totalRows > 0;
+
   return (
-    <div className="grid gap-6 lg:grid-cols-3">
-      <div className="lg:col-span-2 space-y-4">
-        {/* Current source banner */}
-        <Card className="p-4">
-          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-            <div className="flex items-center gap-3">
-              <div
-                className={cn(
-                  'flex h-10 w-10 items-center justify-center rounded-lg',
-                  isDemo ? 'bg-secondary text-muted-foreground' : 'bg-success/10 text-success'
+    <Card className="overflow-hidden">
+      <div className="border-b border-border bg-muted/30 p-5 lg:p-6">
+        <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
+          <div className="flex gap-4">
+            <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-primary/10 text-primary">
+              <Icon className="h-6 w-6" />
+            </div>
+
+            <div>
+              <div className="flex flex-wrap items-center gap-2">
+                <h2 className="text-lg font-semibold text-foreground">{title}</h2>
+
+                {parseOk === true && (
+                  <Badge variant="secondary">
+                    {validRows.toLocaleString()} valid rows
+                  </Badge>
                 )}
-              >
-                {isDemo ? <Database className="h-5 w-5" /> : <CheckCircle2 className="h-5 w-5" />}
-              </div>
-              <div>
-                <p className="text-sm font-semibold text-foreground">
-                  {isDemo ? 'Using built-in demo data' : 'Using uploaded data'}
-                </p>
-                <p className="text-xs text-muted-foreground">
-                  {meta.rowCount.toLocaleString()} records {isDemo ? 'from realistic demo patterns.' : `from ${meta.fileName}${meta.importedAt ? ` · ${formatDateTime(meta.importedAt)}` : ''}`}
-                </p>
-              </div>
-            </div>
-            {!isDemo && (
-              <Button variant="outline" size="sm" onClick={onReset}>
-                <RefreshCw className="mr-2 h-4 w-4" /> Reset to Demo Data
-              </Button>
-            )}
-          </div>
-        </Card>
 
-        <Card
-          className={cn(
-            'relative flex flex-col items-center justify-center border-2 border-dashed p-10 text-center transition-colors',
-            dragging ? 'border-primary bg-primary/5' : 'border-border'
-          )}
-          onDragOver={(e) => {
-            e.preventDefault();
-            setDragging(true);
-          }}
-          onDragLeave={() => setDragging(false)}
-          onDrop={handleDrop}
-        >
-          <input ref={inputRef} type="file" accept={accept} className="hidden" onChange={(e) => { const f = e.target.files?.[0]; if (f) onFile(f); }} />
-          <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-primary/10 text-primary">
-            <Icon className="h-7 w-7" />
+                {parseOk === false && (
+                  <Badge variant="destructive">
+                    Needs fixes
+                  </Badge>
+                )}
+              </div>
+
+              <p className="mt-1 max-w-3xl text-sm leading-6 text-muted-foreground">
+                {description}
+              </p>
+            </div>
           </div>
-          <h3 className="mt-4 text-base font-semibold text-foreground">{fileName ? fileName : `Drop your ${title} here`}</h3>
-          <p className="mt-1 max-w-sm text-sm text-muted-foreground">{description}</p>
-          <Button variant="outline" className="mt-5" onClick={() => inputRef.current?.click()}>
-            <FileUp className="mr-2 h-4 w-4" /> Select CSV file
+
+          <Button variant="outline" onClick={formatHelper.sampleFn}>
+            <Download className="mr-2 h-4 w-4" />
+            {formatHelper.sampleLabel}
           </Button>
-        </Card>
+        </div>
+      </div>
 
-        {error && (
-          <Card className="border-destructive/30 bg-destructive/5 p-4">
-            <div className="flex items-center gap-2 text-sm text-destructive">
-              <XCircle className="h-4 w-4" />
-              <span className="font-medium">{error}</span>
-            </div>
-          </Card>
-        )}
-
-        {missingColumns.length > 0 && parseOk === false && (
-          <Card className="border-destructive/30 bg-destructive/5 p-4">
-            <div className="flex items-start gap-2">
-              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-destructive" />
-              <div className="text-sm">
-                <p className="font-medium text-destructive">Required columns are missing</p>
-                <p className="mt-1 text-muted-foreground">
-                  Your CSV is missing: <span className="font-mono text-foreground">{missingColumns.join(', ')}</span>
-                </p>
-                <p className="mt-2 text-muted-foreground">
-                  Download the sample file below to see the correct format, add the missing columns, then re-upload.
-                </p>
+      <div className="grid gap-0 lg:grid-cols-[minmax(0,1fr)_360px]">
+        <div className="space-y-5 p-5 lg:p-6">
+          <div className="grid gap-3 sm:grid-cols-3">
+            {[
+              ['1', 'Download sample'],
+              ['2', 'Upload CSV'],
+              ['3', 'Review and import'],
+            ].map(([step, label]) => (
+              <div
+                key={step}
+                className="flex items-center gap-3 rounded-xl border border-border bg-background p-3"
+              >
+                <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-primary/10 text-xs font-bold text-primary">
+                  {step}
+                </span>
+                <span className="text-sm font-medium text-foreground">{label}</span>
               </div>
-            </div>
-          </Card>
-        )}
-
-        {parseOk && (
-          <div className="grid grid-cols-3 gap-3">
-            <Card className="p-4 text-center">
-              <p className="text-2xl font-bold text-foreground">{totalRows}</p>
-              <p className="text-xs text-muted-foreground">Rows parsed</p>
-            </Card>
-            <Card className="p-4 text-center">
-              <p className="text-2xl font-bold text-success">{validRows}</p>
-              <p className="text-xs text-muted-foreground">Valid rows</p>
-            </Card>
-            <Card className="p-4 text-center">
-              <p className={cn('text-2xl font-bold', invalidRows > 0 ? 'text-chart-3' : 'text-foreground')}>{invalidRows}</p>
-              <p className="text-xs text-muted-foreground">Invalid rows</p>
-            </Card>
+            ))}
           </div>
-        )}
 
-        {previewRows.length > 0 && (
-          <Card className="overflow-hidden">
-            <div className="flex items-center justify-between border-b border-border px-5 py-3">
-              <div className="flex items-center gap-2">
-                <FileSpreadsheet className="h-4 w-4 text-primary" />
-                <h3 className="text-sm font-semibold text-foreground">Preview · first {previewRows.length} valid rows</h3>
-              </div>
-            </div>
-            <div className="overflow-x-auto scrollbar-thin">
-              <table className="w-full min-w-[680px] text-sm">
-                <thead>
-                  <tr className="border-b border-border bg-secondary/40">
-                    {previewColumns.map((h) => (
-                      <th key={h} className="px-4 py-2.5 text-left text-xs font-semibold uppercase tracking-wide text-muted-foreground">{h}</th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {previewRows.map((r) => (
-                    <tr key={r.id} className="border-b border-border/60 hover:bg-secondary/30">
-                      {r.cells.map((c, i) => (
-                        <td key={i} className={cn('px-4 py-2.5', i === 0 ? 'font-mono text-xs text-muted-foreground' : i === r.cells.length - 1 ? 'font-semibold tabular-nums text-foreground' : 'text-muted-foreground')}>
-                          {c.value}
-                        </td>
-                      ))}
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </Card>
-        )}
+          <div
+            className={cn(
+              'relative flex min-h-[230px] flex-col items-center justify-center rounded-2xl border-2 border-dashed p-8 text-center transition-colors',
+              dragging
+                ? 'border-primary bg-primary/5'
+                : 'border-border bg-background hover:bg-muted/30'
+            )}
+            onDragOver={(e) => {
+              e.preventDefault();
+              setDragging(true);
+            }}
+            onDragLeave={() => setDragging(false)}
+            onDrop={handleDrop}
+          >
+            <input
+              ref={inputRef}
+              type="file"
+              accept={accept}
+              className="hidden"
+              onChange={(e) => {
+                const file = e.target.files?.[0];
 
-        {parseOk && validRows > 0 && (
-          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-            <p className="text-sm text-muted-foreground">
-              Ready to import <strong className="text-foreground">{validRows.toLocaleString()}</strong> records. This will replace the currently active data.
-            </p>
-            <Button onClick={onImport} disabled={imported}>
-              {imported ? (
-                <><CheckCircle2 className="mr-2 h-4 w-4" /> Imported</>
+                if (file) {
+                  onFile(file);
+                }
+              }}
+            />
+
+            <div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-primary/10 text-primary">
+              {fileName ? (
+                <FileSpreadsheet className="h-8 w-8" />
               ) : (
-                <><FileUp className="mr-2 h-4 w-4" /> {importLabel}</>
+                <UploadCloud className="h-8 w-8" />
               )}
+            </div>
+
+            <h3 className="mt-4 text-base font-semibold text-foreground">
+              {fileName ? fileName : `Drop your ${title.toLowerCase()} CSV here`}
+            </h3>
+
+            <p className="mt-2 max-w-md text-sm leading-6 text-muted-foreground">
+              Select the correct CSV type for this section. The file is parsed in your browser
+              first, then only valid rows are saved when you click import.
+            </p>
+
+            <Button
+              variant="outline"
+              className="mt-5"
+              onClick={() => inputRef.current?.click()}
+            >
+              <FileUp className="mr-2 h-4 w-4" />
+              Select CSV file
             </Button>
           </div>
-        )}
 
-        {imported && (
-          <Card className="border-success/30 bg-success/5 p-4">
-            <div className="flex items-start gap-2">
-              <CheckCircle2 className="mt-0.5 h-5 w-5 shrink-0 text-success" />
-              <div className="text-sm">
-                <p className="font-semibold text-foreground">Import successful</p>
-                <p className="mt-1 text-muted-foreground">
-                  {importedCount.toLocaleString()} records were saved and are now live across your store.
-                </p>
-                <div className="mt-3 flex gap-2">
-                  <Button size="sm" onClick={() => router.push(successRedirect)}>
-                    {redirectLabel} <ArrowRight className="ml-2 h-3.5 w-3.5" />
-                  </Button>
-                  <Button size="sm" variant="outline" onClick={() => router.push('/pricebook')}>View Pricebook</Button>
+          {error && (
+            <Card className="border-destructive/30 bg-destructive/5 p-4">
+              <div className="flex items-center gap-2 text-sm text-destructive">
+                <XCircle className="h-4 w-4" />
+                <span className="font-medium">{error}</span>
+              </div>
+            </Card>
+          )}
+
+          {missingColumns.length > 0 && parseOk === false && (
+            <Card className="border-destructive/30 bg-destructive/5 p-4">
+              <div className="flex items-start gap-3">
+                <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-destructive" />
+
+                <div className="text-sm">
+                  <p className="font-semibold text-destructive">
+                    This looks like the wrong CSV format
+                  </p>
+
+                  <p className="mt-1 text-muted-foreground">
+                    Missing required columns:{' '}
+                    <span className="font-mono text-foreground">
+                      {missingColumns.join(', ')}
+                    </span>
+                  </p>
+
+                  <p className="mt-2 text-muted-foreground">
+                    Download the sample file for this section, compare the header row, then
+                    upload again.
+                  </p>
                 </div>
               </div>
-            </div>
-          </Card>
-        )}
-      </div>
+            </Card>
+          )}
 
-      {/* Format helper */}
-      <div className="lg:col-span-1">
-        <Card className="p-5">
-          <h3 className="text-sm font-semibold text-foreground">Expected CSV format</h3>
-          <p className="mt-1 text-xs text-muted-foreground">Header row (case-insensitive):</p>
-          <div className="mt-3 space-y-1.5">
-            {formatHelper.columns.map((c) => (
-              <div key={c} className="flex items-center gap-2 rounded-md bg-secondary/50 px-2.5 py-1.5">
-                <span className="font-mono text-xs text-foreground">{c}</span>
+          {showEmptyState && (
+            <Card className="border-amber-500/30 bg-amber-500/5 p-4">
+              <div className="flex items-start gap-3">
+                <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-amber-600" />
+
+                <div className="text-sm">
+                  <p className="font-semibold text-foreground">{emptyStateTitle}</p>
+                  <p className="mt-1 text-muted-foreground">{emptyStateDescription}</p>
+                </div>
               </div>
-            ))}
+            </Card>
+          )}
+
+          {hasReviewedFile && (
+            <div className="grid grid-cols-3 gap-3">
+              <Card className="p-4 text-center">
+                <p className="text-2xl font-bold text-foreground">
+                  {totalRows.toLocaleString()}
+                </p>
+                <p className="text-xs text-muted-foreground">Rows parsed</p>
+              </Card>
+
+              <Card className="p-4 text-center">
+                <p className="text-2xl font-bold text-success">
+                  {validRows.toLocaleString()}
+                </p>
+                <p className="text-xs text-muted-foreground">Valid rows</p>
+              </Card>
+
+              <Card className="p-4 text-center">
+                <p
+                  className={cn(
+                    'text-2xl font-bold',
+                    invalidRows > 0 ? 'text-amber-600' : 'text-foreground'
+                  )}
+                >
+                  {invalidRows.toLocaleString()}
+                </p>
+                <p className="text-xs text-muted-foreground">Invalid rows</p>
+              </Card>
+            </div>
+          )}
+
+          {previewRows.length > 0 && (
+            <Card className="overflow-hidden">
+              <div className="flex flex-col gap-2 border-b border-border px-5 py-4 sm:flex-row sm:items-center sm:justify-between">
+                <div className="flex items-center gap-2">
+                  <FileSpreadsheet className="h-4 w-4 text-primary" />
+                  <h3 className="text-sm font-semibold text-foreground">
+                    Preview first {previewRows.length} valid rows
+                  </h3>
+                </div>
+
+                <Badge variant="outline">Review before import</Badge>
+              </div>
+
+              <div className="overflow-x-auto scrollbar-thin">
+                <table className="w-full min-w-[760px] text-sm">
+                  <thead>
+                    <tr className="border-b border-border bg-secondary/40">
+                      {previewColumns.map((header) => (
+                        <th
+                          key={header}
+                          className="px-4 py-2.5 text-left text-xs font-semibold uppercase tracking-wide text-muted-foreground"
+                        >
+                          {header}
+                        </th>
+                      ))}
+                    </tr>
+                  </thead>
+
+                  <tbody>
+                    {previewRows.map((row, rowIndex) => (
+                      <tr
+                        key={`${row.id}-${rowIndex}`}
+                        className="border-b border-border/60 hover:bg-secondary/30"
+                      >
+                        {row.cells.map((cell, cellIndex) => (
+                          <td
+                            key={`${cell.label}-${cellIndex}`}
+                            className={cn(
+                              'px-4 py-2.5',
+                              cellIndex === 0
+                                ? 'font-mono text-xs text-muted-foreground'
+                                : cellIndex === row.cells.length - 1
+                                  ? 'font-semibold tabular-nums text-foreground'
+                                  : 'text-muted-foreground'
+                            )}
+                          >
+                            {cell.value}
+                          </td>
+                        ))}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </Card>
+          )}
+
+          {parseOk && validRows > 0 && (
+            <Card className="border-primary/20 bg-primary/5 p-4">
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                <div>
+                  <p className="text-sm font-semibold text-foreground">
+                    Ready to save to cloud
+                  </p>
+
+                  <p className="mt-1 text-sm text-muted-foreground">
+                    {validRows.toLocaleString()} clean rows will be saved for this store.
+                    Invalid rows are ignored.
+                  </p>
+                </div>
+
+                <Button onClick={onImport} disabled={imported}>
+                  {imported ? (
+                    <>
+                      <CheckCircle2 className="mr-2 h-4 w-4" />
+                      Imported
+                    </>
+                  ) : (
+                    <>
+                      <FileUp className="mr-2 h-4 w-4" />
+                      {importLabel}
+                    </>
+                  )}
+                </Button>
+              </div>
+            </Card>
+          )}
+
+          {imported && (
+            <Card className="border-success/30 bg-success/5 p-4">
+              <div className="flex items-start gap-3">
+                <CheckCircle2 className="mt-0.5 h-5 w-5 shrink-0 text-success" />
+
+                <div className="text-sm">
+                  <p className="font-semibold text-foreground">Import successful</p>
+
+                  <p className="mt-1 text-muted-foreground">
+                    {importedCount.toLocaleString()} records were saved and are now live
+                    across your store.
+                  </p>
+
+                  <div className="mt-3">
+                    <Button size="sm" onClick={() => router.push(successRedirect)}>
+                      {redirectLabel}
+                      <ArrowRight className="ml-2 h-3.5 w-3.5" />
+                    </Button>
+                  </div>
+                </div>
+              </div>
+            </Card>
+          )}
+        </div>
+
+        <aside className="border-t border-border bg-muted/20 p-5 lg:border-l lg:border-t-0 lg:p-6">
+          <div className="sticky top-6 space-y-5">
+            <Card className="p-5">
+              <h3 className="text-sm font-semibold text-foreground">
+                Required CSV columns
+              </h3>
+
+              <p className="mt-1 text-xs text-muted-foreground">
+                The header row is case-insensitive.
+              </p>
+
+              <div className="mt-3 flex flex-wrap gap-2">
+                {formatHelper.requiredColumns.map((column) => (
+                  <span
+                    key={column}
+                    className="rounded-md bg-secondary px-2.5 py-1.5 font-mono text-xs text-foreground"
+                  >
+                    {column}
+                  </span>
+                ))}
+              </div>
+            </Card>
+
+            {formatHelper.optionalColumns && formatHelper.optionalColumns.length > 0 && (
+              <Card className="p-5">
+                <h3 className="text-sm font-semibold text-foreground">
+                  Optional columns
+                </h3>
+
+                <div className="mt-3 flex flex-wrap gap-2">
+                  {formatHelper.optionalColumns.map((column) => (
+                    <span
+                      key={column}
+                      className="rounded-md border border-border bg-background px-2.5 py-1.5 font-mono text-xs text-muted-foreground"
+                    >
+                      {column}
+                    </span>
+                  ))}
+                </div>
+              </Card>
+            )}
+
+            <Card className="p-5">
+              <h3 className="text-sm font-semibold text-foreground">
+                Validation rules
+              </h3>
+
+              <ul className="mt-3 space-y-3 text-xs leading-5 text-muted-foreground">
+                {formatHelper.rules.map((rule) => (
+                  <li key={rule.label}>
+                    <span className="font-medium text-foreground">{rule.label}:</span>{' '}
+                    {rule.value}
+                  </li>
+                ))}
+              </ul>
+
+              <Button
+                variant="outline"
+                size="sm"
+                className="mt-4 w-full"
+                onClick={formatHelper.sampleFn}
+              >
+                <Download className="mr-2 h-4 w-4" />
+                {formatHelper.sampleLabel}
+              </Button>
+            </Card>
           </div>
-          <Button variant="outline" size="sm" className="mt-4 w-full" onClick={formatHelper.sampleFn}>
-            <Download className="mr-2 h-4 w-4" /> {formatHelper.sampleLabel}
-          </Button>
-        </Card>
-        <Card className="mt-4 p-5">
-          <h3 className="text-sm font-semibold text-foreground">Field rules</h3>
-          <ul className="mt-3 space-y-2 text-xs text-muted-foreground">
-            {formatHelper.rules.map((r) => (
-              <li key={r.label}>
-                <span className="font-medium text-foreground">{r.label}:</span> {r.value}
-              </li>
-            ))}
-          </ul>
-        </Card>
+        </aside>
       </div>
-    </div>
+    </Card>
   );
 }

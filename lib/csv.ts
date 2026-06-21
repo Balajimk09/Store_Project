@@ -113,6 +113,27 @@ function toNumber(value: string | undefined, fallback = 0): number {
   return Number.isFinite(n) ? n : fallback;
 }
 
+function normalizeUpc(value: string | undefined): string {
+  if (!value) return '';
+
+  const raw = String(value).trim();
+
+  if (!raw) return '';
+
+  // Convert Excel scientific notation like 8.20001E+11 into full number text
+  if (/^\d+(\.\d+)?e\+\d+$/i.test(raw)) {
+    const expanded = Number(raw).toLocaleString('fullwide', {
+      useGrouping: false,
+      maximumFractionDigits: 0,
+    });
+
+    return expanded;
+  }
+
+  // Keep only digits for normal UPC values
+  return raw.replace(/[^\d]/g, '');
+}
+
 export function parseTransactionsCsv(text: string): ParseResult {
   const rows = parseCsvText(text);
   if (rows.length === 0) {
@@ -185,7 +206,7 @@ export function parseTransactionsCsv(text: string): ParseResult {
     const cashierNameBase = cashierId;
     const item = (raw['item_name'] || '').trim() || 'Unknown Item';
     const category = (raw['category'] || '').trim() || 'Unknown';
-    const upc = (raw['upc'] || '').trim() || '0000000000000';
+    const upc = normalizeUpc(raw['upc']) || '0000000000000';
     const txnId = (raw['transaction_id'] || '').trim() || `TX${String(i).padStart(6, '0')}`;
     const register = parseInt(raw['register_id'] || '1', 10) || 1;
 
@@ -315,7 +336,7 @@ export function parseProductsCsv(text: string): ProductParseResult {
       continue;
     }
 
-    const upc = (raw['upc'] || '').trim();
+    const upc = normalizeUpc(raw['upc']);
     const name = (raw['item_name'] || '').trim();
     if (!upc) errors.push('Missing UPC');
     if (!name) errors.push('Missing item_name');

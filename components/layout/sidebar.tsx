@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
-import { useState } from 'react';
+import { useState, type ElementType, type ReactNode } from 'react';
 import {
   LayoutDashboard,
   Receipt,
@@ -43,25 +43,32 @@ function StoreCard({ onNavigate }: { onNavigate?: () => void }) {
     router.push('/login');
   };
 
-  const storeName = store?.store_name ?? (user ? 'My Store' : 'QuickStop #4127');
-  const storeMode = user ? (store ? 'Cloud Mode' : 'Setup required') : 'Demo Mode';
+ const setupComplete =
+  !!store?.store_name?.trim() &&
+  !!store?.store_address?.trim() &&
+  !!store?.city?.trim() &&
+  !!store?.state?.trim() &&
+  !!store?.zip_code?.trim() &&
+  !!store?.phone_number?.trim() &&
+  !!store?.pos_type?.trim() &&
+  Number(store?.register_count) > 0;
 
-  return (
-    <div className="border-t border-sidebar-accent p-4 space-y-2">
-      <Link
-        href={user ? '/setup' : '/dashboard'}
-        onClick={onNavigate}
-        className="flex items-center gap-3 rounded-lg bg-sidebar-accent p-3 hover:bg-sidebar-accent/80 transition-colors"
-      >
-        <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-primary/15 text-primary">
-          <Store className="h-4 w-4" />
-        </div>
-        <div className="min-w-0">
-          <p className="truncate text-sm font-medium text-white">{storeName}</p>
-          <p className="truncate text-xs text-sidebar-foreground/60">{storeMode}</p>
-        </div>
-      </Link>
-      {user && (
+const storeName = setupComplete ? store!.store_name : 'Setup required';
+
+return (
+  <div className="border-t border-sidebar-accent p-4 space-y-2">
+    <Link
+      href="/setup"
+      onClick={onNavigate}
+      className="flex items-center gap-3 rounded-lg bg-sidebar-accent p-3 hover:bg-sidebar-accent/80 transition-colors"
+    >
+      <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-primary/15 text-primary">
+        <Store className="h-4 w-4" />
+      </div>
+      <div className="min-w-0">
+        <p className="truncate text-sm font-medium text-white">{storeName}</p>
+      </div>
+    </Link>     {user && (
         <button
           onClick={handleLogout}
           disabled={signingOut}
@@ -158,7 +165,7 @@ function NavLink({
   active,
   onClick,
 }: {
-  item: { href: string; label: string; icon: React.ElementType };
+  item: { href: string; label: string; icon: ElementType };
   active: boolean;
   onClick?: () => void;
 }) {
@@ -180,7 +187,7 @@ function NavLink({
   );
 }
 
-export function DashboardShell({ children }: { children: React.ReactNode }) {
+export function DashboardShell({ children }: { children: ReactNode })  {
   return (
     <div className="min-h-screen bg-background">
       <Sidebar />

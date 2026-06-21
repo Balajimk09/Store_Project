@@ -45,7 +45,7 @@ export default function TransactionsPage() {
       }
       return true;
     });
-  }, [query, typeFilter, paymentFilter]);
+  }, [transactions, query, typeFilter, paymentFilter]);
 
   const pageCount = Math.ceil(filtered.length / PAGE_SIZE);
   const pageData = filtered.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);

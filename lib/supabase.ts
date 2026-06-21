@@ -22,12 +22,15 @@ export interface StoreRow {
   owner_id: string;
   store_name: string;
   store_address: string | null;
+  city: string | null;
+  state: string | null;
+  zip_code: string | null;
+  phone_number: string | null;
   pos_type: string | null;
   has_fuel: boolean;
   register_count: number;
   created_at: string;
 }
-
 export interface UploadBatchRow {
   id: string;
   store_id: string;

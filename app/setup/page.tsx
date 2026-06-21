@@ -27,6 +27,10 @@ export default function SetupPage() {
 
   const [storeName, setStoreName] = useState('');
   const [storeAddress, setStoreAddress] = useState('');
+  const [city, setCity] = useState('');
+  const [state, setState] = useState('');
+  const [zipCode, setZipCode] = useState('');
+  const [phoneNumber, setPhoneNumber] = useState('');
   const [posType, setPosType] = useState('Verifone');
   const [hasFuel, setHasFuel] = useState(true);
   const [registerCount, setRegisterCount] = useState('4');
@@ -68,10 +72,14 @@ export default function SetupPage() {
     const payload = {
       store_name: storeName.trim(),
       store_address: storeAddress.trim() || null,
+      city: city.trim() || null,
+      state: state.trim() || null,
+      zip_code: zipCode.trim() || null,
+      phone_number: phoneNumber.trim() || null,
       pos_type: posType,
       has_fuel: hasFuel,
       register_count: regCount,
-    };
+      };
     const { data: sessionData, error: sessionError } = await supabase.auth.getSession();
 
 if (sessionError || !sessionData.session?.user?.id) {

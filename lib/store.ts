@@ -411,9 +411,11 @@ export async function saveUploadedTransactions(txns: Transaction[], fileName: st
       discount_amount: 0,
     }));
 
-    const { error: insertErr } = await supabase.from('transactions').insert(rows);
-    if (insertErr) return { mode: 'cloud', error: `Transaction insert failed: ${insertErr.message}` };
+    const { error: insertErr } = await supabase
+  .from('transactions')
+  .upsert(rows, { onConflict: 'store_id,transaction_id' });
 
+if (insertErr) return { mode: 'cloud', error: `Transaction upsert failed: ${insertErr.message}` };
     // Update local cache so dashboard reflects the import without a hard refresh
     const meta: UploadMeta = { source: 'upload', fileName, importedAt: new Date().toISOString(), rowCount: txns.length };
     try {

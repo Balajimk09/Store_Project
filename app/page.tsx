@@ -133,10 +133,10 @@ export default function LandingPage() {
           </nav>
           <div className="flex items-center gap-2">
             <Button variant="ghost" size="sm" asChild className="hidden sm:inline-flex">
-              <Link href="/dashboard">Sign in</Link>
+              <Link href="/login">Sign in</Link>
             </Button>
             <Button size="sm" asChild>
-              <Link href="/dashboard">View Dashboard</Link>
+            <Link href="/demo-request">Request Demo</Link>
             </Button>
           </div>
         </div>
@@ -168,13 +168,13 @@ export default function LandingPage() {
             </p>
             <div className="mt-8 flex flex-col items-center justify-center gap-3 sm:flex-row animate-slide-up">
               <Button size="lg" asChild className="h-12 px-8 text-base shadow-lg shadow-primary/25">
-                <Link href="/dashboard">
+                <Link href="/demo-request">
                   Request a demo <ArrowRight className="ml-2 h-4 w-4" />
                 </Link>
               </Button>
               <Button size="lg" variant="outline" asChild className="h-12 px-8 text-base">
-                <Link href="/dashboard">Explore the demo</Link>
-              </Button>
+                <a href="#how">See how it works</a>
+             </Button>
             </div>
             <p className="mt-4 text-sm text-muted-foreground">No credit card required · Set up in under 10 minutes</p>
           </div>

@@ -16,10 +16,9 @@ import {
 } from '@/lib/csv';
 import { formatCurrency, formatDateTime } from '@/lib/format';
 import { UploadSection } from '@/components/upload/upload-section';
-import { Badge } from '@/components/ui/badge';
-import { Card } from '@/components/ui/card';
+import { UploadHistory } from '@/components/upload/upload-history';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { BookOpen, FileSpreadsheet, Receipt, ShieldCheck } from 'lucide-react';
+import { BookOpen, Receipt, UploadCloud } from 'lucide-react';
 
 interface SectionState<R> {
   fileName: string | null;
@@ -39,12 +38,6 @@ const initialState = <R,>(): SectionState<R> => ({
   importedCount: 0,
 });
 
-function safeCurrency(value: string | undefined, fallback = '$0.00') {
-  if (!value) return fallback;
-  const parsed = Number(String(value).replace(/[$,\s]/g, ''));
-  return Number.isFinite(parsed) ? formatCurrency(parsed) : fallback;
-}
-
 export default function UploadPage() {
   const store = useStoreData();
 
@@ -55,92 +48,138 @@ export default function UploadPage() {
   const [p, setP] = useState<SectionState<ProductParseResult>>(initialState());
 
   const handleTxFile = useCallback((file: File) => {
-    setTx((s) => ({ ...s, error: null, imported: false, result: null, fileName: file.name }));
+    setTx((s) => ({
+      ...s,
+      error: null,
+      imported: false,
+      result: null,
+      fileName: file.name,
+    }));
+
     if (!file.name.toLowerCase().endsWith('.csv')) {
       setTx((s) => ({ ...s, error: 'Please upload a .csv file.' }));
       return;
     }
+
     const reader = new FileReader();
-    reader.onload = (e) => {
-      const text = String(e.target?.result || '');
+
+    reader.onload = (event) => {
+      const text = String(event.target?.result || '');
       setTx((s) => ({ ...s, result: parseTransactionsCsv(text) }));
     };
-    reader.onerror = () => setTx((s) => ({ ...s, error: 'Could not read the file. Please try again.' }));
+
+    reader.onerror = () => {
+      setTx((s) => ({ ...s, error: 'Could not read the file. Please try again.' }));
+    };
+
     reader.readAsText(file);
   }, []);
 
   const handleProductFile = useCallback((file: File) => {
-    setP((s) => ({ ...s, error: null, imported: false, result: null, fileName: file.name }));
+    setP((s) => ({
+      ...s,
+      error: null,
+      imported: false,
+      result: null,
+      fileName: file.name,
+    }));
+
     if (!file.name.toLowerCase().endsWith('.csv')) {
       setP((s) => ({ ...s, error: 'Please upload a .csv file.' }));
       return;
     }
+
     const reader = new FileReader();
-    reader.onload = (e) => {
-      const text = String(e.target?.result || '');
+
+    reader.onload = (event) => {
+      const text = String(event.target?.result || '');
       setP((s) => ({ ...s, result: parseProductsCsv(text) }));
     };
-    reader.onerror = () => setP((s) => ({ ...s, error: 'Could not read the file. Please try again.' }));
+
+    reader.onerror = () => {
+      setP((s) => ({ ...s, error: 'Could not read the file. Please try again.' }));
+    };
+
     reader.readAsText(file);
   }, []);
 
   const importTx = async () => {
     if (!tx.result || tx.result.transactions.length === 0) return;
+
     setTx((s) => ({ ...s, error: null }));
-    const result = await saveUploadedTransactions(tx.result.transactions, tx.fileName || 'transactions.csv');
+
+    const result = await saveUploadedTransactions(
+      tx.result.transactions,
+      tx.fileName || 'transactions.csv'
+    );
+
     if (result.error) {
-      setTx((s) => ({ ...s, error: `Cloud save failed: ${result.error}` }));
+      setTx((s) => ({ ...s, error: `Upload failed: ${result.error}` }));
       return;
     }
-    setTx((s) => ({ ...s, imported: true, importedCount: s.result!.transactions.length }));
+
+    setTx((s) => ({
+      ...s,
+      imported: true,
+      importedCount: s.result?.transactions.length || 0,
+    }));
+
     store.refresh();
+    window.dispatchEvent(new Event('storepulse:data-updated'));
   };
 
   const importProducts = async () => {
     if (!p.result || p.result.products.length === 0) return;
+
     setP((s) => ({ ...s, error: null }));
-    const result = await saveUploadedProducts(p.result.products, p.fileName || 'pricebook.csv');
+
+    const result = await saveUploadedProducts(
+      p.result.products,
+      p.fileName || 'pricebook.csv'
+    );
+
     if (result.error) {
-      setP((s) => ({ ...s, error: `Cloud save failed: ${result.error}` }));
+      setP((s) => ({ ...s, error: `Upload failed: ${result.error}` }));
       return;
     }
-    setP((s) => ({ ...s, imported: true, importedCount: s.result!.products.length }));
+
+    setP((s) => ({
+      ...s,
+      imported: true,
+      importedCount: s.result?.products.length || 0,
+    }));
+
     store.refresh();
+    window.dispatchEvent(new Event('storepulse:data-updated'));
   };
 
   const txPreviewRows =
     tx.result?.rows
-      .filter((r) => r.valid && r.transaction)
-      .slice(0, 20)
-      .map((r) => ({
-        id: r.transaction!.id,
+      .filter((row) => row.valid && row.transaction)
+      .slice(0, 10)
+      .map((row) => ({
+        id: row.transaction!.id,
         cells: [
-          { label: 'ID', value: r.transaction!.id },
-          { label: 'Time', value: formatDateTime(r.transaction!.timestamp) },
-          { label: 'UPC', value: r.raw.upc || 'Missing' },
-          { label: 'Item', value: r.transaction!.item },
-          { label: 'Qty', value: r.raw.quantity || '1' },
-          { label: 'Unit', value: safeCurrency(r.raw.unit_price, '—') },
-          { label: 'Discount', value: safeCurrency(r.raw.discount_amount) },
-          { label: 'Total', value: formatCurrency(r.transaction!.amount) },
+          { label: 'ID', value: row.transaction!.id },
+          { label: 'Time', value: formatDateTime(row.transaction!.timestamp) },
+          { label: 'Item', value: row.transaction!.item },
+          { label: 'Qty', value: row.raw.quantity || '1' },
+          { label: 'Total', value: formatCurrency(row.transaction!.amount) },
         ],
       })) || [];
 
   const pPreviewRows =
     p.result?.rows
-      .filter((r) => r.valid && r.product)
-      .slice(0, 20)
-      .map((r) => ({
-        id: r.product!.upc,
+      .filter((row) => row.valid && row.product)
+      .slice(0, 10)
+      .map((row) => ({
+        id: row.product!.upc,
         cells: [
-          { label: 'UPC', value: r.product!.upc },
-          { label: 'Item', value: r.product!.name },
-          { label: 'Category', value: r.product!.category },
-          { label: 'Brand', value: r.product!.brand || 'Unknown' },
-          { label: 'Cost', value: formatCurrency(r.product!.costPrice) },
-          { label: 'Sell', value: formatCurrency(r.product!.sellPrice) },
-          { label: 'Margin', value: `${r.margin ?? 0}%` },
-          { label: 'Stock', value: String(r.product!.stock) },
+          { label: 'UPC', value: row.product!.upc },
+          { label: 'Item', value: row.product!.name },
+          { label: 'Department', value: row.product!.department || row.product!.category },
+          { label: 'Sell', value: formatCurrency(row.product!.sellPrice) },
+          { label: 'Stock', value: String(row.product!.stock) },
         ],
       })) || [];
 
@@ -151,77 +190,47 @@ export default function UploadPage() {
     <DashboardShell>
       <PageHeader
         title="Upload POS Data"
-        description="Import transaction and pricebook CSV files for your store. Review the file first, then save clean rows to Supabase."
+        description="Upload transaction or pricebook CSV files."
       />
 
       <div className="space-y-6">
-        <Card className="overflow-hidden border-primary/20 bg-primary/5">
-          <div className="grid gap-5 p-5 lg:grid-cols-[1.15fr_0.85fr] lg:p-6">
-            <div className="flex gap-4">
-              <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-primary text-primary-foreground shadow-sm">
-                <FileSpreadsheet className="h-6 w-6" />
-              </div>
-              <div>
-                <div className="flex flex-wrap items-center gap-2">
-                  <h2 className="text-lg font-semibold text-foreground">Choose the correct CSV type before uploading</h2>
-                  <Badge variant="secondary">Cloud upload</Badge>
-                </div>
-                <p className="mt-2 max-w-3xl text-sm leading-6 text-muted-foreground">
-                  Transactions power sales analytics, cashier audit, dashboard metrics, and reports. Pricebook files power product catalog,
-                  margins, stock levels, and reorder insights. Keeping them separate prevents wrong-file imports.
-                </p>
-              </div>
-            </div>
-
-            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-1 xl:grid-cols-2">
-              <div className="rounded-xl border border-border bg-background/80 p-4">
-                <div className="flex items-center gap-2 text-sm font-semibold text-foreground">
-                  <Receipt className="h-4 w-4 text-primary" /> Transaction CSV
-                </div>
-                <p className="mt-1 text-xs leading-5 text-muted-foreground">Sales rows, register IDs, cashiers, payment type, quantity, UPC, and totals.</p>
-              </div>
-              <div className="rounded-xl border border-border bg-background/80 p-4">
-                <div className="flex items-center gap-2 text-sm font-semibold text-foreground">
-                  <BookOpen className="h-4 w-4 text-primary" /> Pricebook CSV
-                </div>
-                <p className="mt-1 text-xs leading-5 text-muted-foreground">Product UPCs, item names, brands, cost, selling price, stock, and vendor details.</p>
-              </div>
-            </div>
-          </div>
-        </Card>
-
-        <Tabs defaultValue="transactions" className="space-y-6">
+        <Tabs defaultValue="transactions" className="space-y-5">
           <TabsList className="grid h-auto w-full grid-cols-1 gap-2 bg-muted/60 p-1.5 sm:grid-cols-2">
             <TabsTrigger value="transactions" className="h-auto justify-start gap-3 px-4 py-3 text-left">
               <span className="flex h-9 w-9 items-center justify-center rounded-lg bg-background text-primary shadow-sm">
                 <Receipt className="h-4 w-4" />
               </span>
               <span>
-                <span className="block font-semibold">Transactions CSV</span>
-                <span className="block text-xs font-normal text-muted-foreground">Sales, cashiers, dashboard, reports</span>
+                <span className="block font-semibold">Transactions</span>
+                <span className="block text-xs font-normal text-muted-foreground">
+                  Sales history
+                </span>
               </span>
             </TabsTrigger>
+
             <TabsTrigger value="pricebook" className="h-auto justify-start gap-3 px-4 py-3 text-left">
               <span className="flex h-9 w-9 items-center justify-center rounded-lg bg-background text-primary shadow-sm">
                 <BookOpen className="h-4 w-4" />
               </span>
               <span>
-                <span className="block font-semibold">Pricebook CSV</span>
-                <span className="block text-xs font-normal text-muted-foreground">Products, margins, stock, vendors</span>
+                <span className="block font-semibold">Pricebook</span>
+                <span className="block text-xs font-normal text-muted-foreground">
+                  Product catalog
+                </span>
               </span>
             </TabsTrigger>
           </TabsList>
 
           <TabsContent value="transactions" className="mt-0">
             <UploadSection
-              title="Transaction Sales Data"
-              description="Upload only POS sales exports here. This file feeds the dashboard, live transactions, cashier audit, and reports."
-              icon={Receipt}
+              title="Upload Transactions"
+              description="Upload a transaction CSV file and review the rows before importing."
+              icon={UploadCloud}
               accept=".csv,text/csv"
               onDrop={handleTxFile}
               inputRef={txInputRef}
               dragging={tx.dragging}
-              setDragging={(v) => setTx((s) => ({ ...s, dragging: v }))}
+              setDragging={(value) => setTx((s) => ({ ...s, dragging: value }))}
               fileName={tx.fileName}
               error={tx.error}
               parseOk={txParseOk}
@@ -230,7 +239,7 @@ export default function UploadPage() {
               validRows={tx.result?.validRows || 0}
               invalidRows={tx.result?.invalidRows || 0}
               previewRows={txPreviewRows}
-              previewColumns={['Transaction ID', 'Time', 'UPC', 'Item', 'Qty', 'Unit Price', 'Discount', 'Total']}
+              previewColumns={['Transaction ID', 'Time', 'Item', 'Qty', 'Total']}
               onImport={importTx}
               imported={tx.imported}
               importedCount={tx.importedCount}
@@ -238,17 +247,13 @@ export default function UploadPage() {
               successRedirect="/dashboard"
               redirectLabel="Go to Dashboard"
               emptyStateTitle="No valid transactions found"
-              emptyStateDescription="Make sure you uploaded a transaction CSV, not a pricebook CSV. The transaction file must include sales, register, cashier, payment, quantity, UPC, and amount columns."
+              emptyStateDescription="The file was read, but no valid transaction rows were found."
               formatHelper={{
                 requiredColumns: REQUIRED_COLUMNS,
                 sampleFn: downloadSampleCsv,
                 sampleLabel: 'Download transaction sample',
                 rules: [
-                  { label: 'Used for', value: 'Dashboard, Live Transactions, Cashier Audit, and Reports' },
-                  { label: 'Numbers', value: 'quantity, unit_price, discount_amount, and total_amount must be numeric' },
-                  { label: 'Dates', value: 'transaction_time should be a valid ISO date or timestamp' },
-                  { label: 'transaction_type', value: 'SALE, REFUND, VOID, or NO_SALE' },
-                  { label: 'payment_type', value: 'CASH, CARD, CREDIT, DEBIT, EBT, MOBILE, NONE, or OTHER' },
+                  { label: 'Tip', value: 'Use the sample file if you are unsure about the format.' },
                 ],
               }}
             />
@@ -256,14 +261,14 @@ export default function UploadPage() {
 
           <TabsContent value="pricebook" className="mt-0">
             <UploadSection
-              title="Product Pricebook"
-              description="Upload only product catalog or pricebook exports here. This file feeds item lookup, margins, inventory, and low-stock views."
-              icon={BookOpen}
+              title="Upload Pricebook"
+              description="Upload a product catalog CSV file and review the rows before importing."
+              icon={UploadCloud}
               accept=".csv,text/csv"
               onDrop={handleProductFile}
               inputRef={pInputRef}
               dragging={p.dragging}
-              setDragging={(v) => setP((s) => ({ ...s, dragging: v }))}
+              setDragging={(value) => setP((s) => ({ ...s, dragging: value }))}
               fileName={p.fileName}
               error={p.error}
               parseOk={pParseOk}
@@ -272,7 +277,7 @@ export default function UploadPage() {
               validRows={p.result?.validRows || 0}
               invalidRows={p.result?.invalidRows || 0}
               previewRows={pPreviewRows}
-              previewColumns={['UPC', 'Item', 'Category', 'Brand', 'Cost', 'Sell', 'Margin', 'Stock']}
+              previewColumns={['UPC', 'Item', 'Department', 'Sell', 'Stock']}
               onImport={importProducts}
               imported={p.imported}
               importedCount={p.importedCount}
@@ -280,40 +285,21 @@ export default function UploadPage() {
               successRedirect="/pricebook"
               redirectLabel="View Pricebook"
               emptyStateTitle="No valid products found"
-              emptyStateDescription="Make sure you uploaded a pricebook CSV, not a transaction CSV. The pricebook file must include UPC, item, category, brand, cost, and selling price columns."
+              emptyStateDescription="The file was read, but no valid product rows were found."
               formatHelper={{
                 requiredColumns: PRODUCT_REQUIRED_COLUMNS,
                 optionalColumns: PRODUCT_OPTIONAL_COLUMNS,
                 sampleFn: downloadSampleProductsCsv,
                 sampleLabel: 'Download pricebook sample',
                 rules: [
-                  { label: 'Used for', value: 'Pricebook, margins, stock, low inventory, and future barcode lookup' },
-                  { label: 'Required', value: 'upc, item_name, category, brand, cost_price, and selling_price' },
-                  { label: 'Optional', value: 'stock defaults to 0, reorder_level defaults to 10, vendor can be blank' },
-                  { label: 'Numbers', value: 'cost_price, selling_price, stock, and reorder_level must be numeric' },
-                  { label: 'Duplicate UPCs', value: 'Existing products with the same UPC are updated for this store' },
+                  { label: 'Tip', value: 'Products can also be added one by one from Pricebook.' },
                 ],
               }}
             />
           </TabsContent>
         </Tabs>
 
-        <Card className="border-dashed p-5">
-          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-            <div className="flex gap-3">
-              <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-secondary text-muted-foreground">
-                <ShieldCheck className="h-5 w-5" />
-              </div>
-              <div>
-                <h3 className="text-sm font-semibold text-foreground">Coming next: upload history</h3>
-                <p className="mt-1 text-sm text-muted-foreground">
-                  The database already tracks upload batches. A history table can show file name, upload type, valid rows, invalid rows, and upload time.
-                </p>
-              </div>
-            </div>
-            <Badge variant="outline">upload_batches</Badge>
-          </div>
-        </Card>
+        <UploadHistory />
       </div>
     </DashboardShell>
   );

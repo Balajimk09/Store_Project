@@ -17,6 +17,8 @@ import {
   Upload,
   LogOut,
   Loader2,
+  Settings,
+  Fuel,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
@@ -27,6 +29,8 @@ const navItems = [
   { href: '/transactions', label: 'Live Transactions', icon: Receipt },
   { href: '/upload', label: 'Upload POS Data', icon: Upload },
   { href: '/pricebook', label: 'Pricebook', icon: BookOpen },
+  { href: '/fuel', label: 'Fuel', icon: Fuel },
+  { href: '/store-settings', label: 'Store Settings', icon: Settings },
   { href: '/cashier-audit', label: 'Cashier Audit', icon: ShieldAlert },
   { href: '/ai-assistant', label: 'AI Assistant', icon: Sparkles },
   { href: '/reports', label: 'Reports', icon: FileBarChart },
@@ -53,7 +57,7 @@ function StoreCard({ onNavigate }: { onNavigate?: () => void }) {
   !!store?.pos_type?.trim() &&
   Number(store?.register_count) > 0;
 
-const storeName = setupComplete ? store!.store_name : 'Setup required';
+const storeName = store?.store_name?.trim() || 'Setup required';
 
 return (
   <div className="border-t border-sidebar-accent p-4 space-y-2">

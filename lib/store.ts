@@ -16,8 +16,9 @@ import {
   type PaymentType,
   type TransactionType,
   type Product,
+  type CardNetwork,
+  type ExceptionReason,
 } from '@/lib/mock-data';
-import { computeMargin } from '@/lib/csv';
 import { supabase, type TransactionRow, type ProductRow } from '@/lib/supabase';
 import { useAuth } from '@/lib/auth';
 
@@ -27,12 +28,12 @@ const PRODUCTS_KEY = 'storepulse_products_v1';
 const PRODUCTS_META_KEY = 'storepulse_products_meta_v1';
 
 function mapDbTransaction(row: TransactionRow): Transaction {
-  const ts = new Date(row.transaction_time);
+  const timestamp = new Date(row.transaction_time);
 
   return {
     id: row.transaction_id,
     timestamp: row.transaction_time,
-    hour: ts.getHours(),
+    hour: timestamp.getHours(),
     date: row.transaction_time.split('T')[0],
     item: row.item_name ?? 'Unknown Item',
     category: row.category ?? 'Unknown',
@@ -46,6 +47,9 @@ function mapDbTransaction(row: TransactionRow): Transaction {
     quantity: row.quantity ?? 1,
     unitPrice: row.unit_price ?? row.total_amount,
     discountAmount: row.discount_amount ?? 0,
+    cardNetwork: (row.card_network ?? undefined) as CardNetwork | undefined,
+    exceptionReason: (row.exception_reason ?? undefined) as ExceptionReason | undefined,
+    fuelGrade: row.fuel_grade ?? undefined,
   };
 }
 
@@ -166,46 +170,46 @@ function normalizeProduct(product: Product): Product {
 }
 
 function productToDbFields(product: Product) {
-  const p = normalizeProduct(product);
+  const normalized = normalizeProduct(product);
 
   return {
-    item_name: p.name,
-    category: p.category,
-    department: p.department ?? p.category,
-    sku: p.sku ?? null,
-    brand: p.brand ?? 'Unknown',
-    cost_price: p.costPrice,
-    selling_price: p.sellPrice,
-    stock: p.stock,
-    reorder_level: p.reorderLevel,
-    vendor: p.vendor ?? null,
-    tax_rate: p.taxRate ?? 0,
-    tax_category: p.taxCategory ?? 'standard',
-    taxable: p.taxable ?? true,
-    ebt_eligible: p.ebtEligible ?? false,
-    is_active: p.isActive ?? true,
-    notes: p.notes ?? null,
+    item_name: normalized.name,
+    category: normalized.category,
+    department: normalized.department ?? normalized.category,
+    sku: normalized.sku ?? null,
+    brand: normalized.brand ?? 'Unknown',
+    cost_price: normalized.costPrice,
+    selling_price: normalized.sellPrice,
+    stock: normalized.stock,
+    reorder_level: normalized.reorderLevel,
+    vendor: normalized.vendor ?? null,
+    tax_rate: normalized.taxRate ?? 0,
+    tax_category: normalized.taxCategory ?? 'standard',
+    taxable: normalized.taxable ?? true,
+    ebt_eligible: normalized.ebtEligible ?? false,
+    is_active: normalized.isActive ?? true,
+    notes: normalized.notes ?? null,
     updated_at: new Date().toISOString(),
   };
 }
 
 function productToDbInsert(product: Product, storeId: string, batchId: string | null = null) {
-  const p = normalizeProduct(product);
+  const normalized = normalizeProduct(product);
 
   return {
     store_id: storeId,
     batch_id: batchId,
-    upc: p.upc,
-    ...productToDbFields(p),
+    upc: normalized.upc,
+    ...productToDbFields(normalized),
   };
 }
 
 function upsertProductList(products: Product[], product: Product): Product[] {
   const nextProduct = normalizeProduct(product);
-  const exists = products.some((p) => p.upc === nextProduct.upc);
+  const exists = products.some((current) => current.upc === nextProduct.upc);
 
   if (exists) {
-    return products.map((p) => (p.upc === nextProduct.upc ? nextProduct : p));
+    return products.map((current) => (current.upc === nextProduct.upc ? nextProduct : current));
   }
 
   return [nextProduct, ...products];
@@ -213,7 +217,7 @@ function upsertProductList(products: Product[], product: Product): Product[] {
 
 function computeLowStock(products: Product[]): Product[] {
   return products
-    .filter((p) => p.stock <= p.reorderLevel)
+    .filter((product) => product.stock <= product.reorderLevel)
     .sort((a, b) => a.stock / Math.max(a.reorderLevel, 1) - b.stock / Math.max(b.reorderLevel, 1));
 }
 
@@ -263,13 +267,15 @@ export function useStoreData(): StoreData & {
           .eq('store_id', storeId),
       ]).then(([txnResult, prodResult]) => {
         if (txnResult.error || prodResult.error) {
-          const errMsg = txnResult.error?.message ?? prodResult.error?.message ?? 'Unknown error';
-          setData((prev) => ({
-            ...prev,
+          const errorMessage = txnResult.error?.message ?? prodResult.error?.message ?? 'Unknown error';
+
+          setData((previous) => ({
+            ...previous,
             loaded: true,
-            cloudError: errMsg,
+            cloudError: errorMessage,
             dataMode: 'cloud',
           }));
+
           return;
         }
 
@@ -321,7 +327,7 @@ export function useStoreData(): StoreData & {
         isDemo = false;
       }
     } catch {
-      // fall through to demo
+      // keep demo data
     }
 
     let products = mockProducts;
@@ -329,16 +335,16 @@ export function useStoreData(): StoreData & {
     let isDemoProducts = true;
 
     try {
-      const praw = localStorage.getItem(PRODUCTS_KEY);
-      const pmetaRaw = localStorage.getItem(PRODUCTS_META_KEY);
+      const productsRaw = localStorage.getItem(PRODUCTS_KEY);
+      const productsMetaRaw = localStorage.getItem(PRODUCTS_META_KEY);
 
-      if (praw) {
-        products = JSON.parse(praw) as Product[];
-        productsMeta = pmetaRaw ? JSON.parse(pmetaRaw) : DEMO_PRODUCTS_META;
+      if (productsRaw) {
+        products = JSON.parse(productsRaw) as Product[];
+        productsMeta = productsMetaRaw ? JSON.parse(productsMetaRaw) : DEMO_PRODUCTS_META;
         isDemoProducts = false;
       }
     } catch {
-      // fall through to demo
+      // keep demo products
     }
 
     setData({
@@ -356,7 +362,7 @@ export function useStoreData(): StoreData & {
   }, [user, authStore, authLoading, refreshCounter]);
 
   useEffect(() => {
-    const handler = () => setRefreshCounter((c) => c + 1);
+    const handler = () => setRefreshCounter((count) => count + 1);
 
     window.addEventListener('storepulse:data-updated', handler);
     window.addEventListener('storage', handler);
@@ -375,7 +381,7 @@ export function useStoreData(): StoreData & {
       // ignore
     }
 
-    setRefreshCounter((c) => c + 1);
+    setRefreshCounter((count) => count + 1);
     window.dispatchEvent(new Event('storepulse:data-updated'));
   }, []);
 
@@ -387,54 +393,49 @@ export function useStoreData(): StoreData & {
       // ignore
     }
 
-    setRefreshCounter((c) => c + 1);
+    setRefreshCounter((count) => count + 1);
     window.dispatchEvent(new Event('storepulse:data-updated'));
   }, []);
 
   const refresh = useCallback(() => {
-    setRefreshCounter((c) => c + 1);
+    setRefreshCounter((count) => count + 1);
   }, []);
 
   const updateProduct = useCallback(
     async (product: Product): Promise<SaveResult> => {
       const nextProduct = normalizeProduct(product);
 
-      if (!nextProduct.upc) {
-        return { mode: data.dataMode, error: 'UPC is required.' };
-      }
-
-      if (!nextProduct.name) {
-        return { mode: data.dataMode, error: 'Product name is required.' };
-      }
+      if (!nextProduct.upc) return { mode: data.dataMode, error: 'UPC is required.' };
+      if (!nextProduct.name) return { mode: data.dataMode, error: 'Product name is required.' };
 
       const previousProducts = data.products;
 
-      setData((prev) => {
-        const next = upsertProductList(prev.products, nextProduct);
+      setData((previous) => {
+        const nextProducts = upsertProductList(previous.products, nextProduct);
 
         try {
-          localStorage.setItem(PRODUCTS_KEY, JSON.stringify(next));
+          localStorage.setItem(PRODUCTS_KEY, JSON.stringify(nextProducts));
           localStorage.setItem(
             PRODUCTS_META_KEY,
             JSON.stringify({
-              source: prev.isDemoProducts ? 'demo-edited' : 'upload-edited',
-              fileName: prev.productsMeta.fileName,
-              importedAt: prev.productsMeta.importedAt || new Date().toISOString(),
-              rowCount: next.length,
+              source: previous.isDemoProducts ? 'demo-edited' : 'upload-edited',
+              fileName: previous.productsMeta.fileName,
+              importedAt: previous.productsMeta.importedAt || new Date().toISOString(),
+              rowCount: nextProducts.length,
             } as ProductMeta)
           );
         } catch {
-          // ignore local cache errors
+          // ignore
         }
 
         return {
-          ...prev,
-          products: next,
+          ...previous,
+          products: nextProducts,
           productsMeta: {
-            ...prev.productsMeta,
-            rowCount: next.length,
+            ...previous.productsMeta,
+            rowCount: nextProducts.length,
           },
-          lowStockProducts: computeLowStock(next),
+          lowStockProducts: computeLowStock(nextProducts),
           cloudError: null,
         };
       });
@@ -447,8 +448,8 @@ export function useStoreData(): StoreData & {
           .eq('upc', nextProduct.upc);
 
         if (error) {
-          setData((prev) => ({
-            ...prev,
+          setData((previous) => ({
+            ...previous,
             products: previousProducts,
             lowStockProducts: computeLowStock(previousProducts),
             cloudError: `Product update failed: ${error.message}`,
@@ -471,42 +472,37 @@ export function useStoreData(): StoreData & {
     async (product: Product): Promise<SaveResult> => {
       const nextProduct = normalizeProduct(product);
 
-      if (!nextProduct.upc) {
-        return { mode: data.dataMode, error: 'UPC is required.' };
-      }
-
-      if (!nextProduct.name) {
-        return { mode: data.dataMode, error: 'Product name is required.' };
-      }
+      if (!nextProduct.upc) return { mode: data.dataMode, error: 'UPC is required.' };
+      if (!nextProduct.name) return { mode: data.dataMode, error: 'Product name is required.' };
 
       const previousProducts = data.products;
 
-      setData((prev) => {
-        const next = upsertProductList(prev.products, nextProduct);
+      setData((previous) => {
+        const nextProducts = upsertProductList(previous.products, nextProduct);
 
         try {
-          localStorage.setItem(PRODUCTS_KEY, JSON.stringify(next));
+          localStorage.setItem(PRODUCTS_KEY, JSON.stringify(nextProducts));
           localStorage.setItem(
             PRODUCTS_META_KEY,
             JSON.stringify({
-              source: prev.isDemoProducts ? 'demo-edited' : 'upload-edited',
-              fileName: prev.productsMeta.fileName,
-              importedAt: prev.productsMeta.importedAt || new Date().toISOString(),
-              rowCount: next.length,
+              source: previous.isDemoProducts ? 'demo-edited' : 'upload-edited',
+              fileName: previous.productsMeta.fileName,
+              importedAt: previous.productsMeta.importedAt || new Date().toISOString(),
+              rowCount: nextProducts.length,
             } as ProductMeta)
           );
         } catch {
-          // ignore local cache errors
+          // ignore
         }
 
         return {
-          ...prev,
-          products: next,
+          ...previous,
+          products: nextProducts,
           productsMeta: {
-            ...prev.productsMeta,
-            rowCount: next.length,
+            ...previous.productsMeta,
+            rowCount: nextProducts.length,
           },
-          lowStockProducts: computeLowStock(next),
+          lowStockProducts: computeLowStock(nextProducts),
           cloudError: null,
         };
       });
@@ -517,8 +513,8 @@ export function useStoreData(): StoreData & {
           .upsert(productToDbInsert(nextProduct, authStore.id), { onConflict: 'store_id,upc' });
 
         if (error) {
-          setData((prev) => ({
-            ...prev,
+          setData((previous) => ({
+            ...previous,
             products: previousProducts,
             lowStockProducts: computeLowStock(previousProducts),
             cloudError: `Product create failed: ${error.message}`,
@@ -539,7 +535,7 @@ export function useStoreData(): StoreData & {
 
   const updateProductPrice = useCallback(
     (upc: string, costPrice: number, sellPrice: number) => {
-      const product = data.products.find((p) => p.upc === upc);
+      const product = data.products.find((item) => item.upc === upc);
 
       if (!product) return;
 
@@ -573,7 +569,7 @@ export async function saveUploadedTransactions(txns: Transaction[], fileName: st
 
     userId = user?.id ?? null;
   } catch {
-    // network error — treat as logged out
+    // treat as logged out
   }
 
   if (userId) {
@@ -604,22 +600,25 @@ export async function saveUploadedTransactions(txns: Transaction[], fileName: st
 
     if (batchErr) return { mode: 'cloud', error: `Could not create upload record: ${batchErr.message}` };
 
-    const rows = txns.map((t) => ({
+    const rows = txns.map((transaction) => ({
       store_id: storeId,
       batch_id: batch.id,
-      transaction_id: t.id,
-      transaction_time: t.timestamp,
-      item_name: t.item ?? null,
-      category: t.category ?? null,
-      cashier_id: t.cashierId ?? null,
-      register_id: t.register ?? 1,
-      payment_type: t.paymentType ?? null,
-      total_amount: t.amount,
-      transaction_type: t.type,
-      upc: t.upc ?? null,
-      quantity: t.quantity ?? 1,
-      unit_price: t.unitPrice ?? t.amount,
-      discount_amount: t.discountAmount ?? 0,
+      transaction_id: transaction.id,
+      transaction_time: transaction.timestamp,
+      item_name: transaction.item ?? null,
+      category: transaction.category ?? null,
+      cashier_id: transaction.cashierId ?? null,
+      register_id: transaction.register ?? 1,
+      payment_type: transaction.paymentType ?? null,
+      total_amount: transaction.amount,
+      transaction_type: transaction.type,
+      upc: transaction.upc ?? null,
+      quantity: transaction.quantity ?? 1,
+      unit_price: transaction.unitPrice ?? transaction.amount,
+      discount_amount: transaction.discountAmount ?? 0,
+      card_network: transaction.cardNetwork ?? null,
+      exception_reason: transaction.exceptionReason ?? null,
+      fuel_grade: transaction.fuelGrade ?? null,
     }));
 
     const { error: upsertErr } = await supabase
@@ -670,7 +669,7 @@ export async function saveUploadedProducts(products: Product[], fileName: string
 
     userId = user?.id ?? null;
   } catch {
-    // network error — treat as logged out
+    // treat as logged out
   }
 
   if (userId) {
@@ -701,7 +700,7 @@ export async function saveUploadedProducts(products: Product[], fileName: string
 
     if (batchErr) return { mode: 'cloud', error: `Could not create upload record: ${batchErr.message}` };
 
-    const rows = products.map((p) => productToDbInsert(p, storeId, batch.id));
+    const rows = products.map((product) => productToDbInsert(product, storeId, batch.id));
 
     const { error: upsertErr } = await supabase
       .from('products')
@@ -768,6 +767,3 @@ export function getActiveProducts(): Product[] {
 
   return mockProducts;
 }
-
-export { mockTransactions, mockProducts, computeMargin };
-export type { Transaction, Cashier, PaymentType, TransactionType, Product };

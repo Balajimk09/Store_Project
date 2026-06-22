@@ -4,7 +4,6 @@ const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || '';
 const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || '';
 
 if (!supabaseUrl || !supabaseAnonKey) {
-  // Surface a clear runtime error only when actually used by the browser.
   // eslint-disable-next-line no-console
   console.warn('Supabase env vars missing. Cloud mode unavailable.');
 }
@@ -60,6 +59,9 @@ export interface TransactionRow {
   total_amount: number;
   payment_type: string | null;
   transaction_type: string;
+  card_network: string | null;
+  exception_reason: string | null;
+  fuel_grade: string | null;
   created_at: string;
 }
 
@@ -106,6 +108,7 @@ export interface StoreDepartmentRow {
   name: string;
   description: string | null;
   default_tax_rate: number;
+  ebt_eligible: boolean;
   is_active: boolean;
   created_at: string;
   updated_at: string;
@@ -121,4 +124,41 @@ export interface TaxCategoryRow {
   is_active: boolean;
   created_at: string;
   updated_at: string;
+}
+
+export interface StoreVendorRow {
+  id: string;
+  store_id: string;
+  vendor_name: string;
+  sales_rep_name: string | null;
+  phone: string | null;
+  email: string | null;
+  notes: string | null;
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface PromotionRow {
+  id: string;
+  store_id: string;
+  name: string;
+  deal_type: string;
+  quantity_required: number;
+  deal_price: number;
+  start_date: string | null;
+  end_date: string | null;
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface PromotionProductRow {
+  id: string;
+  store_id: string;
+  promotion_id: string;
+  product_id: string | null;
+  upc: string;
+  item_name: string | null;
+  created_at: string;
 }

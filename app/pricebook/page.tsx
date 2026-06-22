@@ -1,11 +1,18 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { DashboardShell, PageHeader, PageLoading } from '@/components/layout/sidebar';
 import { Card } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { useStoreData } from '@/lib/store';
+import { useAuth } from '@/lib/auth';
+import {
+  supabase,
+  type StoreDepartmentRow,
+  type StoreVendorRow,
+  type TaxCategoryRow,
+} from '@/lib/supabase';
 import type { Product } from '@/lib/mock-data';
 import { computeMargin } from '@/lib/csv';
 import { formatCurrency, exportToCsv } from '@/lib/format';
@@ -28,6 +35,15 @@ type TaxOption = {
   rate: number;
 };
 
+type DepartmentOption = {
+  name: string;
+  ebtEligible: boolean;
+};
+
+type VendorOption = {
+  name: string;
+};
+
 type ProductFormState = {
   upc: string;
   name: string;
@@ -46,17 +62,17 @@ type ProductFormState = {
   notes: string;
 };
 
-const DEFAULT_DEPARTMENTS = [
-  'Beverages',
-  'Snacks',
-  'Candy',
-  'Grocery',
-  'Tobacco',
-  'Beer',
-  'Fuel',
-  'Automotive',
-  'Health & Beauty',
-  'General Merchandise',
+const DEFAULT_DEPARTMENTS: DepartmentOption[] = [
+  { name: 'Beverages', ebtEligible: false },
+  { name: 'Snacks', ebtEligible: true },
+  { name: 'Candy', ebtEligible: true },
+  { name: 'Grocery', ebtEligible: true },
+  { name: 'Tobacco', ebtEligible: false },
+  { name: 'Beer', ebtEligible: false },
+  { name: 'Fuel', ebtEligible: false },
+  { name: 'Automotive', ebtEligible: false },
+  { name: 'Health & Beauty', ebtEligible: true },
+  { name: 'General Merchandise', ebtEligible: false },
 ];
 
 const DEFAULT_TAX_OPTIONS: TaxOption[] = [
@@ -153,7 +169,6 @@ function marginLabel(product: Product) {
 function productStockStatus(product: Product) {
   if ((product.isActive ?? true) === false) return 'Inactive';
   if (product.stock <= product.reorderLevel) return 'Reorder';
-
   return 'In Stock';
 }
 
@@ -161,7 +176,6 @@ function taxLabel(product: Product) {
   if ((product.taxable ?? true) === false) return 'No Tax';
 
   const rate = product.taxRate ?? 0;
-
   return `${rate.toFixed(rate % 1 === 0 ? 0 : 2)}%`;
 }
 
@@ -178,8 +192,9 @@ interface ProductFormModalProps {
   onSave: () => void;
   saving: boolean;
   error: string | null;
-  departments: string[];
+  departments: DepartmentOption[];
   taxOptions: TaxOption[];
+  vendors: VendorOption[];
 }
 
 function ProductFormModal({
@@ -193,6 +208,7 @@ function ProductFormModal({
   error,
   departments,
   taxOptions,
+  vendors,
 }: ProductFormModalProps) {
   if (!open) return null;
 
@@ -257,18 +273,28 @@ function ProductFormModal({
                   <span className="text-xs font-medium text-muted-foreground">Department *</span>
                   <select
                     value={form.department}
-                    onChange={(e) => setForm({ ...form, department: e.target.value })}
+                    onChange={(e) => {
+                      const selectedDepartment = departments.find(
+                        (department) => department.name === e.target.value
+                      );
+
+                      setForm({
+                        ...form,
+                        department: e.target.value,
+                        ebtEligible: selectedDepartment?.ebtEligible ?? form.ebtEligible,
+                      });
+                    }}
                     className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm text-foreground shadow-sm focus:outline-none focus:ring-2 focus:ring-ring"
                   >
                     <option value="">Select department</option>
                     {departments.map((department) => (
-                      <option key={department} value={department}>
-                        {department}
+                      <option key={department.name} value={department.name}>
+                        {department.name}
                       </option>
                     ))}
                   </select>
                   <span className="text-[11px] text-muted-foreground">
-                    Departments will be managed from Store Settings.
+                    Departments are managed from Store Settings.
                   </span>
                 </label>
 
@@ -283,11 +309,21 @@ function ProductFormModal({
 
                 <label className="space-y-1.5">
                   <span className="text-xs font-medium text-muted-foreground">Vendor</span>
-                  <Input
+                  <select
                     value={form.vendor}
                     onChange={(e) => setForm({ ...form, vendor: e.target.value })}
-                    placeholder="Coke Distributing"
-                  />
+                    className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm text-foreground shadow-sm focus:outline-none focus:ring-2 focus:ring-ring"
+                  >
+                    <option value="">Select vendor</option>
+                    {vendors.map((vendor) => (
+                      <option key={vendor.name} value={vendor.name}>
+                        {vendor.name}
+                      </option>
+                    ))}
+                  </select>
+                  <span className="text-[11px] text-muted-foreground">
+                    Vendors are managed from Store Settings.
+                  </span>
                 </label>
               </div>
             </Card>
@@ -348,7 +384,7 @@ function ProductFormModal({
                       EBT / Food Stamp eligible
                     </span>
                     <span className="text-xs text-muted-foreground">
-                      Useful later for POS/register sync so eligibility does not need to be entered manually again.
+                      This can automatically follow the selected department default.
                     </span>
                   </span>
                 </label>
@@ -449,7 +485,7 @@ function ProductFormModal({
                     ))}
                   </select>
                   <span className="text-[11px] text-muted-foreground">
-                    Tax categories and percentages will be created in Store Settings.
+                    Tax categories and percentages are managed from Store Settings.
                   </span>
                 </label>
 
@@ -505,6 +541,8 @@ export default function PricebookPage() {
     loaded,
   } = useStoreData();
 
+  const { user, store: authStore, loading: authLoading } = useAuth();
+
   const [items, setItems] = useState<Product[]>(storeProducts);
   const [query, setQuery] = useState('');
   const [departmentFilter, setDepartmentFilter] = useState<string>('All');
@@ -517,19 +555,118 @@ export default function PricebookPage() {
   const [formError, setFormError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
+  const [settingsDepartments, setSettingsDepartments] = useState<DepartmentOption[]>([]);
+  const [settingsTaxOptions, setSettingsTaxOptions] = useState<TaxOption[]>([]);
+  const [settingsVendors, setSettingsVendors] = useState<VendorOption[]>([]);
+  const [settingsError, setSettingsError] = useState<string | null>(null);
+
   useEffect(() => {
     setItems(storeProducts);
   }, [storeProducts]);
 
-  const departments = useMemo(() => {
-    const fromProducts = storeProducts
-      .map((product) => product.department || product.category)
-      .filter((value): value is string => Boolean(value));
+  const loadProductSettings = useCallback(async () => {
+    if (authLoading) return;
 
-    return Array.from(new Set([...DEFAULT_DEPARTMENTS, ...fromProducts])).sort();
-  }, [storeProducts]);
+    if (!user || !authStore) {
+      setSettingsDepartments([]);
+      setSettingsTaxOptions([]);
+      setSettingsVendors([]);
+      return;
+    }
+
+    setSettingsError(null);
+
+    const [departmentResult, taxResult, vendorResult] = await Promise.all([
+      supabase
+        .from('store_departments')
+        .select('*')
+        .eq('store_id', authStore.id)
+        .eq('is_active', true)
+        .order('name', { ascending: true }),
+      supabase
+        .from('tax_categories')
+        .select('*')
+        .eq('store_id', authStore.id)
+        .eq('is_active', true)
+        .order('name', { ascending: true }),
+      supabase
+        .from('store_vendors')
+        .select('*')
+        .eq('store_id', authStore.id)
+        .eq('is_active', true)
+        .order('vendor_name', { ascending: true }),
+    ]);
+
+    if (departmentResult.error) {
+      setSettingsError(`Could not load departments: ${departmentResult.error.message}`);
+      return;
+    }
+
+    if (taxResult.error) {
+      setSettingsError(`Could not load tax categories: ${taxResult.error.message}`);
+      return;
+    }
+
+    if (vendorResult.error) {
+      setSettingsError(`Could not load vendors: ${vendorResult.error.message}`);
+      return;
+    }
+
+    setSettingsDepartments(
+      ((departmentResult.data || []) as StoreDepartmentRow[]).map((department) => ({
+        name: department.name,
+        ebtEligible: department.ebt_eligible ?? false,
+      }))
+    );
+
+    setSettingsTaxOptions(
+      ((taxResult.data || []) as TaxCategoryRow[]).map((tax) => ({
+        name: tax.name,
+        rate: tax.rate ?? 0,
+      }))
+    );
+
+    setSettingsVendors(
+      ((vendorResult.data || []) as StoreVendorRow[]).map((vendor) => ({
+        name: vendor.vendor_name,
+      }))
+    );
+  }, [authLoading, user, authStore]);
+
+  useEffect(() => {
+    void loadProductSettings();
+  }, [loadProductSettings]);
+
+  const departments = useMemo<DepartmentOption[]>(() => {
+    if (settingsDepartments.length > 0) {
+      return settingsDepartments;
+    }
+
+    const fallback = new Map<string, DepartmentOption>();
+
+    DEFAULT_DEPARTMENTS.forEach((department) => {
+      fallback.set(department.name, department);
+    });
+
+    storeProducts.forEach((product) => {
+      const name = product.department || product.category;
+
+      if (name && !fallback.has(name)) {
+        fallback.set(name, {
+          name,
+          ebtEligible: product.ebtEligible ?? false,
+        });
+      }
+    });
+
+    return Array.from(fallback.values()).sort((a, b) => a.name.localeCompare(b.name));
+  }, [settingsDepartments, storeProducts]);
 
   const taxOptions = useMemo<TaxOption[]>(() => {
+    if (settingsTaxOptions.length > 0) {
+      return settingsTaxOptions;
+    }
+
     const map = new Map<string, number>();
 
     DEFAULT_TAX_OPTIONS.forEach((option) => {
@@ -546,7 +683,25 @@ export default function PricebookPage() {
     return Array.from(map.entries())
       .map(([name, rate]) => ({ name, rate }))
       .sort((a, b) => a.name.localeCompare(b.name));
-  }, [storeProducts]);
+  }, [settingsTaxOptions, storeProducts]);
+
+  const vendors = useMemo<VendorOption[]>(() => {
+    const map = new Map<string, VendorOption>();
+
+    settingsVendors.forEach((vendor) => {
+      if (vendor.name) {
+        map.set(vendor.name, vendor);
+      }
+    });
+
+    storeProducts.forEach((product) => {
+      if (product.vendor && !map.has(product.vendor)) {
+        map.set(product.vendor, { name: product.vendor });
+      }
+    });
+
+    return Array.from(map.values()).sort((a, b) => a.name.localeCompare(b.name));
+  }, [settingsVendors, storeProducts]);
 
   const filtered = useMemo(() => {
     return items.filter((product) => {
@@ -593,15 +748,19 @@ export default function PricebookPage() {
   const ebtCount = items.filter((product) => product.ebtEligible ?? false).length;
 
   const openAddModal = () => {
-    const defaultDepartment = departments[0] || 'General Merchandise';
-    const defaultTax = taxOptions.find((option) => option.name === 'standard') || taxOptions[0] || { name: 'standard', rate: 0 };
+    const defaultTax =
+      taxOptions.find((option) => option.name === 'standard') ||
+      taxOptions[0] ||
+      { name: 'standard', rate: 0 };
 
     setModalMode('add');
     setForm({
       ...EMPTY_PRODUCT_FORM,
-      department: defaultDepartment,
+      department: '',
+      ebtEligible: false,
       taxCategory: defaultTax.name,
       taxRate: String(defaultTax.rate),
+      vendor: '',
     });
     setFormError(null);
     setModalOpen(true);
@@ -616,7 +775,6 @@ export default function PricebookPage() {
 
   const closeModal = () => {
     if (saving) return;
-
     setModalOpen(false);
     setFormError(null);
   };
@@ -704,6 +862,13 @@ export default function PricebookPage() {
             </div>
           </PageHeader>
 
+          {settingsError && (
+            <div className="mb-5 flex items-start gap-3 rounded-lg border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive">
+              <CircleAlert className="mt-0.5 h-4 w-4 shrink-0" />
+              <span>{settingsError}</span>
+            </div>
+          )}
+
           {cloudError && (
             <div className="mb-5 flex items-start gap-3 rounded-lg border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive">
               <CircleAlert className="mt-0.5 h-4 w-4 shrink-0" />
@@ -765,8 +930,8 @@ export default function PricebookPage() {
                 >
                   <option value="All">All departments</option>
                   {departments.map((department) => (
-                    <option key={department} value={department}>
-                      {department}
+                    <option key={department.name} value={department.name}>
+                      {department.name}
                     </option>
                   ))}
                 </select>
@@ -968,11 +1133,12 @@ export default function PricebookPage() {
                 </div>
 
                 <div>
-                  <h3 className="text-sm font-semibold text-foreground">Coming next: Store Settings</h3>
+                  <h3 className="text-sm font-semibold text-foreground">
+                    Connected to Store Settings
+                  </h3>
 
                   <p className="mt-1 text-sm text-muted-foreground">
-                    Store Settings will manage departments, tax categories, tax percentages, reorder defaults,
-                    and future deals or promotions.
+                    Department, tax category, and vendor dropdowns now come from Store Settings.
                   </p>
                 </div>
               </div>
@@ -994,6 +1160,7 @@ export default function PricebookPage() {
             error={formError}
             departments={departments}
             taxOptions={taxOptions}
+            vendors={vendors}
           />
         </>
       )}

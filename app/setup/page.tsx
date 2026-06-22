@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useState, type FormEvent } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { useAuth } from '@/lib/auth';
@@ -17,9 +17,18 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
-import { Zap, Store, Loader2, ArrowRight, AlertCircle, Check } from 'lucide-react';
+import {
+  AlertCircle,
+  ArrowRight,
+  Check,
+  Loader2,
+  MapPin,
+  Phone,
+  Store,
+  Zap,
+} from 'lucide-react';
 
-const POS_TYPES = ['Verifone', 'Gilbarco', 'Clover', 'NCR', 'Square', 'Other'];
+const POS_TYPES = ['Verifone', 'Gilbarco', 'Clover', 'NCR', 'Square', 'Ruby', 'Other'];
 
 export default function SetupPage() {
   const { user, loading, store, storeLoading, refreshStore } = useAuth();
@@ -28,12 +37,13 @@ export default function SetupPage() {
   const [storeName, setStoreName] = useState('');
   const [storeAddress, setStoreAddress] = useState('');
   const [city, setCity] = useState('');
-  const [state, setState] = useState('');
+  const [stateValue, setStateValue] = useState('');
   const [zipCode, setZipCode] = useState('');
   const [phoneNumber, setPhoneNumber] = useState('');
   const [posType, setPosType] = useState('Verifone');
   const [hasFuel, setHasFuel] = useState(true);
-  const [registerCount, setRegisterCount] = useState('4');
+  const [registerCount, setRegisterCount] = useState('1');
+
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState(false);
@@ -45,78 +55,81 @@ export default function SetupPage() {
   }, [loading, user, router]);
 
   useEffect(() => {
-    if (store) {
-      setStoreName(store.store_name);
-      setStoreAddress(store.store_address || '');
-      setPosType(store.pos_type || 'Verifone');
-      setHasFuel(store.has_fuel);
-      setRegisterCount(String(store.register_count));
-    }
+    if (!store) return;
+
+    setStoreName(store.store_name || '');
+    setStoreAddress(store.store_address || '');
+    setCity(store.city || '');
+    setStateValue(store.state || '');
+    setZipCode(store.zip_code || '');
+    setPhoneNumber(store.phone_number || '');
+    setPosType(store.pos_type || 'Verifone');
+    setHasFuel(store.has_fuel || false);
+    setRegisterCount(String(store.register_count || 1));
   }, [store]);
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const handleSubmit = async (event: FormEvent) => {
+    event.preventDefault();
     setError(null);
 
     if (!storeName.trim()) {
       setError('Please enter a store name.');
       return;
     }
-    const regCount = parseInt(registerCount, 10);
-    if (Number.isNaN(regCount) || regCount < 1) {
+
+    const regCount = Number(registerCount);
+
+    if (!Number.isFinite(regCount) || regCount < 1) {
       setError('Register count must be at least 1.');
       return;
     }
 
     setSaving(true);
+
     const payload = {
       store_name: storeName.trim(),
       store_address: storeAddress.trim() || null,
       city: city.trim() || null,
-      state: state.trim() || null,
+      state: stateValue.trim() || null,
       zip_code: zipCode.trim() || null,
       phone_number: phoneNumber.trim() || null,
       pos_type: posType,
       has_fuel: hasFuel,
       register_count: regCount,
-      };
-    const { data: sessionData, error: sessionError } = await supabase.auth.getSession();
+    };
 
-if (sessionError || !sessionData.session?.user?.id) {
-  setError('No active Supabase session found. Please log out, sign in again, and retry setup.');
-  setSaving(false);
-  return;
-}
+    const {
+      data: { session },
+      error: sessionError,
+    } = await supabase.auth.getSession();
 
-const ownerId = sessionData.session.user.id;
+    if (sessionError || !session?.user?.id) {
+      setError('Your session expired. Please sign in again.');
+      setSaving(false);
+      return;
+    }
 
-console.log('SETUP DEBUG ownerId:', ownerId);
+    const ownerId = session.user.id;
 
-let query;
+    const query = store
+      ? supabase
+          .from('stores')
+          .update(payload)
+          .eq('id', store.id)
+          .eq('owner_id', ownerId)
+          .select('*')
+          .single()
+      : supabase
+          .from('stores')
+          .insert({
+            ...payload,
+            owner_id: ownerId,
+          })
+          .select('*')
+          .single();
 
-if (store) {
-  query = supabase
-    .from('stores')
-    .update(payload)
-    .eq('id', store.id)
-    .select('id, owner_id, store_name')
-    .single();
-} else {
-  query = supabase
-    .from('stores')
-    .insert({
-      ...payload,
-      owner_id: ownerId,
-    })
-    .select('id, owner_id, store_name')
-    .single();
-}
+    const { error: dbError } = await query;
 
-const { data: savedStore, error: dbError } = await query;
-
-console.log('SETUP DEBUG savedStore:', savedStore);
-console.log('SETUP DEBUG dbError:', dbError);
-    
     if (dbError) {
       setError(dbError.message || 'Failed to save your store. Please try again.');
       setSaving(false);
@@ -124,9 +137,11 @@ console.log('SETUP DEBUG dbError:', dbError);
     }
 
     await refreshStore();
+
     setSuccess(true);
     setSaving(false);
-    setTimeout(() => router.push('/dashboard'), 900);
+
+    setTimeout(() => router.push('/dashboard'), 700);
   };
 
   if (loading || storeLoading) {
@@ -142,66 +157,135 @@ console.log('SETUP DEBUG dbError:', dbError);
   return (
     <div className="min-h-screen bg-background">
       <div className="border-b border-border bg-sidebar px-6 py-4">
-        <div className="mx-auto flex max-w-2xl items-center justify-between">
+        <div className="mx-auto flex max-w-4xl items-center justify-between">
           <Link href="/dashboard" className="flex items-center gap-2.5 text-white">
             <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary">
               <Zap className="h-5 w-5" />
             </div>
+
             <span className="font-semibold tracking-tight">StorePulse AI</span>
           </Link>
+
           <Link href="/account" className="text-sm text-white/80 hover:text-white hover:underline">
             Account
           </Link>
         </div>
       </div>
 
-      <div className="mx-auto max-w-2xl px-4 py-10 sm:px-6 lg:px-8">
-        <div className="mb-6 flex items-center gap-3">
-          <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-primary/10 text-primary">
+      <main className="mx-auto max-w-4xl px-4 py-10 sm:px-6 lg:px-8">
+        <div className="mb-6 flex items-start gap-3">
+          <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-primary/10 text-primary">
             <Store className="h-6 w-6" />
           </div>
+
           <div>
-            <h1 className="text-2xl font-semibold tracking-tight text-foreground">{store ? 'Edit store' : 'Set up your store'}</h1>
-            <p className="mt-0.5 text-sm text-muted-foreground">
-              {store ? 'Update your store details. Changes apply to all cloud data.' : 'Tell us about your store to enable cloud sync.'}
+            <h1 className="text-2xl font-semibold tracking-tight text-foreground">
+              {store ? 'Store Profile' : 'Set up your store'}
+            </h1>
+
+            <p className="mt-1 text-sm text-muted-foreground">
+              {store
+                ? 'Review and update your store information.'
+                : 'Add your store information to start using StorePulse.'}
             </p>
           </div>
         </div>
 
         <Card className="p-6">
-          <form onSubmit={handleSubmit} className="space-y-5">
-            <div className="space-y-1.5">
-              <Label htmlFor="storeName">Store name</Label>
-              <Input
-                id="storeName"
-                required
-                value={storeName}
-                onChange={(e) => setStoreName(e.target.value)}
-                placeholder="QuickStop #4127"
-              />
+          <form onSubmit={handleSubmit} className="space-y-6">
+            <div>
+              <h2 className="text-base font-semibold text-foreground">Basic Information</h2>
+              <p className="mt-1 text-sm text-muted-foreground">
+                These details identify the store throughout the app.
+              </p>
             </div>
 
-            <div className="space-y-1.5">
-              <Label htmlFor="storeAddress">Store address</Label>
-              <Input
-                id="storeAddress"
-                value={storeAddress}
-                onChange={(e) => setStoreAddress(e.target.value)}
-                placeholder="123 Main St, Anytown, USA"
-              />
+            <div className="grid gap-5 md:grid-cols-2">
+              <div className="space-y-1.5 md:col-span-2">
+                <Label htmlFor="storeName">Store name *</Label>
+                <Input
+                  id="storeName"
+                  required
+                  value={storeName}
+                  onChange={(event) => setStoreName(event.target.value)}
+                  placeholder="Meridian Mart"
+                />
+              </div>
+
+              <div className="space-y-1.5 md:col-span-2">
+                <Label htmlFor="storeAddress">Street address</Label>
+                <Input
+                  id="storeAddress"
+                  value={storeAddress}
+                  onChange={(event) => setStoreAddress(event.target.value)}
+                  placeholder="700 S Meridian Ave"
+                />
+              </div>
+
+              <div className="space-y-1.5">
+                <Label htmlFor="city">City</Label>
+                <Input
+                  id="city"
+                  value={city}
+                  onChange={(event) => setCity(event.target.value)}
+                  placeholder="Oklahoma City"
+                />
+              </div>
+
+              <div className="space-y-1.5">
+                <Label htmlFor="state">State</Label>
+                <Input
+                  id="state"
+                  value={stateValue}
+                  onChange={(event) => setStateValue(event.target.value)}
+                  placeholder="OK"
+                />
+              </div>
+
+              <div className="space-y-1.5">
+                <Label htmlFor="zipCode">ZIP code</Label>
+                <Input
+                  id="zipCode"
+                  value={zipCode}
+                  onChange={(event) => setZipCode(event.target.value)}
+                  placeholder="73127"
+                />
+              </div>
+
+              <div className="space-y-1.5">
+                <Label htmlFor="phoneNumber">Store phone</Label>
+                <div className="relative">
+                  <Phone className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+                  <Input
+                    id="phoneNumber"
+                    value={phoneNumber}
+                    onChange={(event) => setPhoneNumber(event.target.value)}
+                    placeholder="405-555-1234"
+                    className="pl-9"
+                  />
+                </div>
+              </div>
             </div>
 
-            <div className="grid grid-cols-1 gap-5 sm:grid-cols-2">
+            <div className="border-t border-border pt-6">
+              <h2 className="text-base font-semibold text-foreground">Register Information</h2>
+              <p className="mt-1 text-sm text-muted-foreground">
+                Add the POS and register details for this location.
+              </p>
+            </div>
+
+            <div className="grid gap-5 md:grid-cols-2">
               <div className="space-y-1.5">
                 <Label>POS type</Label>
                 <Select value={posType} onValueChange={setPosType}>
                   <SelectTrigger>
                     <SelectValue placeholder="Select POS" />
                   </SelectTrigger>
+
                   <SelectContent>
-                    {POS_TYPES.map((p) => (
-                      <SelectItem key={p} value={p}>
-                        {p}
+                    {POS_TYPES.map((item) => (
+                      <SelectItem key={item} value={item}>
+                        {item}
                       </SelectItem>
                     ))}
                   </SelectContent>
@@ -216,17 +300,43 @@ console.log('SETUP DEBUG dbError:', dbError);
                   min="1"
                   max="50"
                   value={registerCount}
-                  onChange={(e) => setRegisterCount(e.target.value)}
+                  onChange={(event) => setRegisterCount(event.target.value)}
                 />
               </div>
             </div>
 
-            <div className="flex items-center justify-between rounded-lg border border-border p-4">
+            <div className="flex items-center justify-between gap-4 rounded-xl border border-border p-4">
               <div>
                 <p className="text-sm font-medium text-foreground">This store has fuel pumps</p>
-                <p className="text-xs text-muted-foreground">Enable fuel category tracking and pump-level reporting.</p>
+                <p className="text-xs text-muted-foreground">
+                  Enable this for gas station reporting and fuel-related setup.
+                </p>
               </div>
+
               <Switch checked={hasFuel} onCheckedChange={setHasFuel} />
+            </div>
+
+            <div className="rounded-xl border border-border bg-secondary/30 p-4">
+              <div className="grid gap-3 text-sm md:grid-cols-3">
+                <div className="flex items-center gap-2 text-muted-foreground">
+                  <Store className="h-4 w-4" />
+                  <span>{storeName || 'Store name not added'}</span>
+                </div>
+
+                <div className="flex items-center gap-2 text-muted-foreground">
+                  <MapPin className="h-4 w-4" />
+                  <span>
+                    {city || 'City not added'}
+                    {stateValue ? `, ${stateValue}` : ''}
+                    {zipCode ? ` ${zipCode}` : ''}
+                  </span>
+                </div>
+
+                <div className="flex items-center gap-2 text-muted-foreground">
+                  <Phone className="h-4 w-4" />
+                  <span>{phoneNumber || 'Phone not added'}</span>
+                </div>
+              </div>
             </div>
 
             {error && (
@@ -243,13 +353,25 @@ console.log('SETUP DEBUG dbError:', dbError);
               </div>
             )}
 
-            <Button type="submit" className="w-full" disabled={saving}>
-              {saving ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
-              {store ? 'Save changes' : 'Create store & continue'} <ArrowRight className="ml-2 h-4 w-4" />
-            </Button>
+            <div className="flex flex-col-reverse gap-3 border-t border-border pt-6 sm:flex-row sm:justify-end">
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => router.push('/dashboard')}
+                disabled={saving}
+              >
+                Cancel
+              </Button>
+
+              <Button type="submit" disabled={saving}>
+                {saving ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
+                {store ? 'Save store profile' : 'Create store'}
+                <ArrowRight className="ml-2 h-4 w-4" />
+              </Button>
+            </div>
           </form>
         </Card>
-      </div>
+      </main>
     </div>
   );
 }

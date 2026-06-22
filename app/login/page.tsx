@@ -44,8 +44,8 @@ export default function LoginPage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const handleSubmit = async (e: FormEvent) => {
-    e.preventDefault();
+  const handleSubmit = async (event: FormEvent) => {
+    event.preventDefault();
     setError(null);
 
     const identifier = loginId.trim();
@@ -88,7 +88,7 @@ export default function LoginPage() {
 
     const { data: storeRow, error: storeError } = await supabase
       .from('stores')
-      .select('id, store_name, store_address, city, state, zip_code, phone_number, pos_type, register_count')
+      .select('id, store_name')
       .eq('owner_id', userId)
       .maybeSingle();
 
@@ -99,22 +99,15 @@ export default function LoginPage() {
       return;
     }
 
-    const setupComplete =
-      !!storeRow?.store_name?.trim() &&
-      !!storeRow?.store_address?.trim() &&
-      !!storeRow?.city?.trim() &&
-      !!storeRow?.state?.trim() &&
-      !!storeRow?.zip_code?.trim() &&
-      !!storeRow?.phone_number?.trim() &&
-      !!storeRow?.pos_type?.trim() &&
-      Number(storeRow?.register_count) > 0;
-
-    if (!setupComplete) {
+    if (!storeRow?.id) {
       router.push('/setup');
-    } else {
-      router.push(redirectTo);
+      router.refresh();
+      return;
     }
 
+    const finalRedirect = redirectTo === '/setup' ? '/dashboard' : redirectTo;
+
+    router.push(finalRedirect);
     router.refresh();
   };
 
@@ -124,6 +117,7 @@ export default function LoginPage() {
         <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-primary shadow-lg shadow-primary/30">
           <Zap className="h-6 w-6 text-primary-foreground" />
         </div>
+
         <span className="text-2xl font-semibold tracking-tight text-white">StorePulse AI</span>
       </Link>
 
@@ -131,21 +125,23 @@ export default function LoginPage() {
         <div className="mb-6">
           <h1 className="text-xl font-semibold text-foreground">Welcome back</h1>
           <p className="mt-1 text-sm text-muted-foreground">
-            Sign in with your email or phone number to access your store.
+            Sign in to access your store.
           </p>
         </div>
 
         <form onSubmit={handleSubmit} className="space-y-4">
           <div className="space-y-1.5">
             <Label htmlFor="loginId">Email or phone number</Label>
+
             <div className="relative">
               <Mail className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+
               <Input
                 id="loginId"
                 type="text"
                 required
                 value={loginId}
-                onChange={(e) => setLoginId(e.target.value)}
+                onChange={(event) => setLoginId(event.target.value)}
                 placeholder="you@store.com or 405-123-4567"
                 className="pl-9"
               />
@@ -154,14 +150,16 @@ export default function LoginPage() {
 
           <div className="space-y-1.5">
             <Label htmlFor="password">Password</Label>
+
             <div className="relative">
               <Lock className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+
               <Input
                 id="password"
                 type="password"
                 required
                 value={password}
-                onChange={(e) => setPassword(e.target.value)}
+                onChange={(event) => setPassword(event.target.value)}
                 placeholder="••••••••"
                 className="pl-9"
               />
@@ -177,7 +175,8 @@ export default function LoginPage() {
 
           <Button type="submit" className="w-full" disabled={loading}>
             {loading ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
-            Sign in <ArrowRight className="ml-2 h-4 w-4" />
+            Sign in
+            <ArrowRight className="ml-2 h-4 w-4" />
           </Button>
         </form>
 

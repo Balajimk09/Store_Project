@@ -67,6 +67,7 @@ function mapDbProduct(row: ProductRow): Product {
     taxRate: row.tax_rate ?? 0,
     taxCategory: row.tax_category ?? 'standard',
     taxable: row.taxable ?? true,
+    ebtEligible: row.ebt_eligible ?? false,
     isActive: row.is_active ?? true,
     notes: row.notes ?? undefined,
   };
@@ -158,6 +159,7 @@ function normalizeProduct(product: Product): Product {
     taxRate: Number(product.taxRate) || 0,
     taxCategory: product.taxCategory?.trim() || 'standard',
     taxable: product.taxable ?? true,
+    ebtEligible: product.ebtEligible ?? false,
     isActive: product.isActive ?? true,
     notes: product.notes?.trim() || undefined,
   };
@@ -180,6 +182,7 @@ function productToDbFields(product: Product) {
     tax_rate: p.taxRate ?? 0,
     tax_category: p.taxCategory ?? 'standard',
     taxable: p.taxable ?? true,
+    ebt_eligible: p.ebtEligible ?? false,
     is_active: p.isActive ?? true,
     notes: p.notes ?? null,
     updated_at: new Date().toISOString(),

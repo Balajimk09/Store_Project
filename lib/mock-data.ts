@@ -15,6 +15,7 @@ export interface Product {
   sku?: string;
   taxRate?: number;
   taxCategory?: string;
+  ebtEligible?: boolean;
   taxable?: boolean;
   isActive?: boolean;
   notes?: string;

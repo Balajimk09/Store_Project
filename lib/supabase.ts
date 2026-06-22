@@ -81,6 +81,7 @@ export interface ProductRow {
   tax_rate: number;
   tax_category: string | null;
   taxable: boolean;
+  ebt_eligible: boolean;
   is_active: boolean;
   notes: string | null;
   created_at: string;

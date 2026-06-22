@@ -324,6 +324,7 @@ export const PRODUCT_OPTIONAL_COLUMNS = [
   'tax_rate',
   'tax_category',
   'taxable',
+  'ebt_eligible',
   'is_active',
   'notes',
 ] as const;
@@ -456,6 +457,7 @@ export function parseProductsCsv(text: string): ProductParseResult {
     const sku = (raw['sku'] || '').trim() || undefined;
     const taxCategory = (raw['tax_category'] || '').trim() || 'standard';
     const taxable = toBoolean(raw['taxable'], true);
+    const ebtEligible = toBoolean(raw['ebt_eligible'], false);
     const isActive = toBoolean(raw['is_active'], true);
     const notes = (raw['notes'] || '').trim() || undefined;
 
@@ -490,6 +492,7 @@ export function parseProductsCsv(text: string): ProductParseResult {
       taxRate: finalTaxRate,
       taxCategory,
       taxable,
+      ebtEligible,
       isActive,
       notes,
     };

@@ -42,6 +42,9 @@ export interface Product {
   taxable?: boolean;
   isActive?: boolean;
   notes?: string;
+  unitsPerCase?: number;
+  casesOnHand?: number;
+  looseUnits?: number;
 }
 
 export interface Transaction {

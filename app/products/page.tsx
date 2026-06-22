@@ -8,7 +8,6 @@ import {
   CircleAlert,
   Download,
   Eye,
-  FileText,
   History,
   Package,
   Pencil,
@@ -52,6 +51,9 @@ type ProductFormState = {
   sellPrice: string;
   stock: string;
   reorderLevel: string;
+  unitsPerCase: string;
+  casesOnHand: string;
+  looseUnits: string;
   taxCategory: string;
   taxRate: string;
   taxable: boolean;
@@ -62,6 +64,7 @@ type ProductFormState = {
 
 type ReceivingLineStatus = 'Matched' | 'New Product' | 'Needs Review';
 type InvoiceSourceKind = 'pdf' | 'image' | 'csv' | 'unknown';
+type ReorderPriority = 'Critical' | 'Soon' | 'Watch';
 
 type ReceivingLine = {
   id: string;
@@ -90,6 +93,17 @@ type ReceivingHistoryItem = {
   sourceKind?: InvoiceSourceKind;
 };
 
+type ReorderInsight = {
+  product: Product;
+  salesLast30Days: number;
+  averageDailySales: number;
+  daysLeft: number | null;
+  suggestedQty: number;
+  lastDeliveryDate: string | null;
+  lastDeliveryQty: number;
+  priority: ReorderPriority;
+};
+
 const RECEIVING_HISTORY_KEY = 'storepulse_receiving_history_v1';
 const INVOICE_BUCKET = 'inventory-invoices';
 
@@ -103,6 +117,9 @@ const EMPTY_PRODUCT_FORM: ProductFormState = {
   sellPrice: '',
   stock: '0',
   reorderLevel: '10',
+  unitsPerCase: '1',
+  casesOnHand: '0',
+  looseUnits: '0',
   taxCategory: 'standard',
   taxRate: '0',
   taxable: true,
@@ -141,7 +158,70 @@ function safeFileName(fileName: string) {
   return fileName.replace(/[^a-zA-Z0-9._-]/g, '-');
 }
 
+function normalizeText(value: string | undefined | null) {
+  return String(value || '').trim().toLowerCase();
+}
+
+function dateOnly(value: string) {
+  return value.split('T')[0];
+}
+
+function formatShortDate(value: string | null) {
+  if (!value) return 'No delivery yet';
+  return new Date(value).toLocaleDateString();
+}
+
+function getReorderPriority(product: Product, daysLeft: number | null): ReorderPriority {
+  if (product.stock <= 0) return 'Critical';
+  if (product.stock <= product.reorderLevel) return 'Critical';
+  if (daysLeft !== null && daysLeft <= 3) return 'Critical';
+  if (daysLeft !== null && daysLeft <= 7) return 'Soon';
+  return 'Watch';
+}
+
+function priorityClass(priority: ReorderPriority) {
+  if (priority === 'Critical') return 'bg-destructive/10 text-destructive';
+  if (priority === 'Soon') return 'bg-primary/10 text-primary';
+  return 'bg-secondary text-muted-foreground';
+}
+
+function getCaseBreakdown(totalUnits: number, unitsPerCase: number) {
+  const safeUnitsPerCase = Math.max(1, Number(unitsPerCase) || 1);
+  const safeTotalUnits = Math.max(0, Number(totalUnits) || 0);
+
+  return {
+    cases: Math.floor(safeTotalUnits / safeUnitsPerCase),
+    looseUnits: safeTotalUnits % safeUnitsPerCase,
+  };
+}
+
+function formatCaseBreakdown(totalUnits: number, unitsPerCase: number) {
+  const breakdown = getCaseBreakdown(totalUnits, unitsPerCase);
+
+  if (unitsPerCase <= 1) return `${formatNumber(totalUnits)} units`;
+
+  return `${formatNumber(breakdown.cases)} cases + ${formatNumber(breakdown.looseUnits)} loose`;
+}
+
+function calculateStockFromCases(form: ProductFormState) {
+  const unitsPerCase = Math.max(1, safeNumber(form.unitsPerCase, 1));
+  const casesOnHand = Math.max(0, safeNumber(form.casesOnHand));
+  const looseUnits = Math.max(0, safeNumber(form.looseUnits));
+
+  return casesOnHand * unitsPerCase + looseUnits;
+}
+
 function productToForm(product: Product): ProductFormState {
+  const unitsPerCase = Math.max(1, Number(product.unitsPerCase) || 1);
+  const casesOnHand =
+    product.casesOnHand !== undefined
+      ? Number(product.casesOnHand) || 0
+      : Math.floor(product.stock / unitsPerCase);
+  const looseUnits =
+    product.looseUnits !== undefined
+      ? Number(product.looseUnits) || 0
+      : product.stock % unitsPerCase;
+
   return {
     upc: product.upc,
     name: product.name,
@@ -152,6 +232,9 @@ function productToForm(product: Product): ProductFormState {
     sellPrice: product.sellPrice.toFixed(2),
     stock: String(product.stock),
     reorderLevel: String(product.reorderLevel),
+    unitsPerCase: String(unitsPerCase),
+    casesOnHand: String(casesOnHand),
+    looseUnits: String(looseUnits),
     taxCategory: product.taxCategory || ((product.taxable ?? true) ? 'standard' : 'non-taxable'),
     taxRate: String(product.taxRate ?? 0),
     taxable: product.taxable ?? true,
@@ -163,6 +246,10 @@ function productToForm(product: Product): ProductFormState {
 
 function formToProduct(form: ProductFormState): Product {
   const department = form.department.trim() || 'General Merchandise';
+  const unitsPerCase = Math.max(1, safeNumber(form.unitsPerCase, 1));
+  const casesOnHand = Math.max(0, safeNumber(form.casesOnHand));
+  const looseUnits = Math.max(0, safeNumber(form.looseUnits));
+  const calculatedStock = casesOnHand * unitsPerCase + looseUnits;
 
   return {
     upc: form.upc.trim(),
@@ -173,8 +260,11 @@ function formToProduct(form: ProductFormState): Product {
     vendor: form.vendor.trim() || undefined,
     costPrice: safeNumber(form.costPrice),
     sellPrice: safeNumber(form.sellPrice),
-    stock: safeNumber(form.stock),
+    stock: calculatedStock,
     reorderLevel: safeNumber(form.reorderLevel, 10),
+    unitsPerCase,
+    casesOnHand,
+    looseUnits,
     taxCategory: form.taxable ? form.taxCategory.trim() || 'standard' : 'non-taxable',
     taxRate: form.taxable ? safeNumber(form.taxRate) : 0,
     taxable: form.taxable,
@@ -190,7 +280,9 @@ function validateProductForm(form: ProductFormState) {
   if (!form.department.trim()) return 'Department is required.';
   if (safeNumber(form.costPrice) < 0) return 'Cost price must be zero or more.';
   if (safeNumber(form.sellPrice) < 0) return 'Selling price must be zero or more.';
-  if (safeNumber(form.stock) < 0) return 'Stock must be zero or more.';
+  if (safeNumber(form.unitsPerCase, 1) <= 0) return 'Units per case must be at least 1.';
+  if (safeNumber(form.casesOnHand) < 0) return 'Cases on hand must be zero or more.';
+  if (safeNumber(form.looseUnits) < 0) return 'Loose units must be zero or more.';
   return null;
 }
 
@@ -426,27 +518,61 @@ function ProductModal({
                   </span>
                 </div>
 
-                <label className="space-y-1.5">
-                  <span className="text-xs font-medium text-muted-foreground">Current Stock</span>
-                  <Input
-                    type="number"
-                    step="1"
-                    min="0"
-                    value={form.stock}
-                    onChange={(event) => setForm({ ...form, stock: event.target.value })}
-                  />
-                </label>
+                <div className="rounded-lg border border-border bg-secondary/30 p-3">
+  <p className="text-xs font-medium text-muted-foreground">Calculated Current Stock</p>
+  <p className="mt-1 text-2xl font-bold text-foreground">
+    {formatNumber(calculateStockFromCases(form))}
+  </p>
+  <p className="mt-1 text-xs text-muted-foreground">
+    {safeNumber(form.casesOnHand)} cases × {safeNumber(form.unitsPerCase, 1)} units + {safeNumber(form.looseUnits)} loose
+  </p>
+</div>
 
-                <label className="space-y-1.5">
-                  <span className="text-xs font-medium text-muted-foreground">Reorder Level</span>
-                  <Input
-                    type="number"
-                    step="1"
-                    min="0"
-                    value={form.reorderLevel}
-                    onChange={(event) => setForm({ ...form, reorderLevel: event.target.value })}
-                  />
-                </label>
+<div className="grid gap-4 md:grid-cols-3">
+  <label className="space-y-1.5">
+    <span className="text-xs font-medium text-muted-foreground">Units Per Case</span>
+    <Input
+      type="number"
+      step="1"
+      min="1"
+      value={form.unitsPerCase}
+      onChange={(event) => setForm({ ...form, unitsPerCase: event.target.value })}
+    />
+  </label>
+
+  <label className="space-y-1.5">
+    <span className="text-xs font-medium text-muted-foreground">Cases On Hand</span>
+    <Input
+      type="number"
+      step="1"
+      min="0"
+      value={form.casesOnHand}
+      onChange={(event) => setForm({ ...form, casesOnHand: event.target.value })}
+    />
+  </label>
+
+  <label className="space-y-1.5">
+    <span className="text-xs font-medium text-muted-foreground">Loose Units</span>
+    <Input
+      type="number"
+      step="1"
+      min="0"
+      value={form.looseUnits}
+      onChange={(event) => setForm({ ...form, looseUnits: event.target.value })}
+    />
+  </label>
+</div>
+
+<label className="space-y-1.5">
+  <span className="text-xs font-medium text-muted-foreground">Reorder Level</span>
+  <Input
+    type="number"
+    step="1"
+    min="0"
+    value={form.reorderLevel}
+    onChange={(event) => setForm({ ...form, reorderLevel: event.target.value })}
+  />
+</label>
               </div>
             </Card>
 
@@ -553,6 +679,7 @@ export default function ProductsPage() {
 
   const {
     products: storeProducts,
+    transactions: storeTransactions,
     updateProduct,
     createProduct,
     isDemoProducts,
@@ -590,6 +717,8 @@ export default function ProductsPage() {
   const [historyQuery, setHistoryQuery] = useState('');
   const [historyVendorFilter, setHistoryVendorFilter] = useState('All');
   const [storeVendorOptions, setStoreVendorOptions] = useState<string[]>([]);
+  const [reorderSearch, setReorderSearch] = useState('');
+  const [reorderPriorityFilter, setReorderPriorityFilter] = useState<'All' | ReorderPriority>('All');
 
   useEffect(() => {
     setItems(storeProducts);
@@ -803,6 +932,115 @@ export default function ProductsPage() {
       .filter((product) => (product.isActive ?? true) && product.stock <= product.reorderLevel)
       .sort((a, b) => a.stock / Math.max(a.reorderLevel, 1) - b.stock / Math.max(b.reorderLevel, 1));
   }, [items]);
+
+  const reorderInsights = useMemo<ReorderInsight[]>(() => {
+    const today = new Date();
+    const todayKey = today.toISOString().split('T')[0];
+    const thirtyDaysAgo = new Date(today);
+    thirtyDaysAgo.setDate(today.getDate() - 30);
+    const thirtyDaysAgoKey = thirtyDaysAgo.toISOString().split('T')[0];
+
+    return items
+      .filter((product) => product.isActive ?? true)
+      .map((product) => {
+        const productUpc = normalizeText(product.upc);
+        const productName = normalizeText(product.name);
+
+        const salesLast30Days = storeTransactions
+          .filter((transaction) => {
+            const transactionDate = transaction.date || dateOnly(transaction.timestamp);
+            const sameUpc = productUpc && normalizeText(transaction.upc) === productUpc;
+            const sameName = productName && normalizeText(transaction.item) === productName;
+            const isSale = transaction.type === 'Sale';
+
+            return isSale && transactionDate >= thirtyDaysAgoKey && transactionDate <= todayKey && (sameUpc || sameName);
+          })
+          .reduce((sum, transaction) => sum + Math.max(0, Number(transaction.quantity) || 0), 0);
+
+        const averageDailySales = salesLast30Days > 0 ? salesLast30Days / 30 : 0;
+
+        const matchingReceipts = receivingHistory
+          .map((receipt) => {
+            const matchingLines = (receipt.lines || []).filter((line) => {
+              const sameUpc = productUpc && normalizeText(line.upc) === productUpc;
+              const sameName = productName && normalizeText(line.name) === productName;
+              return sameUpc || sameName;
+            });
+
+            const quantity = matchingLines.reduce((sum, line) => sum + Number(line.quantity || 0), 0);
+
+            return {
+              date: receipt.date,
+              quantity,
+            };
+          })
+          .filter((receipt) => receipt.quantity > 0)
+          .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+
+        const lastDelivery = matchingReceipts[0] || null;
+        const daysLeft = averageDailySales > 0 ? Math.floor(product.stock / averageDailySales) : null;
+
+        const suggestedQtyFromSales = averageDailySales > 0 ? Math.ceil(averageDailySales * 14) : product.reorderLevel * 2;
+        const suggestedQty = Math.max(product.reorderLevel * 2 - product.stock, suggestedQtyFromSales, product.reorderLevel);
+
+        return {
+          product,
+          salesLast30Days,
+          averageDailySales,
+          daysLeft,
+          suggestedQty,
+          lastDeliveryDate: lastDelivery?.date || null,
+          lastDeliveryQty: lastDelivery?.quantity || 0,
+          priority: getReorderPriority(product, daysLeft),
+        };
+      })
+      .filter((item) => {
+        const needsReorder = item.product.stock <= item.product.reorderLevel;
+        const sellingFast = item.daysLeft !== null && item.daysLeft <= 14;
+        return needsReorder || sellingFast;
+      })
+      .sort((a, b) => {
+        const priorityRank: Record<ReorderPriority, number> = {
+          Critical: 0,
+          Soon: 1,
+          Watch: 2,
+        };
+
+        return priorityRank[a.priority] - priorityRank[b.priority];
+      });
+  }, [items, receivingHistory, storeTransactions]);
+
+  const filteredReorderInsights = useMemo(() => {
+    const search = reorderSearch.trim().toLowerCase();
+
+    return reorderInsights.filter((insight) => {
+      const haystack = [
+        insight.product.name,
+        insight.product.upc,
+        insight.product.department,
+        insight.product.category,
+        insight.product.vendor,
+        insight.priority,
+      ]
+        .filter(Boolean)
+        .join(' ')
+        .toLowerCase();
+
+      if (search && !haystack.includes(search)) return false;
+      if (reorderPriorityFilter !== 'All' && insight.priority !== reorderPriorityFilter) return false;
+
+      return true;
+    });
+  }, [reorderInsights, reorderSearch, reorderPriorityFilter]);
+
+  const reorderSummary = useMemo(() => {
+    return {
+      critical: reorderInsights.filter((item) => item.priority === 'Critical').length,
+      soon: reorderInsights.filter((item) => item.priority === 'Soon').length,
+      watch: reorderInsights.filter((item) => item.priority === 'Watch').length,
+      suggestedUnits: reorderInsights.reduce((sum, item) => sum + item.suggestedQty, 0),
+    };
+  }, [reorderInsights]);
 
   const filteredProducts = useMemo(() => {
     return items.filter((product) => {
@@ -1089,14 +1327,20 @@ export default function ProductsPage() {
             ? matched.stock + line.quantity
             : Math.max(0, matched.stock - line.quantity);
 
-        const updatedProduct: Product = {
-          ...matched,
-          stock: nextStock,
-          costPrice: mode === 'add' ? line.unitCost || matched.costPrice : matched.costPrice,
-          vendor: mode === 'add' ? line.vendor || matched.vendor : matched.vendor,
-          department: mode === 'add' ? line.department || matched.department || matched.category : matched.department,
-          category: mode === 'add' ? line.department || matched.department || matched.category : matched.category,
-        };
+        const unitsPerCase = Math.max(1, Number(matched.unitsPerCase) || 1);
+const nextBreakdown = getCaseBreakdown(nextStock, unitsPerCase);
+
+    const updatedProduct: Product = {
+    ...matched,
+    stock: nextStock,
+    unitsPerCase,
+    casesOnHand: nextBreakdown.cases,
+    looseUnits: nextBreakdown.looseUnits,
+    costPrice: mode === 'add' ? line.unitCost || matched.costPrice : matched.costPrice,
+    vendor: mode === 'add' ? line.vendor || matched.vendor : matched.vendor,
+    department: mode === 'add' ? line.department || matched.department || matched.category : matched.department,
+    category: mode === 'add' ? line.department || matched.department || matched.category : matched.category,
+    };
 
         nextProducts = nextProducts.map((product) =>
           product.upc === matched.upc ? updatedProduct : product
@@ -1113,21 +1357,24 @@ export default function ProductsPage() {
         const newProductUpc = line.upc || `INV-${Date.now()}-${Math.round(Math.random() * 10000)}`;
 
         const newProduct: Product = {
-          upc: newProductUpc,
-          name: line.name,
-          category: line.department || 'General Merchandise',
-          department: line.department || 'General Merchandise',
-          brand: 'Unknown',
-          vendor: line.vendor || receiptVendor || undefined,
-          costPrice: line.unitCost,
-          sellPrice: line.unitCost > 0 ? Number((line.unitCost * 1.35).toFixed(2)) : 0,
-          stock: line.quantity,
-          reorderLevel: 10,
-          taxCategory: 'standard',
-          taxRate: 0,
-          taxable: true,
-          ebtEligible: false,
-          isActive: true,
+        upc: newProductUpc,
+        name: line.name,
+        category: line.department || 'General Merchandise',
+        department: line.department || 'General Merchandise',
+        brand: 'Unknown',
+        vendor: line.vendor || receiptVendor || undefined,
+        costPrice: line.unitCost,
+        sellPrice: line.unitCost > 0 ? Number((line.unitCost * 1.35).toFixed(2)) : 0,
+        stock: line.quantity,
+        unitsPerCase: 1,
+        casesOnHand: line.quantity,
+        looseUnits: 0,
+        reorderLevel: 10,
+        taxCategory: 'standard',
+        taxRate: 0,
+        taxable: true,
+        ebtEligible: false,
+        isActive: true,
         };
 
         nextProducts = [newProduct, ...nextProducts];
@@ -1959,57 +2206,146 @@ export default function ProductsPage() {
       )}
 
       {activeTab === 'reorder' && (
-        <Card className="overflow-hidden">
-          <div className="border-b border-border p-4">
-            <h2 className="font-semibold text-foreground">Reorder List</h2>
-            <p className="text-sm text-muted-foreground">Products at or below reorder level.</p>
+        <div className="space-y-5">
+          <div className="grid gap-4 md:grid-cols-4">
+            <Card className="p-4">
+              <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Critical</p>
+              <p className="mt-2 text-2xl font-bold text-destructive">{reorderSummary.critical}</p>
+            </Card>
+
+            <Card className="p-4">
+              <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Soon</p>
+              <p className="mt-2 text-2xl font-bold text-foreground">{reorderSummary.soon}</p>
+            </Card>
+
+            <Card className="p-4">
+              <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Watch</p>
+              <p className="mt-2 text-2xl font-bold text-foreground">{reorderSummary.watch}</p>
+            </Card>
+
+            <Card className="p-4">
+              <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Suggested Units</p>
+              <p className="mt-2 text-2xl font-bold text-foreground">{formatNumber(reorderSummary.suggestedUnits)}</p>
+            </Card>
           </div>
 
-          <div className="overflow-x-auto">
-            <table className="w-full min-w-[850px] text-sm">
-              <thead className="bg-secondary/50 text-xs uppercase tracking-wide text-muted-foreground">
-                <tr>
-                  <th className="px-4 py-3 text-left">Product</th>
-                  <th className="px-4 py-3 text-left">Vendor</th>
-                  <th className="px-4 py-3 text-right">Stock</th>
-                  <th className="px-4 py-3 text-right">Reorder Level</th>
-                  <th className="px-4 py-3 text-right">Suggested Qty</th>
-                  <th className="px-4 py-3 text-right">Action</th>
-                </tr>
-              </thead>
+          <Card className="p-4">
+            <div className="grid gap-3 md:grid-cols-[1fr_220px]">
+              <div className="relative">
+                <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+                <Input
+                  value={reorderSearch}
+                  onChange={(event) => setReorderSearch(event.target.value)}
+                  placeholder="Search reorder by product, UPC, department, vendor, or priority..."
+                  className="pl-9"
+                />
+              </div>
 
-              <tbody>
-                {lowStockProducts.map((product) => {
-                  const suggestedQty = Math.max(product.reorderLevel * 2 - product.stock, product.reorderLevel);
+              <select
+                value={reorderPriorityFilter}
+                onChange={(event) => setReorderPriorityFilter(event.target.value as 'All' | ReorderPriority)}
+                className="h-10 rounded-md border border-input bg-background px-3 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+              >
+                <option value="All">All priorities</option>
+                <option value="Critical">Critical</option>
+                <option value="Soon">Soon</option>
+                <option value="Watch">Watch</option>
+              </select>
+            </div>
+          </Card>
 
-                  return (
-                    <tr key={product.upc} className="border-t border-border/70">
-                      <td className="px-4 py-4">
-                        <p className="font-semibold text-foreground">{product.name}</p>
-                        <p className="font-mono text-xs text-muted-foreground">UPC {product.upc}</p>
-                      </td>
+          <Card className="overflow-hidden">
+            <div className="border-b border-border p-4">
+              <h2 className="font-semibold text-foreground">Reorder Intelligence</h2>
+              <p className="text-sm text-muted-foreground">
+                Suggested order quantities use current stock, recent sales, reorder level, and receiving history.
+              </p>
+            </div>
 
-                      <td className="px-4 py-4 text-muted-foreground">{product.vendor || 'No vendor'}</td>
-                      <td className="px-4 py-4 text-right font-semibold text-destructive">{formatNumber(product.stock)}</td>
-                      <td className="px-4 py-4 text-right text-muted-foreground">{formatNumber(product.reorderLevel)}</td>
-                      <td className="px-4 py-4 text-right font-semibold text-foreground">{formatNumber(suggestedQty)}</td>
+            {filteredReorderInsights.length > 0 ? (
+              <div className="grid gap-4 p-4">
+                {filteredReorderInsights.map((insight) => (
+                  <Card key={insight.product.upc} className="p-4">
+                    <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+                      <div className="min-w-0">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <h3 className="font-semibold text-foreground">{insight.product.name}</h3>
+                          <span className={cn('rounded-full px-2 py-1 text-xs font-semibold', priorityClass(insight.priority))}>
+                            {insight.priority}
+                          </span>
+                        </div>
 
-                      <td className="px-4 py-4 text-right">
-                        <Button size="sm" variant="outline" onClick={() => openEditModal(product)}>
-                          Edit
+                        <p className="mt-1 font-mono text-xs text-muted-foreground">UPC {insight.product.upc}</p>
+                        <p className="mt-1 text-sm text-muted-foreground">
+                          {insight.product.department || insight.product.category} · {insight.product.vendor || 'No vendor'}
+                        </p>
+                      </div>
+
+                      <div className="flex flex-wrap gap-2">
+                        <Button size="sm" variant="outline" onClick={() => openEditModal(insight.product)}>
+                          <Pencil className="mr-2 h-4 w-4" />
+                          Edit Product
                         </Button>
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
 
-          {!lowStockProducts.length && (
-            <div className="p-8 text-center text-sm text-muted-foreground">No reorder items right now.</div>
-          )}
-        </Card>
+                        <Button size="sm" onClick={() => setActiveTab('receiving')}>
+                          <Receipt className="mr-2 h-4 w-4" />
+                          Receive
+                        </Button>
+                      </div>
+                    </div>
+
+                    <div className="rounded-lg bg-secondary/40 p-3">
+                    <p className="text-xs text-muted-foreground">Current Stock</p>
+                    <p className="mt-1 text-xl font-bold text-foreground">{formatNumber(insight.product.stock)}</p>
+                    <p className="text-xs text-muted-foreground">
+                        {formatCaseBreakdown(insight.product.stock, Number(insight.product.unitsPerCase) || 1)}
+                    </p>
+                    <p className="text-xs text-muted-foreground">Reorder at {formatNumber(insight.product.reorderLevel)}</p>
+                    </div>
+
+                      <div className="rounded-lg bg-secondary/40 p-3">
+                        <p className="text-xs text-muted-foreground">Sold Last 30 Days</p>
+                        <p className="mt-1 text-xl font-bold text-foreground">{formatNumber(insight.salesLast30Days)}</p>
+                        <p className="text-xs text-muted-foreground">
+                          {insight.averageDailySales.toFixed(1)} units/day
+                        </p>
+                      </div>
+
+                      <div className="rounded-lg bg-secondary/40 p-3">
+                        <p className="text-xs text-muted-foreground">Estimated Days Left</p>
+                        <p className="mt-1 text-xl font-bold text-foreground">
+                          {insight.daysLeft === null ? 'No sales trend' : `${insight.daysLeft} days`}
+                        </p>
+                        <p className="text-xs text-muted-foreground">Based on recent sales</p>
+                      </div>
+
+                      <div className="rounded-lg bg-secondary/40 p-3">
+                        <p className="text-xs text-muted-foreground">Suggested Order</p>
+                        <p className="mt-1 text-xl font-bold text-foreground">{formatNumber(insight.suggestedQty)}</p>
+                        <p className="text-xs text-muted-foreground">
+                            {formatCaseBreakdown(insight.suggestedQty, Number(insight.product.unitsPerCase) || 1)}
+                        </p>
+                        </div>
+
+                    <div className="mt-3 rounded-lg border border-border p-3 text-sm">
+                      <p className="font-medium text-foreground">Last delivery</p>
+                      <p className="mt-1 text-muted-foreground">
+                       {formatShortDate(insight.lastDeliveryDate)}
+                        {insight.lastDeliveryQty > 0
+                        ? ` · ${formatCaseBreakdown(insight.lastDeliveryQty, Number(insight.product.unitsPerCase) || 1)} received`
+                        : ''}
+                      </p>
+                    </div>
+                  </Card>
+                ))}
+              </div>
+            ) : (
+              <div className="p-8 text-center text-sm text-muted-foreground">
+                No reorder items match the current filters.
+              </div>
+            )}
+          </Card>
+        </div>
       )}
 
       {activeTab === 'history' && (

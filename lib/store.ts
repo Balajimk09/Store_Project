@@ -74,6 +74,9 @@ function mapDbProduct(row: ProductRow): Product {
     ebtEligible: row.ebt_eligible ?? false,
     isActive: row.is_active ?? true,
     notes: row.notes ?? undefined,
+    unitsPerCase: Number(row.units_per_case) || 1,
+    casesOnHand: Number(row.cases_on_hand) || 0,
+    looseUnits: Number(row.loose_units) || 0,
   };
 }
 
@@ -146,6 +149,11 @@ function aggregations(txns: Transaction[]) {
 function normalizeProduct(product: Product): Product {
   const category = (product.category || product.department || 'Uncategorized').trim();
   const department = (product.department || product.category || category).trim();
+  const unitsPerCase = Math.max(1, Number(product.unitsPerCase) || 1);
+  const casesOnHand = Math.max(0, Number(product.casesOnHand) || 0);
+  const looseUnits = Math.max(0, Number(product.looseUnits) || 0);
+  const calculatedStock = casesOnHand * unitsPerCase + looseUnits;
+  const stock = calculatedStock > 0 ? calculatedStock : Number(product.stock) || 0;
 
   return {
     ...product,
@@ -156,7 +164,7 @@ function normalizeProduct(product: Product): Product {
     brand: product.brand?.trim() || 'Unknown',
     costPrice: Number(product.costPrice) || 0,
     sellPrice: Number(product.sellPrice) || 0,
-    stock: Number(product.stock) || 0,
+    stock,
     reorderLevel: Number(product.reorderLevel) || 10,
     vendor: product.vendor?.trim() || undefined,
     sku: product.sku?.trim() || undefined,
@@ -166,6 +174,9 @@ function normalizeProduct(product: Product): Product {
     ebtEligible: product.ebtEligible ?? false,
     isActive: product.isActive ?? true,
     notes: product.notes?.trim() || undefined,
+    unitsPerCase,
+    casesOnHand,
+    looseUnits,
   };
 }
 
@@ -189,6 +200,9 @@ function productToDbFields(product: Product) {
     ebt_eligible: normalized.ebtEligible ?? false,
     is_active: normalized.isActive ?? true,
     notes: normalized.notes ?? null,
+    units_per_case: normalized.unitsPerCase ?? 1,
+    cases_on_hand: normalized.casesOnHand ?? 0,
+    loose_units: normalized.looseUnits ?? 0,
     updated_at: new Date().toISOString(),
   };
 }

@@ -86,6 +86,9 @@ export interface ProductRow {
   ebt_eligible: boolean;
   is_active: boolean;
   notes: string | null;
+  units_per_case: number;
+  cases_on_hand: number;
+  loose_units: number;
   created_at: string;
   updated_at: string;
 }

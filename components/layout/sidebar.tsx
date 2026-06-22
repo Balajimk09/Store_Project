@@ -6,7 +6,7 @@ import { useState, type ElementType, type ReactNode } from 'react';
 import {
   LayoutDashboard,
   Receipt,
-  BookOpen,
+  Package,
   ShieldAlert,
   Sparkles,
   FileBarChart,
@@ -28,7 +28,7 @@ const navItems = [
   { href: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
   { href: '/transactions', label: 'Live Transactions', icon: Receipt },
   { href: '/upload', label: 'Upload POS Data', icon: Upload },
-  { href: '/pricebook', label: 'Pricebook', icon: BookOpen },
+  { href: '/products', label: 'Products', icon: Package },
   { href: '/fuel', label: 'Fuel', icon: Fuel },
   { href: '/store-settings', label: 'Store Settings', icon: Settings },
   { href: '/cashier-audit', label: 'Cashier Audit', icon: ShieldAlert },
@@ -47,36 +47,39 @@ function StoreCard({ onNavigate }: { onNavigate?: () => void }) {
     router.push('/login');
   };
 
- const setupComplete =
-  !!store?.store_name?.trim() &&
-  !!store?.store_address?.trim() &&
-  !!store?.city?.trim() &&
-  !!store?.state?.trim() &&
-  !!store?.zip_code?.trim() &&
-  !!store?.phone_number?.trim() &&
-  !!store?.pos_type?.trim() &&
-  Number(store?.register_count) > 0;
+  const setupComplete =
+    !!store?.store_name?.trim() &&
+    !!store?.store_address?.trim() &&
+    !!store?.city?.trim() &&
+    !!store?.state?.trim() &&
+    !!store?.zip_code?.trim() &&
+    !!store?.phone_number?.trim() &&
+    !!store?.pos_type?.trim() &&
+    Number(store?.register_count) > 0;
 
-const storeName = store?.store_name?.trim() || 'Setup required';
+  const storeName = store?.store_name?.trim() || 'Setup required';
 
-return (
-  <div className="border-t border-sidebar-accent p-4 space-y-2">
-    <Link
-      href="/setup"
-      onClick={onNavigate}
-      className="flex items-center gap-3 rounded-lg bg-sidebar-accent p-3 hover:bg-sidebar-accent/80 transition-colors"
-    >
-      <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-primary/15 text-primary">
-        <Store className="h-4 w-4" />
-      </div>
-      <div className="min-w-0">
-        <p className="truncate text-sm font-medium text-white">{storeName}</p>
-      </div>
-    </Link>     {user && (
+  return (
+    <div className="space-y-2 border-t border-sidebar-accent p-4">
+      <Link
+        href="/setup"
+        onClick={onNavigate}
+        className="flex items-center gap-3 rounded-lg bg-sidebar-accent p-3 transition-colors hover:bg-sidebar-accent/80"
+      >
+        <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-primary/15 text-primary">
+          <Store className="h-4 w-4" />
+        </div>
+        <div className="min-w-0">
+          <p className="truncate text-sm font-medium text-white">{storeName}</p>
+          {!setupComplete && <p className="text-xs text-sidebar-foreground/60">Complete store setup</p>}
+        </div>
+      </Link>
+
+      {user && (
         <button
           onClick={handleLogout}
           disabled={signingOut}
-          className="flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-sm text-sidebar-foreground/60 hover:bg-sidebar-accent hover:text-white transition-colors disabled:opacity-50"
+          className="flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-sm text-sidebar-foreground/60 transition-colors hover:bg-sidebar-accent hover:text-white disabled:opacity-50"
         >
           {signingOut ? (
             <Loader2 className="h-4 w-4 shrink-0 animate-spin" />
@@ -94,9 +97,10 @@ export function Sidebar() {
   const pathname = usePathname();
   const [mobileOpen, setMobileOpen] = useState(false);
 
+  const isActive = (href: string) => pathname === href || (href === '/products' && pathname === '/pricebook');
+
   return (
     <>
-      {/* Mobile top bar */}
       <div className="sticky top-0 z-40 flex items-center justify-between border-b border-sidebar-accent bg-sidebar px-4 py-3 lg:hidden">
         <Link href="/dashboard" className="flex items-center gap-2 text-white">
           <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary">
@@ -115,11 +119,10 @@ export function Sidebar() {
         </Button>
       </div>
 
-      {/* Mobile drawer */}
       {mobileOpen && (
         <div className="fixed inset-0 z-50 lg:hidden">
           <div className="absolute inset-0 bg-black/60 animate-fade-in" onClick={() => setMobileOpen(false)} />
-          <aside className="absolute left-0 top-0 h-full w-72 bg-sidebar p-4 animate-slide-up flex flex-col">
+          <aside className="absolute left-0 top-0 flex h-full w-72 flex-col bg-sidebar p-4 animate-slide-up">
             <div className="flex items-center justify-between">
               <Link href="/dashboard" className="flex items-center gap-2 text-white" onClick={() => setMobileOpen(false)}>
                 <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-primary">
@@ -133,7 +136,7 @@ export function Sidebar() {
             </div>
             <nav className="mt-8 flex-1 space-y-1">
               {navItems.map((item) => (
-                <NavLink key={item.href} item={item} active={pathname === item.href} onClick={() => setMobileOpen(false)} />
+                <NavLink key={item.href} item={item} active={isActive(item.href)} onClick={() => setMobileOpen(false)} />
               ))}
             </nav>
             <StoreCard onNavigate={() => setMobileOpen(false)} />
@@ -141,7 +144,6 @@ export function Sidebar() {
         </div>
       )}
 
-      {/* Desktop sidebar */}
       <aside className="fixed inset-y-0 left-0 hidden w-64 flex-col bg-sidebar text-sidebar-foreground lg:flex">
         <div className="flex items-center gap-2.5 px-6 py-6">
           <Link href="/dashboard" className="flex items-center gap-2.5">
@@ -154,7 +156,7 @@ export function Sidebar() {
 
         <nav className="flex-1 space-y-1 px-3 py-2">
           {navItems.map((item) => (
-            <NavLink key={item.href} item={item} active={pathname === item.href} />
+            <NavLink key={item.href} item={item} active={isActive(item.href)} />
           ))}
         </nav>
 
@@ -174,6 +176,7 @@ function NavLink({
   onClick?: () => void;
 }) {
   const Icon = item.icon;
+
   return (
     <Link
       href={item.href}
@@ -191,7 +194,7 @@ function NavLink({
   );
 }
 
-export function DashboardShell({ children }: { children: ReactNode })  {
+export function DashboardShell({ children }: { children: ReactNode }) {
   return (
     <div className="min-h-screen bg-background">
       <Sidebar />

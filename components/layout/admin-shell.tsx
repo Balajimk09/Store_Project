@@ -12,6 +12,7 @@ import {
   LogOut,
   Menu,
   Package,
+  Settings,
   ShieldCheck,
   Store,
   Ticket,
@@ -35,6 +36,7 @@ const superadminNavItems = [
   { href: '/admin/payments', label: 'Payments & Revenue', icon: CreditCard },
   { href: '/admin/marketing', label: 'Marketing Insights', icon: BarChart3 },
   { href: '/admin/audit-logs', label: 'Audit Logs', icon: FileClock },
+  { href: '/admin/settings', label: 'Settings', icon: Settings },
 ];
 
 function SuperadminCard({ onNavigate }: { onNavigate?: () => void }) {

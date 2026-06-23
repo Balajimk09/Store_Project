@@ -1,10 +1,8 @@
-﻿'use client';
+'use client';
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   AlertTriangle,
-  LockKeyhole,
-  Loader2,
   Camera,
   CheckCircle2,
   CircleAlert,
@@ -34,7 +32,6 @@ import { Card } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { useStoreData } from '@/lib/store';
 import { useAuth } from '@/lib/auth';
-import { usePermissions } from '@/lib/use-permissions';
 import { supabase } from '@/lib/supabase';
 import type { Product } from '@/lib/mock-data';
 import { CHART_COLORS } from '@/lib/mock-data';
@@ -571,7 +568,7 @@ function ProductModal({
     {formatNumber(calculateStockFromCases(form))}
   </p>
   <p className="mt-1 text-xs text-muted-foreground">
-    {safeNumber(form.casesOnHand)} cases Ã— {safeNumber(form.unitsPerCase, 1)} units + {safeNumber(form.looseUnits)} loose
+    {safeNumber(form.casesOnHand)} cases × {safeNumber(form.unitsPerCase, 1)} units + {safeNumber(form.looseUnits)} loose
   </p>
 </div>
 
@@ -721,16 +718,8 @@ function ProductModal({
   );
 }
 
-function ProductsPageContent() {
-  const { user, store } = useAuth();
-  const { loading: permissionsLoading, hasPermission } = usePermissions();
-
-  const canViewProducts = hasPermission('products.view');
-  const canCreateProducts = hasPermission('products.create');
-  const canEditProducts = hasPermission('products.edit');
-  const canExportProducts = hasPermission('products.export');
-  const canReceiveInventory =
-    hasPermission('receiving.create') || hasPermission('receiving.edit');
+export default function ProductsPage() {
+  const { store } = useAuth();
 
   const {
     products: storeProducts,
@@ -1494,11 +1483,6 @@ function ProductsPageContent() {
   };
 
   const addManualReceivingLine = () => {
-    if (!canReceiveInventory) {
-      setReceivingMessage('You do not have permission to receive inventory.');
-      return;
-    }
-
     setReceivingLines((previous) => [
       ...previous,
       {
@@ -1516,11 +1500,6 @@ function ProductsPageContent() {
   };
 
   const handleInvoiceFile = (file: File | null) => {
-    if (!canReceiveInventory) {
-      setReceivingMessage('You do not have permission to receive inventory.');
-      return;
-    }
-
     if (!file) return;
 
     const lowerName = file.name.toLowerCase();
@@ -1636,11 +1615,6 @@ function ProductsPageContent() {
   };
 
   const openAddModal = () => {
-    if (!canCreateProducts) {
-      setPurchaseOrderMessage('You do not have permission to add products.');
-      return;
-    }
-
     setModalMode('add');
     setForm(EMPTY_PRODUCT_FORM);
     setFormError(null);
@@ -1648,11 +1622,6 @@ function ProductsPageContent() {
   };
 
   const openEditModal = (product: Product) => {
-    if (!canEditProducts) {
-      setPurchaseOrderMessage('You do not have permission to edit products.');
-      return;
-    }
-
     setModalMode('edit');
     setForm(productToForm(product));
     setFormError(null);
@@ -1660,16 +1629,6 @@ function ProductsPageContent() {
   };
 
   const saveProduct = async () => {
-    if (modalMode === 'add' && !canCreateProducts) {
-      setFormError('You do not have permission to add products.');
-      return;
-    }
-
-    if (modalMode === 'edit' && !canEditProducts) {
-      setFormError('You do not have permission to edit products.');
-      return;
-    }
-
     const validationError = validateProductForm(form);
 
     if (validationError) {
@@ -1694,11 +1653,6 @@ function ProductsPageContent() {
   };
 
   const exportProducts = () => {
-    if (!canExportProducts) {
-      setPurchaseOrderMessage('You do not have permission to export products.');
-      return;
-    }
-
     exportToCsv(
       'storepulse-products-inventory.csv',
       filteredProducts.map((product) => ({
@@ -1888,12 +1842,7 @@ const nextBreakdown = getCaseBreakdown(nextStock, unitsPerCase);
   };
 
   const saveReceiving = async () => {
-    if (!canReceiveInventory) {
-      setReceivingMessage('You do not have permission to receive inventory.');
-      return;
-    }
-
-    const validLines = receivingLines.filter((line: ReceivingLine) => line.name.trim() && line.quantity > 0);
+    const validLines = receivingLines.filter((line) => line.name.trim() && line.quantity > 0);
 
     if (!validLines.length) {
       setReceivingMessage('No valid invoice lines to save.');
@@ -2036,35 +1985,7 @@ const nextBreakdown = getCaseBreakdown(nextStock, unitsPerCase);
       setReceivingMessage(error instanceof Error ? error.message : 'Could not delete receiving.');
     }
   };
-  if (permissionsLoading) {
-    return (
-      <DashboardShell>
-        <Card className="flex items-center gap-3 p-6 text-sm text-muted-foreground">
-          <Loader2 className="h-4 w-4 animate-spin" />
-          Checking permissions...
-        </Card>
-      </DashboardShell>
-    );
-  }
 
-  if (user && !canViewProducts) {
-    return (
-      <DashboardShell>
-        <div className="flex min-h-[60vh] items-center justify-center">
-          <Card className="w-full max-w-md p-8 text-center">
-            <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-xl bg-destructive/10 text-destructive">
-              <LockKeyhole className="h-6 w-6" />
-            </div>
-
-            <h1 className="mt-4 text-lg font-semibold">Products access required</h1>
-            <p className="mt-2 text-sm text-muted-foreground">
-              You do not have permission to view Products & Inventory.
-            </p>
-          </Card>
-        </div>
-      </DashboardShell>
-    );
-  }
   if (!loaded) {
     return (
       <DashboardShell>
@@ -2077,17 +1998,17 @@ const nextBreakdown = getCaseBreakdown(nextStock, unitsPerCase);
     <DashboardShell>
       <PageHeader
         title="Products & Inventory"
-        description={`${summary.totalProducts} active products Â· ${formatNumber(summary.totalUnits)} units in stock Â· ${summary.lowStockCount} low stock Â· ${
+        description={`${summary.totalProducts} active products · ${formatNumber(summary.totalUnits)} units in stock · ${summary.lowStockCount} low stock · ${
           isDemoProducts ? 'demo data' : productsMeta.fileName
         }`}
       >
         <div className="flex flex-wrap gap-2">
-          <Button variant="outline" size="sm" onClick={exportProducts} disabled={!canExportProducts}>
+          <Button variant="outline" size="sm" onClick={exportProducts}>
             <Download className="mr-2 h-4 w-4" />
             Export
           </Button>
 
-          <Button size="sm" onClick={openAddModal} disabled={!canCreateProducts}>
+          <Button size="sm" onClick={openAddModal}>
             <Plus className="mr-2 h-4 w-4" />
             Add Product
           </Button>
@@ -2102,7 +2023,7 @@ const nextBreakdown = getCaseBreakdown(nextStock, unitsPerCase);
       )}
 
       <div className="mb-5 grid gap-3 md:grid-cols-4">
-        <button onClick={openAddModal} disabled={!canCreateProducts} className="rounded-lg border bg-card p-4 text-left shadow-sm transition hover:bg-secondary/40 disabled:cursor-not-allowed disabled:opacity-50">
+        <button onClick={openAddModal} className="rounded-lg border bg-card p-4 text-left shadow-sm transition hover:bg-secondary/40">
           <Plus className="mb-3 h-5 w-5 text-primary" />
           <p className="font-semibold text-foreground">Add Product</p>
           <p className="mt-1 text-xs text-muted-foreground">Create a new item.</p>
@@ -2114,7 +2035,7 @@ const nextBreakdown = getCaseBreakdown(nextStock, unitsPerCase);
           <p className="mt-1 text-xs text-muted-foreground">Edit cost, sell price, or tax.</p>
         </button>
 
-        <button onClick={() => setActiveTab('receiving')} disabled={!canReceiveInventory} className="rounded-lg border bg-card p-4 text-left shadow-sm transition hover:bg-secondary/40 disabled:cursor-not-allowed disabled:opacity-50">
+        <button onClick={() => setActiveTab('receiving')} className="rounded-lg border bg-card p-4 text-left shadow-sm transition hover:bg-secondary/40">
           <Receipt className="mb-3 h-5 w-5 text-primary" />
           <p className="font-semibold text-foreground">Receive Inventory</p>
           <p className="mt-1 text-xs text-muted-foreground">Upload invoice or delivery CSV.</p>
@@ -2206,11 +2127,11 @@ const nextBreakdown = getCaseBreakdown(nextStock, unitsPerCase);
                     <div className="min-w-0">
                       <p className="truncate text-sm font-semibold text-foreground">{product.name}</p>
                       <p className="text-xs text-muted-foreground">
-                        {product.stock} left Â· reorder at {product.reorderLevel}
+                        {product.stock} left · reorder at {product.reorderLevel}
                       </p>
                     </div>
 
-                    <Button size="sm" variant="outline" onClick={() => openEditModal(product)} disabled={!canEditProducts}>
+                    <Button size="sm" variant="outline" onClick={() => openEditModal(product)}>
                       Edit
                     </Button>
                   </div>
@@ -2336,7 +2257,7 @@ const nextBreakdown = getCaseBreakdown(nextStock, unitsPerCase);
                         </td>
 
                         <td className="px-4 py-4 text-right">
-                          <Button variant="outline" size="sm" onClick={() => openEditModal(product)} disabled={!canEditProducts}>
+                          <Button variant="outline" size="sm" onClick={() => openEditModal(product)}>
                             <Pencil className="mr-2 h-4 w-4" />
                             Edit
                           </Button>
@@ -2777,7 +2698,7 @@ const nextBreakdown = getCaseBreakdown(nextStock, unitsPerCase);
                         <div>
                           <h3 className="font-semibold text-foreground">{group.vendor}</h3>
                           <p className="mt-1 text-sm text-muted-foreground">
-                            {group.itemCount} reorder item(s) Â· {formatNumber(group.orderUnits)} suggested units
+                            {group.itemCount} reorder item(s) · {formatNumber(group.orderUnits)} suggested units
                           </p>
                           <p className="mt-1 text-sm font-semibold text-foreground">
                             Estimated reorder cost: {formatCurrency(group.estimatedCost)}
@@ -2793,7 +2714,7 @@ const nextBreakdown = getCaseBreakdown(nextStock, unitsPerCase);
 
                       <div className="mt-4 grid gap-2 text-xs text-muted-foreground">
                         <p>
-                          Suggested: {formatNumber(group.suggestedUnits)} units Â· Current order list:{' '}
+                          Suggested: {formatNumber(group.suggestedUnits)} units · Current order list:{' '}
                           {selectedCount} item(s)
                         </p>
                         <p>Open vendor to add products, edit cases, and export.</p>
@@ -2841,7 +2762,7 @@ const nextBreakdown = getCaseBreakdown(nextStock, unitsPerCase);
                   Search vendor products, add items to the order list, edit quantities, and export.
                 </p>
                 <p className="mt-2 text-sm font-semibold text-foreground">
-                  Current order list: {activeVendorOrderTotals.items} item(s) Â· {formatNumber(activeVendorOrderTotals.units)} units Â·{' '}
+                  Current order list: {activeVendorOrderTotals.items} item(s) · {formatNumber(activeVendorOrderTotals.units)} units ·{' '}
                   {formatCurrency(activeVendorOrderTotals.cost)}
                 </p>
               </div>
@@ -2956,7 +2877,7 @@ const nextBreakdown = getCaseBreakdown(nextStock, unitsPerCase);
 
                                 <p className="mt-1 font-mono text-xs text-muted-foreground">UPC {product.upc}</p>
                                 <p className="mt-1 text-sm text-muted-foreground">
-                                  {product.department || product.category} Â· {product.brand || 'Unknown brand'}
+                                  {product.department || product.category} · {product.brand || 'Unknown brand'}
                                 </p>
                               </div>
 
@@ -2969,7 +2890,7 @@ const nextBreakdown = getCaseBreakdown(nextStock, unitsPerCase);
                                   {selected ? 'In Order' : 'Add to Order'}
                                 </Button>
 
-                                <Button size="sm" variant="outline" onClick={() => openEditModal(product)} disabled={!canEditProducts}>
+                                <Button size="sm" variant="outline" onClick={() => openEditModal(product)}>
                                   <Pencil className="mr-2 h-4 w-4" />
                                   Edit
                                 </Button>
@@ -3020,13 +2941,13 @@ const nextBreakdown = getCaseBreakdown(nextStock, unitsPerCase);
                               <div className="mt-3 rounded-lg border border-border p-3 text-sm">
                                 <p className="font-medium text-foreground">Sales and delivery</p>
                                 <p className="mt-1 text-muted-foreground">
-                                  Sold last 30 days: {formatNumber(existingInsight.salesLast30Days)} Â· Days left:{' '}
+                                  Sold last 30 days: {formatNumber(existingInsight.salesLast30Days)} · Days left:{' '}
                                   {existingInsight.daysLeft === null ? 'No trend' : `${existingInsight.daysLeft} days`}
                                 </p>
                                 <p className="mt-1 text-muted-foreground">
                                   Last delivery: {formatShortDate(existingInsight.lastDeliveryDate)}
                                   {existingInsight.lastDeliveryQty > 0
-                                    ? ` Â· ${formatCaseBreakdown(existingInsight.lastDeliveryQty, unitsPerCase)} received`
+                                    ? ` · ${formatCaseBreakdown(existingInsight.lastDeliveryQty, unitsPerCase)} received`
                                     : ''}
                                 </p>
                               </div>
@@ -3085,7 +3006,7 @@ const nextBreakdown = getCaseBreakdown(nextStock, unitsPerCase);
                                 <p className="truncate font-semibold text-foreground">{item.product.name}</p>
                                 <p className="font-mono text-xs text-muted-foreground">UPC {item.product.upc}</p>
                                 <p className="mt-1 text-xs text-muted-foreground">
-                                  {item.insight?.priority || 'Manual Add'} Â· {item.product.department || item.product.category}
+                                  {item.insight?.priority || 'Manual Add'} · {item.product.department || item.product.category}
                                 </p>
                               </div>
 
@@ -3219,8 +3140,8 @@ const nextBreakdown = getCaseBreakdown(nextStock, unitsPerCase);
                     <div>
                       <p className="font-semibold text-foreground">{entry.receiptName || entry.fileName}</p>
                       <p className="text-sm text-muted-foreground">
-                        {new Date(entry.date).toLocaleDateString()} Â· {entry.vendor} Â· {entry.itemCount} items
-                        {entry.invoiceNumber ? ` Â· Invoice #${entry.invoiceNumber}` : ''}
+                        {new Date(entry.date).toLocaleDateString()} · {entry.vendor} · {entry.itemCount} items
+                        {entry.invoiceNumber ? ` · Invoice #${entry.invoiceNumber}` : ''}
                       </p>
                       <p className="mt-1 text-sm font-semibold text-foreground">{formatCurrency(entry.totalAmount)}</p>
                     </div>
@@ -3333,8 +3254,3 @@ const nextBreakdown = getCaseBreakdown(nextStock, unitsPerCase);
     </DashboardShell>
   );
 }
-
-export default ProductsPageContent;
-
-
-

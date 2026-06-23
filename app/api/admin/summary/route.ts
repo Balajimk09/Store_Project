@@ -26,6 +26,7 @@ export async function GET(request: NextRequest) {
   const supabaseAdmin = getSupabaseAdmin();
 
   const [
+    authUsersResult,
     stores,
     products,
     transactions,
@@ -34,6 +35,10 @@ export async function GET(request: NextRequest) {
     userProfiles,
     auditLogs,
   ] = await Promise.all([
+    supabaseAdmin.auth.admin.listUsers({
+      page: 1,
+      perPage: 1000,
+    }),
     safeCount('stores'),
     safeCount('products'),
     safeCount('transactions'),
@@ -42,6 +47,10 @@ export async function GET(request: NextRequest) {
     safeCount('user_profiles'),
     safeCount('admin_audit_logs'),
   ]);
+
+  const authUsers = authUsersResult.data?.users || [];
+  const totalAuthUsers = authUsers.length;
+  const authOnlyUsers = Math.max(totalAuthUsers - userProfiles, 0);
 
   const { data: recentStores } = await supabaseAdmin
     .from('stores')
@@ -63,6 +72,8 @@ export async function GET(request: NextRequest) {
       vendors,
       uploadBatches,
       userProfiles,
+      users: totalAuthUsers,
+      authOnlyUsers,
       auditLogs,
       revenue: 0,
       payingCustomers: 0,

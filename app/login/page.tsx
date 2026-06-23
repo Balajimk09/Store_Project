@@ -14,6 +14,14 @@ function isEmail(value: string) {
   return value.includes('@');
 }
 
+function looksLikePhone(value: string) {
+  const trimmed = value.trim();
+  const digits = trimmed.replace(/\D/g, '');
+  const hasLetters = /[a-zA-Z]/.test(trimmed);
+
+  return !hasLetters && digits.length >= 7;
+}
+
 function normalizePhone(value: string) {
   const trimmed = value.trim();
 
@@ -34,6 +42,22 @@ function normalizePhone(value: string) {
   return `+${digits}`;
 }
 
+async function resolveUsernameToEmail(identifier: string) {
+  const response = await fetch(`/api/auth/resolve-login?identifier=${encodeURIComponent(identifier)}`);
+
+  if (!response.ok) {
+    throw new Error('Incorrect username/email/phone or password.');
+  }
+
+  const data = await response.json();
+
+  if (!data.email) {
+    throw new Error('Incorrect username/email/phone or password.');
+  }
+
+  return data.email as string;
+}
+
 export default function LoginPage() {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -51,7 +75,7 @@ export default function LoginPage() {
     const identifier = loginId.trim();
 
     if (!identifier) {
-      setError('Please enter your email or phone number.');
+      setError('Please enter your username, email, or phone number.');
       return;
     }
 
@@ -62,53 +86,98 @@ export default function LoginPage() {
 
     setLoading(true);
 
-    const { data, error: loginError } = isEmail(identifier)
-      ? await supabase.auth.signInWithPassword({
+    try {
+      let signInPayload:
+        | { email: string; password: string }
+        | { phone: string; password: string };
+
+      if (isEmail(identifier)) {
+        signInPayload = {
           email: identifier.toLowerCase(),
           password,
-        })
-      : await supabase.auth.signInWithPassword({
+        };
+      } else if (looksLikePhone(identifier)) {
+        signInPayload = {
           phone: normalizePhone(identifier),
           password,
-        });
+        };
+      } else {
+        const resolvedEmail = await resolveUsernameToEmail(identifier);
 
-    if (loginError) {
+        signInPayload = {
+          email: resolvedEmail.toLowerCase(),
+          password,
+        };
+      }
+
+      const { data, error: loginError } = await supabase.auth.signInWithPassword(signInPayload);
+
+      if (loginError) {
+        setLoading(false);
+        setError('Incorrect username/email/phone or password.');
+        return;
+      }
+
+      const userId = data.user?.id;
+
+      if (!userId) {
+        setLoading(false);
+        setError('Login failed. Please try again.');
+        return;
+      }
+
+      const { data: profileRow } = await supabase
+        .from('user_profiles')
+        .select('must_change_password')
+        .eq('user_id', userId)
+        .maybeSingle();
+
+      const { data: isSuperadmin } = await supabase.rpc('has_permission', {
+        check_user_id: userId,
+        required_permission: 'platform.superadmin',
+      });
+
+      if (isSuperadmin === true) {
+        setLoading(false);
+        router.push('/admin');
+        router.refresh();
+        return;
+      }
+
+      if (profileRow?.must_change_password) {
+        setLoading(false);
+        router.push('/account?forcePassword=1');
+        router.refresh();
+        return;
+      }
+
+      const { data: storeRow, error: storeError } = await supabase
+        .from('stores')
+        .select('id, store_name')
+        .eq('owner_id', userId)
+        .maybeSingle();
+
       setLoading(false);
-      setError('Incorrect email/phone number or password.');
-      return;
-    }
 
-    const userId = data.user?.id;
+      if (storeError) {
+        setError(storeError.message);
+        return;
+      }
 
-    if (!userId) {
-      setLoading(false);
-      setError('Login failed. Please try again.');
-      return;
-    }
+      if (!storeRow?.id) {
+        router.push('/setup');
+        router.refresh();
+        return;
+      }
 
-    const { data: storeRow, error: storeError } = await supabase
-      .from('stores')
-      .select('id, store_name')
-      .eq('owner_id', userId)
-      .maybeSingle();
+      const finalRedirect = redirectTo === '/setup' ? '/dashboard' : redirectTo;
 
-    setLoading(false);
-
-    if (storeError) {
-      setError(storeError.message);
-      return;
-    }
-
-    if (!storeRow?.id) {
-      router.push('/setup');
+      router.push(finalRedirect);
       router.refresh();
-      return;
+    } catch (error) {
+      setLoading(false);
+      setError(error instanceof Error ? error.message : 'Login failed. Please try again.');
     }
-
-    const finalRedirect = redirectTo === '/setup' ? '/dashboard' : redirectTo;
-
-    router.push(finalRedirect);
-    router.refresh();
   };
 
   return (
@@ -125,13 +194,13 @@ export default function LoginPage() {
         <div className="mb-6">
           <h1 className="text-xl font-semibold text-foreground">Welcome back</h1>
           <p className="mt-1 text-sm text-muted-foreground">
-            Sign in to access your store.
+            Sign in using your username, email, or phone number.
           </p>
         </div>
 
         <form onSubmit={handleSubmit} className="space-y-4">
           <div className="space-y-1.5">
-            <Label htmlFor="loginId">Email or phone number</Label>
+            <Label htmlFor="loginId">Username, email, or phone number</Label>
 
             <div className="relative">
               <Mail className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
@@ -142,7 +211,7 @@ export default function LoginPage() {
                 required
                 value={loginId}
                 onChange={(event) => setLoginId(event.target.value)}
-                placeholder="you@store.com or 405-123-4567"
+                placeholder="quickmart27, you@store.com, or 405-123-4567"
                 className="pl-9"
               />
             </div>

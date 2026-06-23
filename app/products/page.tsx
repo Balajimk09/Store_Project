@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   AlertTriangle,
   Camera,
@@ -104,6 +104,28 @@ type ReorderInsight = {
   priority: ReorderPriority;
 };
 
+type VendorOrderGroup = {
+  vendor: string;
+  insights: ReorderInsight[];
+  itemCount: number;
+  suggestedUnits: number;
+  orderUnits: number;
+  estimatedCost: number;
+  criticalCount: number;
+  soonCount: number;
+  watchCount: number;
+};
+
+type VendorOrderItem = {
+  product: Product;
+  insight?: ReorderInsight;
+  unitsPerCase: number;
+  suggestedQty: number;
+  orderUnits: number;
+  orderCases: number;
+  estimatedCost: number;
+};
+
 const RECEIVING_HISTORY_KEY = 'storepulse_receiving_history_v1';
 const INVOICE_BUCKET = 'inventory-invoices';
 
@@ -201,6 +223,28 @@ function formatCaseBreakdown(totalUnits: number, unitsPerCase: number) {
   if (unitsPerCase <= 1) return `${formatNumber(totalUnits)} units`;
 
   return `${formatNumber(breakdown.cases)} cases + ${formatNumber(breakdown.looseUnits)} loose`;
+}
+
+function getCaseOrderPlan(suggestedUnits: number, unitsPerCase: number) {
+  const safeUnitsPerCase = Math.max(1, Number(unitsPerCase) || 1);
+  const safeSuggestedUnits = Math.max(0, Number(suggestedUnits) || 0);
+
+  if (safeUnitsPerCase <= 1) {
+    return {
+      casesToOrder: 0,
+      orderUnits: safeSuggestedUnits,
+      extraUnits: 0,
+    };
+  }
+
+  const casesToOrder = Math.ceil(safeSuggestedUnits / safeUnitsPerCase);
+  const orderUnits = casesToOrder * safeUnitsPerCase;
+
+  return {
+    casesToOrder,
+    orderUnits,
+    extraUnits: Math.max(0, orderUnits - safeSuggestedUnits),
+  };
 }
 
 function calculateStockFromCases(form: ProductFormState) {
@@ -719,6 +763,11 @@ export default function ProductsPage() {
   const [storeVendorOptions, setStoreVendorOptions] = useState<string[]>([]);
   const [reorderSearch, setReorderSearch] = useState('');
   const [reorderPriorityFilter, setReorderPriorityFilter] = useState<'All' | ReorderPriority>('All');
+  const [selectedReorderUpcs, setSelectedReorderUpcs] = useState<string[]>([]);
+  const [purchaseOrderMessage, setPurchaseOrderMessage] = useState<string | null>(null);
+  const [openVendorOrder, setOpenVendorOrder] = useState<string | null>(null);
+  const [vendorProductSearch, setVendorProductSearch] = useState('');
+  const [orderUnitOverrides, setOrderUnitOverrides] = useState<Record<string, string>>({});
 
   useEffect(() => {
     setItems(storeProducts);
@@ -1041,6 +1090,338 @@ export default function ProductsPage() {
       suggestedUnits: reorderInsights.reduce((sum, item) => sum + item.suggestedQty, 0),
     };
   }, [reorderInsights]);
+
+  const selectedReorderSet = useMemo(() => {
+    return new Set(selectedReorderUpcs);
+  }, [selectedReorderUpcs]);
+
+  const selectedPurchaseOrderInsights = useMemo(() => {
+    if (selectedReorderUpcs.length === 0) return filteredReorderInsights;
+
+    return filteredReorderInsights.filter((insight) =>
+      selectedReorderSet.has(insight.product.upc)
+    );
+  }, [filteredReorderInsights, selectedReorderSet, selectedReorderUpcs.length]);
+
+  const getOrderUnitsForProduct = useCallback(
+    (product: Product, suggestedUnits: number) => {
+      const overrideValue = orderUnitOverrides[product.upc];
+
+      if (overrideValue !== undefined && overrideValue.trim() !== '') {
+        return Math.max(0, safeNumber(overrideValue));
+      }
+
+      const unitsPerCase = Number(product.unitsPerCase) || 1;
+      return getCaseOrderPlan(suggestedUnits, unitsPerCase).orderUnits;
+    },
+    [orderUnitOverrides]
+  );
+
+  const getOrderCasesForProduct = useCallback(
+    (product: Product, suggestedUnits: number) => {
+      const unitsPerCase = Math.max(1, Number(product.unitsPerCase) || 1);
+      const orderUnits = getOrderUnitsForProduct(product, suggestedUnits);
+
+      if (unitsPerCase <= 1) return 0;
+
+      return Math.ceil(orderUnits / unitsPerCase);
+    },
+    [getOrderUnitsForProduct]
+  );
+
+  const updateOrderUnits = (upc: string, units: string) => {
+    setOrderUnitOverrides((previous) => ({
+      ...previous,
+      [upc]: units,
+    }));
+  };
+
+  const updateOrderCases = (product: Product, cases: string) => {
+    const unitsPerCase = Math.max(1, Number(product.unitsPerCase) || 1);
+    const caseCount = Math.max(0, safeNumber(cases));
+    const orderUnits = unitsPerCase <= 1 ? safeNumber(cases) : caseCount * unitsPerCase;
+
+    setOrderUnitOverrides((previous) => ({
+      ...previous,
+      [product.upc]: String(orderUnits),
+    }));
+  };
+
+  const vendorOrderGroups = useMemo<VendorOrderGroup[]>(() => {
+    const map = new Map<string, VendorOrderGroup>();
+
+    filteredReorderInsights.forEach((insight) => {
+      const vendor = insight.product.vendor || 'No vendor';
+      const orderUnits = getOrderUnitsForProduct(insight.product, insight.suggestedQty);
+
+      const current = map.get(vendor) || {
+        vendor,
+        insights: [],
+        itemCount: 0,
+        suggestedUnits: 0,
+        orderUnits: 0,
+        estimatedCost: 0,
+        criticalCount: 0,
+        soonCount: 0,
+        watchCount: 0,
+      };
+
+      current.insights.push(insight);
+      current.itemCount += 1;
+      current.suggestedUnits += insight.suggestedQty;
+      current.orderUnits += orderUnits;
+      current.estimatedCost += orderUnits * insight.product.costPrice;
+
+      if (insight.priority === 'Critical') current.criticalCount += 1;
+      if (insight.priority === 'Soon') current.soonCount += 1;
+      if (insight.priority === 'Watch') current.watchCount += 1;
+
+      map.set(vendor, current);
+    });
+
+    return Array.from(map.values()).sort((a, b) => {
+      if (b.criticalCount !== a.criticalCount) return b.criticalCount - a.criticalCount;
+      return b.estimatedCost - a.estimatedCost;
+    });
+  }, [filteredReorderInsights, getOrderUnitsForProduct]);
+
+  const activeVendorOrder = useMemo(() => {
+    if (!openVendorOrder) return null;
+    return vendorOrderGroups.find((group) => group.vendor === openVendorOrder) || null;
+  }, [openVendorOrder, vendorOrderGroups]);
+
+  const openVendorProducts = useMemo(() => {
+    if (!openVendorOrder) return [];
+
+    const search = vendorProductSearch.trim().toLowerCase();
+
+    return items
+      .filter((product) => {
+        const vendor = product.vendor || 'No vendor';
+        if (vendor !== openVendorOrder) return false;
+
+        const haystack = [
+          product.name,
+          product.upc,
+          product.department,
+          product.category,
+          product.brand,
+          product.vendor,
+        ]
+          .filter(Boolean)
+          .join(' ')
+          .toLowerCase();
+
+        if (search && !haystack.includes(search)) return false;
+
+        return true;
+      })
+      .sort((a, b) => a.name.localeCompare(b.name));
+  }, [items, openVendorOrder, vendorProductSearch]);
+
+  const activeVendorOrderItems = useMemo<VendorOrderItem[]>(() => {
+    if (!openVendorOrder) return [];
+
+    const insightByUpc = new Map<string, ReorderInsight>(
+      (activeVendorOrder?.insights || []).map((insight) => [insight.product.upc, insight])
+    );
+
+    return items
+      .filter((product) => {
+        const vendor = product.vendor || 'No vendor';
+        return vendor === openVendorOrder && selectedReorderSet.has(product.upc);
+      })
+      .map((product) => {
+        const insight = insightByUpc.get(product.upc);
+        const unitsPerCase = Math.max(1, Number(product.unitsPerCase) || 1);
+        const suggestedQty =
+          insight?.suggestedQty ||
+          Math.max(product.reorderLevel * 2 - product.stock, product.reorderLevel);
+
+        const orderUnits = getOrderUnitsForProduct(product, suggestedQty);
+        const orderCases = getOrderCasesForProduct(product, suggestedQty);
+
+        return {
+          product,
+          insight,
+          unitsPerCase,
+          suggestedQty,
+          orderUnits,
+          orderCases,
+          estimatedCost: orderUnits * product.costPrice,
+        };
+      })
+      .sort((a, b) => a.product.name.localeCompare(b.product.name));
+  }, [
+    activeVendorOrder,
+    getOrderCasesForProduct,
+    getOrderUnitsForProduct,
+    items,
+    openVendorOrder,
+    selectedReorderSet,
+  ]);
+
+  const activeVendorOrderTotals = useMemo(() => {
+    return {
+      items: activeVendorOrderItems.length,
+      units: activeVendorOrderItems.reduce((sum, item) => sum + item.orderUnits, 0),
+      cost: activeVendorOrderItems.reduce((sum, item) => sum + item.estimatedCost, 0),
+    };
+  }, [activeVendorOrderItems]);
+
+  const toggleReorderSelection = (upc: string) => {
+    setSelectedReorderUpcs((previous) =>
+      previous.includes(upc)
+        ? previous.filter((item) => item !== upc)
+        : [...previous, upc]
+    );
+  };
+
+  const selectCriticalReorders = () => {
+    setSelectedReorderUpcs(
+      filteredReorderInsights
+        .filter((insight) => insight.priority === 'Critical')
+        .map((insight) => insight.product.upc)
+    );
+  };
+
+  const selectAllReorders = () => {
+    setSelectedReorderUpcs(filteredReorderInsights.map((insight) => insight.product.upc));
+  };
+
+  const clearReorderSelection = () => {
+    setSelectedReorderUpcs([]);
+  };
+
+  const clearActiveVendorOrder = () => {
+    if (!activeVendorOrder) return;
+
+    setSelectedReorderUpcs((previous) =>
+      previous.filter(
+        (upc) => !items.some((product) => (product.vendor || 'No vendor') === activeVendorOrder.vendor && product.upc === upc)
+      )
+    );
+  };
+
+  const exportPurchaseOrder = () => {
+    const rows = selectedPurchaseOrderInsights;
+
+    if (!rows.length) {
+      setPurchaseOrderMessage('No reorder items selected or available to export.');
+      return;
+    }
+
+    const today = new Date().toISOString().split('T')[0];
+
+    exportToCsv(
+      `storepulse-purchase-order-${today}.csv`,
+      rows.map((insight) => {
+        const unitsPerCase = Number(insight.product.unitsPerCase) || 1;
+        const orderUnits = getOrderUnitsForProduct(insight.product, insight.suggestedQty);
+        const casesToOrder = unitsPerCase <= 1 ? 0 : Math.ceil(orderUnits / unitsPerCase);
+        const extraUnits = Math.max(0, orderUnits - insight.suggestedQty);
+
+        return {
+          Vendor: insight.product.vendor || 'No vendor',
+          Priority: insight.priority,
+          Product: insight.product.name,
+          UPC: insight.product.upc,
+          Department: insight.product.department || insight.product.category,
+          CurrentStockUnits: insight.product.stock,
+          UnitsPerCase: unitsPerCase,
+          CurrentStockCases: formatCaseBreakdown(insight.product.stock, unitsPerCase),
+          SoldLast30Days: insight.salesLast30Days,
+          AverageDailySales: insight.averageDailySales.toFixed(2),
+          EstimatedDaysLeft: insight.daysLeft === null ? 'No sales trend' : insight.daysLeft,
+          SuggestedUnits: insight.suggestedQty,
+          CasesToOrder: casesToOrder,
+          OrderUnits: orderUnits,
+          ExtraUnitsFromFullCases: extraUnits,
+          UnitCost: insight.product.costPrice.toFixed(2),
+          EstimatedOrderCost: (orderUnits * insight.product.costPrice).toFixed(2),
+          LastDeliveryDate: insight.lastDeliveryDate || '',
+          LastDeliveryQty: insight.lastDeliveryQty,
+        };
+      })
+    );
+
+    setPurchaseOrderMessage(
+      selectedReorderUpcs.length > 0
+        ? `Purchase order exported for ${rows.length} selected item(s).`
+        : `Purchase order exported for ${rows.length} filtered reorder item(s).`
+    );
+  };
+
+  const exportVendorPurchaseOrder = (vendor: string) => {
+    const group = vendorOrderGroups.find((item) => item.vendor === vendor);
+
+    if (!group) {
+      setPurchaseOrderMessage('No vendor order found to export.');
+      return;
+    }
+
+    const insightByUpc = new Map<string, ReorderInsight>(group.insights.map((insight) => [insight.product.upc, insight]));
+
+    const selectedVendorProducts = items.filter((product) => {
+      const productVendor = product.vendor || 'No vendor';
+      return productVendor === vendor && selectedReorderSet.has(product.upc);
+    });
+
+    const rows =
+      selectedVendorProducts.length > 0
+        ? selectedVendorProducts
+        : group.insights.map((insight) => insight.product);
+
+    if (!rows.length) {
+      setPurchaseOrderMessage('No items found for this vendor.');
+      return;
+    }
+
+    const today = new Date().toISOString().split('T')[0];
+
+    exportToCsv(
+      `storepulse-${safeFileName(vendor)}-purchase-order-${today}.csv`,
+      rows.map((product) => {
+        const insight = insightByUpc.get(product.upc);
+        const unitsPerCase = Number(product.unitsPerCase) || 1;
+        const suggestedUnits =
+          insight?.suggestedQty ||
+          Math.max(product.reorderLevel * 2 - product.stock, product.reorderLevel);
+
+        const orderUnits = getOrderUnitsForProduct(product, suggestedUnits);
+        const casesToOrder = unitsPerCase <= 1 ? 0 : Math.ceil(orderUnits / unitsPerCase);
+        const extraUnits = Math.max(0, orderUnits - suggestedUnits);
+
+        return {
+          Vendor: product.vendor || 'No vendor',
+          Priority: insight?.priority || 'Manual Add',
+          Product: product.name,
+          UPC: product.upc,
+          Department: product.department || product.category,
+          CurrentStockUnits: product.stock,
+          UnitsPerCase: unitsPerCase,
+          CurrentStockCases: formatCaseBreakdown(product.stock, unitsPerCase),
+          SoldLast30Days: insight?.salesLast30Days ?? '',
+          AverageDailySales: insight ? insight.averageDailySales.toFixed(2) : '',
+          EstimatedDaysLeft: insight?.daysLeft === null ? 'No sales trend' : insight?.daysLeft ?? '',
+          SuggestedUnits: suggestedUnits,
+          CasesToOrder: casesToOrder,
+          OrderUnits: orderUnits,
+          ExtraUnitsFromFullCases: extraUnits,
+          UnitCost: product.costPrice.toFixed(2),
+          EstimatedOrderCost: (orderUnits * product.costPrice).toFixed(2),
+          LastDeliveryDate: insight?.lastDeliveryDate || '',
+          LastDeliveryQty: insight?.lastDeliveryQty || '',
+        };
+      })
+    );
+
+    setPurchaseOrderMessage(
+      selectedVendorProducts.length > 0
+        ? `${vendor} purchase order exported for ${rows.length} order item(s).`
+        : `${vendor} purchase order exported for all ${rows.length} reorder item(s).`
+    );
+  };
 
   const filteredProducts = useMemo(() => {
     return items.filter((product) => {
@@ -1634,10 +2015,10 @@ const nextBreakdown = getCaseBreakdown(nextStock, unitsPerCase);
         </div>
       </PageHeader>
 
-      {(cloudError || receivingMessage) && (
+      {(cloudError || receivingMessage || purchaseOrderMessage) && (
         <div className="mb-5 flex items-start gap-3 rounded-lg border border-border bg-card px-4 py-3 text-sm text-muted-foreground">
           <CircleAlert className="mt-0.5 h-4 w-4 shrink-0 text-primary" />
-          <span>{cloudError || receivingMessage}</span>
+          <span>{cloudError || receivingMessage || purchaseOrderMessage}</span>
         </div>
       )}
 
@@ -2235,15 +2616,21 @@ const nextBreakdown = getCaseBreakdown(nextStock, unitsPerCase);
                 <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
                 <Input
                   value={reorderSearch}
-                  onChange={(event) => setReorderSearch(event.target.value)}
-                  placeholder="Search reorder by product, UPC, department, vendor, or priority..."
+                  onChange={(event) => {
+                    setReorderSearch(event.target.value);
+                    setOpenVendorOrder(null);
+                  }}
+                  placeholder="Search vendor order by product, UPC, department, vendor, or priority..."
                   className="pl-9"
                 />
               </div>
 
               <select
                 value={reorderPriorityFilter}
-                onChange={(event) => setReorderPriorityFilter(event.target.value as 'All' | ReorderPriority)}
+                onChange={(event) => {
+                  setReorderPriorityFilter(event.target.value as 'All' | ReorderPriority);
+                  setOpenVendorOrder(null);
+                }}
                 className="h-10 rounded-md border border-input bg-background px-3 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
               >
                 <option value="All">All priorities</option>
@@ -2254,96 +2641,453 @@ const nextBreakdown = getCaseBreakdown(nextStock, unitsPerCase);
             </div>
           </Card>
 
-          <Card className="overflow-hidden">
-            <div className="border-b border-border p-4">
-              <h2 className="font-semibold text-foreground">Reorder Intelligence</h2>
-              <p className="text-sm text-muted-foreground">
-                Suggested order quantities use current stock, recent sales, reorder level, and receiving history.
-              </p>
+          <Card className="p-5">
+            <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+              <div>
+                <h2 className="text-lg font-semibold text-foreground">Vendor Order List</h2>
+                <p className="mt-1 text-sm text-muted-foreground">
+                  Open a dedicated vendor order window and build a real order list.
+                </p>
+
+                <p className="mt-2 text-sm text-muted-foreground">
+                  {selectedReorderUpcs.length > 0
+                    ? `${selectedReorderUpcs.length} item(s) currently added to order lists`
+                    : 'No items added yet. Open a vendor and click Add to Order.'}
+                </p>
+              </div>
+
+              <div className="flex flex-wrap gap-2">
+                <Button variant="outline" size="sm" onClick={selectCriticalReorders}>
+                  Add Critical
+                </Button>
+
+                <Button variant="outline" size="sm" onClick={selectAllReorders}>
+                  Add All Reorders
+                </Button>
+
+                <Button variant="outline" size="sm" onClick={clearReorderSelection}>
+                  Clear All
+                </Button>
+
+                <Button size="sm" onClick={exportPurchaseOrder}>
+                  <Download className="mr-2 h-4 w-4" />
+                  Export All PO
+                </Button>
+              </div>
             </div>
 
-            {filteredReorderInsights.length > 0 ? (
-              <div className="grid gap-4 p-4">
-                {filteredReorderInsights.map((insight) => (
-                  <Card key={insight.product.upc} className="p-4">
-                    <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
-                      <div className="min-w-0">
-                        <div className="flex flex-wrap items-center gap-2">
-                          <h3 className="font-semibold text-foreground">{insight.product.name}</h3>
-                          <span className={cn('rounded-full px-2 py-1 text-xs font-semibold', priorityClass(insight.priority))}>
-                            {insight.priority}
+            {vendorOrderGroups.length > 0 ? (
+              <div className="mt-5 grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+                {vendorOrderGroups.map((group) => {
+                  const selectedCount = items.filter((product) => {
+                    const vendor = product.vendor || 'No vendor';
+                    return vendor === group.vendor && selectedReorderSet.has(product.upc);
+                  }).length;
+
+                  const isOpen = openVendorOrder === group.vendor;
+
+                  return (
+                    <Card
+                      key={group.vendor}
+                      className={cn(
+                        'p-4 transition hover:bg-secondary/30',
+                        isOpen && 'border-primary'
+                      )}
+                    >
+                      <div className="flex items-start justify-between gap-3">
+                        <div>
+                          <h3 className="font-semibold text-foreground">{group.vendor}</h3>
+                          <p className="mt-1 text-sm text-muted-foreground">
+                            {group.itemCount} reorder item(s) · {formatNumber(group.orderUnits)} suggested units
+                          </p>
+                          <p className="mt-1 text-sm font-semibold text-foreground">
+                            Estimated reorder cost: {formatCurrency(group.estimatedCost)}
+                          </p>
+                        </div>
+
+                        {group.criticalCount > 0 && (
+                          <span className="rounded-full bg-destructive/10 px-2 py-1 text-xs font-semibold text-destructive">
+                            {group.criticalCount} critical
                           </span>
-                        </div>
-
-                        <p className="mt-1 font-mono text-xs text-muted-foreground">UPC {insight.product.upc}</p>
-                        <p className="mt-1 text-sm text-muted-foreground">
-                          {insight.product.department || insight.product.category} · {insight.product.vendor || 'No vendor'}
-                        </p>
+                        )}
                       </div>
 
-                      <div className="flex flex-wrap gap-2">
-                        <Button size="sm" variant="outline" onClick={() => openEditModal(insight.product)}>
-                          <Pencil className="mr-2 h-4 w-4" />
-                          Edit Product
+                      <div className="mt-4 grid gap-2 text-xs text-muted-foreground">
+                        <p>
+                          Suggested: {formatNumber(group.suggestedUnits)} units · Current order list:{' '}
+                          {selectedCount} item(s)
+                        </p>
+                        <p>Open vendor to add products, edit cases, and export.</p>
+                      </div>
+
+                      <div className="mt-4 flex flex-wrap gap-2">
+                        <Button
+                          size="sm"
+                          variant={isOpen ? 'default' : 'outline'}
+                          onClick={() => {
+                            setVendorProductSearch('');
+                            setOpenVendorOrder(group.vendor);
+                          }}
+                        >
+                          Open Vendor
                         </Button>
 
-                        <Button size="sm" onClick={() => setActiveTab('receiving')}>
-                          <Receipt className="mr-2 h-4 w-4" />
-                          Receive
+                        <Button size="sm" variant="outline" onClick={() => exportVendorPurchaseOrder(group.vendor)}>
+                          <Download className="mr-2 h-4 w-4" />
+                          Export
                         </Button>
                       </div>
-                    </div>
-
-                    <div className="rounded-lg bg-secondary/40 p-3">
-                    <p className="text-xs text-muted-foreground">Current Stock</p>
-                    <p className="mt-1 text-xl font-bold text-foreground">{formatNumber(insight.product.stock)}</p>
-                    <p className="text-xs text-muted-foreground">
-                        {formatCaseBreakdown(insight.product.stock, Number(insight.product.unitsPerCase) || 1)}
-                    </p>
-                    <p className="text-xs text-muted-foreground">Reorder at {formatNumber(insight.product.reorderLevel)}</p>
-                    </div>
-
-                      <div className="rounded-lg bg-secondary/40 p-3">
-                        <p className="text-xs text-muted-foreground">Sold Last 30 Days</p>
-                        <p className="mt-1 text-xl font-bold text-foreground">{formatNumber(insight.salesLast30Days)}</p>
-                        <p className="text-xs text-muted-foreground">
-                          {insight.averageDailySales.toFixed(1)} units/day
-                        </p>
-                      </div>
-
-                      <div className="rounded-lg bg-secondary/40 p-3">
-                        <p className="text-xs text-muted-foreground">Estimated Days Left</p>
-                        <p className="mt-1 text-xl font-bold text-foreground">
-                          {insight.daysLeft === null ? 'No sales trend' : `${insight.daysLeft} days`}
-                        </p>
-                        <p className="text-xs text-muted-foreground">Based on recent sales</p>
-                      </div>
-
-                      <div className="rounded-lg bg-secondary/40 p-3">
-                        <p className="text-xs text-muted-foreground">Suggested Order</p>
-                        <p className="mt-1 text-xl font-bold text-foreground">{formatNumber(insight.suggestedQty)}</p>
-                        <p className="text-xs text-muted-foreground">
-                            {formatCaseBreakdown(insight.suggestedQty, Number(insight.product.unitsPerCase) || 1)}
-                        </p>
-                        </div>
-
-                    <div className="mt-3 rounded-lg border border-border p-3 text-sm">
-                      <p className="font-medium text-foreground">Last delivery</p>
-                      <p className="mt-1 text-muted-foreground">
-                       {formatShortDate(insight.lastDeliveryDate)}
-                        {insight.lastDeliveryQty > 0
-                        ? ` · ${formatCaseBreakdown(insight.lastDeliveryQty, Number(insight.product.unitsPerCase) || 1)} received`
-                        : ''}
-                      </p>
-                    </div>
-                  </Card>
-                ))}
+                    </Card>
+                  );
+                })}
               </div>
             ) : (
-              <div className="p-8 text-center text-sm text-muted-foreground">
-                No reorder items match the current filters.
+              <div className="mt-5 rounded-lg border border-dashed border-border p-8 text-center text-sm text-muted-foreground">
+                No vendor order items match the current filters.
               </div>
             )}
+          </Card>
+        </div>
+      )}
+
+      {activeVendorOrder && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-background/80 p-4 backdrop-blur-sm">
+          <Card className="flex max-h-[94vh] w-full max-w-7xl flex-col overflow-hidden">
+            <div className="flex flex-col gap-4 border-b border-border p-5 lg:flex-row lg:items-start lg:justify-between">
+              <div>
+                <h2 className="text-xl font-semibold text-foreground">
+                  {activeVendorOrder.vendor} Order Window
+                </h2>
+                <p className="mt-1 text-sm text-muted-foreground">
+                  Search vendor products, add items to the order list, edit quantities, and export.
+                </p>
+                <p className="mt-2 text-sm font-semibold text-foreground">
+                  Current order list: {activeVendorOrderTotals.items} item(s) · {formatNumber(activeVendorOrderTotals.units)} units ·{' '}
+                  {formatCurrency(activeVendorOrderTotals.cost)}
+                </p>
+              </div>
+
+              <div className="flex flex-wrap gap-2">
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() =>
+                    setSelectedReorderUpcs((previous) =>
+                      Array.from(
+                        new Set([
+                          ...previous,
+                          ...activeVendorOrder.insights.map((insight) => insight.product.upc),
+                        ])
+                      )
+                    )
+                  }
+                >
+                  Add Reorder Items
+                </Button>
+
+                <Button size="sm" variant="outline" onClick={clearActiveVendorOrder}>
+                  Clear Vendor Order
+                </Button>
+
+                <Button size="sm" onClick={() => exportVendorPurchaseOrder(activeVendorOrder.vendor)}>
+                  <Download className="mr-2 h-4 w-4" />
+                  Export Vendor PO
+                </Button>
+
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => {
+                    setVendorProductSearch('');
+                    setOpenVendorOrder(null);
+                  }}
+                >
+                  <X className="mr-2 h-4 w-4" />
+                  Close
+                </Button>
+              </div>
+            </div>
+
+            <div className="border-b border-border p-4">
+              <div className="relative">
+                <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+                <Input
+                  value={vendorProductSearch}
+                  onChange={(event) => setVendorProductSearch(event.target.value)}
+                  placeholder={`Search ${activeVendorOrder.vendor} products by name, UPC, brand, or department...`}
+                  className="pl-9"
+                />
+              </div>
+            </div>
+
+            <div className="min-h-0 flex-1 overflow-hidden p-4">
+              <div className="grid h-full gap-4 xl:grid-cols-[1fr_420px]">
+                <div className="min-h-0 overflow-y-auto pr-1">
+                  <div className="grid gap-4">
+                    {openVendorProducts.length > 0 ? (
+                      openVendorProducts.map((product) => {
+                        const existingInsight = activeVendorOrder.insights.find(
+                          (insight) => insight.product.upc === product.upc
+                        );
+
+                        const selected = selectedReorderSet.has(product.upc);
+                        const unitsPerCase = Number(product.unitsPerCase) || 1;
+
+                        const suggestedQty =
+                          existingInsight?.suggestedQty ||
+                          Math.max(product.reorderLevel * 2 - product.stock, product.reorderLevel);
+
+                        const defaultPlan = getCaseOrderPlan(suggestedQty, unitsPerCase);
+
+                        return (
+                          <Card
+                            key={product.upc}
+                            className={cn(
+                              'p-4',
+                              selected && 'border-primary bg-primary/5',
+                              !existingInsight && 'border-dashed'
+                            )}
+                          >
+                            <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+                              <div className="min-w-0">
+                                <div className="flex flex-wrap items-center gap-2">
+                                  <h3 className="font-semibold text-foreground">{product.name}</h3>
+
+                                  {existingInsight ? (
+                                    <span
+                                      className={cn(
+                                        'rounded-full px-2 py-1 text-xs font-semibold',
+                                        priorityClass(existingInsight.priority)
+                                      )}
+                                    >
+                                      {existingInsight.priority}
+                                    </span>
+                                  ) : (
+                                    <span className="rounded-full bg-secondary px-2 py-1 text-xs font-semibold text-muted-foreground">
+                                      Manual Add
+                                    </span>
+                                  )}
+
+                                  {selected && (
+                                    <span className="rounded-full bg-primary/10 px-2 py-1 text-xs font-semibold text-primary">
+                                      In Order
+                                    </span>
+                                  )}
+                                </div>
+
+                                <p className="mt-1 font-mono text-xs text-muted-foreground">UPC {product.upc}</p>
+                                <p className="mt-1 text-sm text-muted-foreground">
+                                  {product.department || product.category} · {product.brand || 'Unknown brand'}
+                                </p>
+                              </div>
+
+                              <div className="flex flex-wrap gap-2">
+                                <Button
+                                  size="sm"
+                                  variant={selected ? 'default' : 'outline'}
+                                  onClick={() => toggleReorderSelection(product.upc)}
+                                >
+                                  {selected ? 'In Order' : 'Add to Order'}
+                                </Button>
+
+                                <Button size="sm" variant="outline" onClick={() => openEditModal(product)}>
+                                  <Pencil className="mr-2 h-4 w-4" />
+                                  Edit
+                                </Button>
+                              </div>
+                            </div>
+
+                            <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+                              <div className="rounded-lg bg-secondary/40 p-3">
+                                <p className="text-xs text-muted-foreground">Current Stock</p>
+                                <p className="mt-1 text-xl font-bold text-foreground">
+                                  {formatNumber(product.stock)}
+                                </p>
+                                <p className="text-xs text-muted-foreground">
+                                  {formatCaseBreakdown(product.stock, unitsPerCase)}
+                                </p>
+                              </div>
+
+                              <div className="rounded-lg bg-secondary/40 p-3">
+                                <p className="text-xs text-muted-foreground">Units Per Case</p>
+                                <p className="mt-1 text-xl font-bold text-foreground">
+                                  {formatNumber(unitsPerCase)}
+                                </p>
+                                <p className="text-xs text-muted-foreground">Case pack size</p>
+                              </div>
+
+                              <div className="rounded-lg bg-secondary/40 p-3">
+                                <p className="text-xs text-muted-foreground">Suggested Order</p>
+                                <p className="mt-1 text-xl font-bold text-foreground">
+                                  {unitsPerCase <= 1
+                                    ? `${formatNumber(defaultPlan.orderUnits)} units`
+                                    : `${formatNumber(defaultPlan.casesToOrder)} cases`}
+                                </p>
+                                <p className="text-xs text-muted-foreground">
+                                  {formatNumber(defaultPlan.orderUnits)} units suggested
+                                </p>
+                              </div>
+
+                              <div className="rounded-lg bg-secondary/40 p-3">
+                                <p className="text-xs text-muted-foreground">Estimated Cost</p>
+                                <p className="mt-1 text-xl font-bold text-foreground">
+                                  {formatCurrency(defaultPlan.orderUnits * product.costPrice)}
+                                </p>
+                                <p className="text-xs text-muted-foreground">Suggested cost</p>
+                              </div>
+                            </div>
+
+                            {existingInsight && (
+                              <div className="mt-3 rounded-lg border border-border p-3 text-sm">
+                                <p className="font-medium text-foreground">Sales and delivery</p>
+                                <p className="mt-1 text-muted-foreground">
+                                  Sold last 30 days: {formatNumber(existingInsight.salesLast30Days)} · Days left:{' '}
+                                  {existingInsight.daysLeft === null ? 'No trend' : `${existingInsight.daysLeft} days`}
+                                </p>
+                                <p className="mt-1 text-muted-foreground">
+                                  Last delivery: {formatShortDate(existingInsight.lastDeliveryDate)}
+                                  {existingInsight.lastDeliveryQty > 0
+                                    ? ` · ${formatCaseBreakdown(existingInsight.lastDeliveryQty, unitsPerCase)} received`
+                                    : ''}
+                                </p>
+                              </div>
+                            )}
+                          </Card>
+                        );
+                      })
+                    ) : (
+                      <div className="rounded-lg border border-dashed border-border p-8 text-center text-sm text-muted-foreground">
+                        No products found for this vendor.
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                <Card className="flex min-h-[420px] flex-col overflow-hidden">
+                  <div className="border-b border-border p-4">
+                    <div className="flex items-start justify-between gap-3">
+                      <div>
+                        <h3 className="font-semibold text-foreground">Current Order List</h3>
+                        <p className="mt-1 text-sm text-muted-foreground">
+                          Items added for {activeVendorOrder.vendor}.
+                        </p>
+                      </div>
+
+                      <Button size="sm" variant="outline" onClick={clearActiveVendorOrder}>
+                        Clear
+                      </Button>
+                    </div>
+
+                    <div className="mt-4 grid grid-cols-3 gap-2 text-center">
+                      <div className="rounded-lg bg-secondary/40 p-2">
+                        <p className="text-xs text-muted-foreground">Items</p>
+                        <p className="font-bold text-foreground">{activeVendorOrderTotals.items}</p>
+                      </div>
+
+                      <div className="rounded-lg bg-secondary/40 p-2">
+                        <p className="text-xs text-muted-foreground">Units</p>
+                        <p className="font-bold text-foreground">{formatNumber(activeVendorOrderTotals.units)}</p>
+                      </div>
+
+                      <div className="rounded-lg bg-secondary/40 p-2">
+                        <p className="text-xs text-muted-foreground">Cost</p>
+                        <p className="font-bold text-foreground">{formatCurrency(activeVendorOrderTotals.cost)}</p>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="flex-1 overflow-y-auto p-4">
+                    {activeVendorOrderItems.length > 0 ? (
+                      <div className="space-y-3">
+                        {activeVendorOrderItems.map((item) => (
+                          <Card key={item.product.upc} className="p-3">
+                            <div className="flex items-start justify-between gap-3">
+                              <div className="min-w-0">
+                                <p className="truncate font-semibold text-foreground">{item.product.name}</p>
+                                <p className="font-mono text-xs text-muted-foreground">UPC {item.product.upc}</p>
+                                <p className="mt-1 text-xs text-muted-foreground">
+                                  {item.insight?.priority || 'Manual Add'} · {item.product.department || item.product.category}
+                                </p>
+                              </div>
+
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                onClick={() => toggleReorderSelection(item.product.upc)}
+                              >
+                                Remove
+                              </Button>
+                            </div>
+
+                            <div className="mt-3 grid gap-3">
+                              <div className="grid grid-cols-2 gap-2">
+                                <label className="space-y-1.5">
+                                  <span className="text-xs font-medium text-muted-foreground">Cases</span>
+                                  <Input
+                                    type="number"
+                                    min="0"
+                                    step="1"
+                                    disabled={item.unitsPerCase <= 1}
+                                    value={item.unitsPerCase <= 1 ? '0' : String(item.orderCases)}
+                                    onChange={(event) => updateOrderCases(item.product, event.target.value)}
+                                  />
+                                </label>
+
+                                <label className="space-y-1.5">
+                                  <span className="text-xs font-medium text-muted-foreground">Units</span>
+                                  <Input
+                                    type="number"
+                                    min="0"
+                                    step="1"
+                                    value={String(item.orderUnits)}
+                                    onChange={(event) => updateOrderUnits(item.product.upc, event.target.value)}
+                                  />
+                                </label>
+                              </div>
+
+                              <div className="rounded-lg bg-secondary/40 p-3 text-sm">
+                                <div className="flex items-center justify-between gap-3">
+                                  <span className="text-muted-foreground">Order units</span>
+                                  <span className="font-semibold text-foreground">{formatNumber(item.orderUnits)}</span>
+                                </div>
+
+                                <div className="mt-1 flex items-center justify-between gap-3">
+                                  <span className="text-muted-foreground">Estimated cost</span>
+                                  <span className="font-semibold text-foreground">
+                                    {formatCurrency(item.estimatedCost)}
+                                  </span>
+                                </div>
+
+                                <p className="mt-2 text-xs text-muted-foreground">
+                                  {item.unitsPerCase <= 1
+                                    ? 'Ordered by unit.'
+                                    : `${formatNumber(item.unitsPerCase)} units per case.`}
+                                </p>
+                              </div>
+                            </div>
+                          </Card>
+                        ))}
+                      </div>
+                    ) : (
+                      <div className="rounded-lg border border-dashed border-border p-6 text-center text-sm text-muted-foreground">
+                        No items in this order yet. Click Add to Order on products from the left side.
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="border-t border-border p-4">
+                    <Button
+                      className="w-full"
+                      disabled={!activeVendorOrderItems.length}
+                      onClick={() => exportVendorPurchaseOrder(activeVendorOrder.vendor)}
+                    >
+                      <Download className="mr-2 h-4 w-4" />
+                      Export Current Order
+                    </Button>
+                  </div>
+                </Card>
+              </div>
+            </div>
           </Card>
         </div>
       )}

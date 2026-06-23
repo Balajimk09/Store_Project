@@ -16,7 +16,7 @@ import {
   Users,
   Wallet,
 } from 'lucide-react';
-import { supabase } from '@/lib/supabase';
+import { adminFetch } from '@/lib/admin-client';
 import { AdminShell, AdminPageHeader } from '@/components/layout/admin-shell';
 import { Card } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -52,32 +52,6 @@ type AdminSummaryResponse = {
     created_at: string;
   }>;
 };
-
-async function adminFetch<T>(url: string, options?: RequestInit): Promise<T> {
-  const { data } = await supabase.auth.getSession();
-  const token = data.session?.access_token;
-
-  if (!token) {
-    throw new Error('Please log in again.');
-  }
-
-  const response = await fetch(url, {
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${token}`,
-      ...(options?.headers || {}),
-    },
-  });
-
-  const json = await response.json();
-
-  if (!response.ok) {
-    throw new Error(json.error || 'Request failed.');
-  }
-
-  return json as T;
-}
 
 function formatNumber(value: number) {
   return new Intl.NumberFormat('en-US').format(value || 0);

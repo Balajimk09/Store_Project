@@ -36,10 +36,15 @@ export interface Product {
   vendor?: string;
   department?: string;
   sku?: string;
+  plu?: string;
+  productCode?: string;
   taxRate?: number;
   taxCategory?: string;
   ebtEligible?: boolean;
   taxable?: boolean;
+  ageVerification?: boolean;
+  minimumAge?: number;
+  ageRestrictionType?: string;
   isActive?: boolean;
   notes?: string;
   unitsPerCase?: number;

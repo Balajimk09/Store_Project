@@ -27,6 +27,7 @@ import {
   Phone,
   Plus,
   Search,
+  ShieldAlert,
   Tag,
   Trash2,
   Truck,
@@ -34,7 +35,7 @@ import {
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
-type TabKey = 'tax' | 'deals' | 'departments' | 'vendors';
+type TabKey = 'tax' | 'deals' | 'departments' | 'vendors' | 'age';
 type ModalType = 'tax' | 'deal' | 'department' | 'vendor' | null;
 type ModalMode = 'add' | 'edit';
 
@@ -47,6 +48,17 @@ type SelectedDealProduct = {
   name: string;
   department?: string;
   sellPrice?: number;
+};
+
+type AgeRestrictionPresetRow = {
+  id: string;
+  store_id: string;
+  name: string;
+  minimum_age: number;
+  restriction_type: string;
+  is_active: boolean;
+  created_at?: string;
+  updated_at?: string | null;
 };
 
 const emptyTax = {
@@ -80,6 +92,20 @@ const emptyDeal = {
   endDate: '',
   isActive: true,
 };
+
+const emptyAgePreset = {
+  name: '',
+  minimumAge: '21',
+  restrictionType: '',
+};
+
+const DEFAULT_AGE_PRESETS = [
+  { name: 'Tobacco', minimum_age: 21, restriction_type: 'Tobacco' },
+  { name: 'Alcohol', minimum_age: 21, restriction_type: 'Alcohol' },
+  { name: 'Lottery', minimum_age: 18, restriction_type: 'Lottery' },
+  { name: 'Vape / E-Cigarette', minimum_age: 21, restriction_type: 'Vape' },
+  { name: 'Adult Content', minimum_age: 18, restriction_type: 'Adult' },
+];
 
 function percent(value: number) {
   return `${Number(value || 0).toFixed(value % 1 === 0 ? 0 : 2)}%`;
@@ -160,11 +186,14 @@ export default function StoreSettingsPage() {
   const [departments, setDepartments] = useState<StoreDepartmentRow[]>([]);
   const [vendors, setVendors] = useState<StoreVendorRow[]>([]);
   const [deals, setDeals] = useState<DealWithProducts[]>([]);
+  const [agePresets, setAgePresets] = useState<AgeRestrictionPresetRow[]>([]);
 
   const [taxForm, setTaxForm] = useState(emptyTax);
   const [departmentForm, setDepartmentForm] = useState(emptyDepartment);
   const [vendorForm, setVendorForm] = useState(emptyVendor);
   const [dealForm, setDealForm] = useState(emptyDeal);
+  const [agePresetForm, setAgePresetForm] = useState(emptyAgePreset);
+  const [editingAgePresetId, setEditingAgePresetId] = useState<string | null>(null);
 
   const [productSearch, setProductSearch] = useState('');
   const [selectedProducts, setSelectedProducts] = useState<SelectedDealProduct[]>([]);
@@ -187,13 +216,14 @@ export default function StoreSettingsPage() {
     setLoading(true);
     setPageError(null);
 
-    const [taxResult, departmentResult, vendorResult, dealResult, dealProductResult] =
+    const [taxResult, departmentResult, vendorResult, dealResult, dealProductResult, agePresetResult] =
       await Promise.all([
         supabase.from('tax_categories').select('*').eq('store_id', storeId).order('name'),
         supabase.from('store_departments').select('*').eq('store_id', storeId).order('name'),
         supabase.from('store_vendors').select('*').eq('store_id', storeId).order('vendor_name'),
         supabase.from('promotions').select('*').eq('store_id', storeId).order('created_at', { ascending: false }),
         supabase.from('promotion_products').select('*').eq('store_id', storeId),
+        supabase.from('store_age_restriction_presets').select('*').eq('store_id', storeId).order('name'),
       ]);
 
     if (taxResult.error) {
@@ -226,6 +256,12 @@ export default function StoreSettingsPage() {
       return;
     }
 
+    if (agePresetResult.error) {
+      setPageError(`Could not load age restriction presets: ${agePresetResult.error.message}`);
+      setLoading(false);
+      return;
+    }
+
     const loadedDeals = (dealResult.data || []) as PromotionRow[];
     const loadedProducts = (dealProductResult.data || []) as PromotionProductRow[];
 
@@ -241,6 +277,7 @@ export default function StoreSettingsPage() {
     setTaxCategories((taxResult.data || []) as TaxCategoryRow[]);
     setDepartments((departmentResult.data || []) as StoreDepartmentRow[]);
     setVendors((vendorResult.data || []) as StoreVendorRow[]);
+    setAgePresets((agePresetResult.data || []) as AgeRestrictionPresetRow[]);
     setDeals(
       loadedDeals.map((deal) => ({
         ...deal,
@@ -259,6 +296,7 @@ export default function StoreSettingsPage() {
   const activeDeals = deals.filter((deal) => deal.is_active);
   const activeDepartments = departments.filter((department) => department.is_active);
   const activeVendors = vendors.filter((vendor) => vendor.is_active);
+  const activeAgePresets = agePresets.filter((preset) => preset.is_active);
 
   const searchedProducts = useMemo(() => {
     const query = productSearch.trim().toLowerCase();
@@ -623,6 +661,111 @@ export default function StoreSettingsPage() {
     await loadSettings();
   };
 
+  const resetAgePresetForm = () => {
+    setAgePresetForm(emptyAgePreset);
+    setEditingAgePresetId(null);
+  };
+
+  const editAgePreset = (preset: AgeRestrictionPresetRow) => {
+    setEditingAgePresetId(preset.id);
+    setAgePresetForm({
+      name: preset.name,
+      minimumAge: String(preset.minimum_age),
+      restrictionType: preset.restriction_type,
+    });
+  };
+
+  const saveAgePreset = async () => {
+    if (!storeId) return;
+
+    const name = agePresetForm.name.trim();
+    const minimumAge = Number(agePresetForm.minimumAge);
+    const restrictionType = agePresetForm.restrictionType.trim();
+
+    if (!name || !restrictionType) {
+      setPageError('Preset name and restriction type are required.');
+      return;
+    }
+
+    if (!Number.isFinite(minimumAge) || minimumAge < 0) {
+      setPageError('Minimum age must be valid.');
+      return;
+    }
+
+    const payload = {
+      store_id: storeId,
+      name,
+      minimum_age: minimumAge,
+      restriction_type: restrictionType,
+      updated_at: new Date().toISOString(),
+    };
+
+    const wasEditing = Boolean(editingAgePresetId);
+    const result = editingAgePresetId
+      ? await supabase.from('store_age_restriction_presets').update(payload).eq('id', editingAgePresetId)
+      : await supabase.from('store_age_restriction_presets').insert({ ...payload, is_active: true });
+
+    if (result.error) {
+      setPageError(`Could not save age preset: ${result.error.message}`);
+      return;
+    }
+
+    resetAgePresetForm();
+    showSuccess(wasEditing ? 'Age restriction preset updated.' : 'Age restriction preset added.');
+    await loadSettings();
+  };
+
+  const importDefaultAgePresets = async () => {
+    if (!storeId) return;
+
+    const rows = DEFAULT_AGE_PRESETS.map((preset) => ({
+      store_id: storeId,
+      ...preset,
+      is_active: true,
+      updated_at: new Date().toISOString(),
+    }));
+
+    const { error } = await supabase.from('store_age_restriction_presets').insert(rows);
+
+    if (error) {
+      setPageError(`Could not import defaults: ${error.message}`);
+      return;
+    }
+
+    showSuccess('Default age restriction presets imported.');
+    await loadSettings();
+  };
+
+  const deleteAgePreset = async (preset: AgeRestrictionPresetRow) => {
+    const ok = window.confirm(`Delete age restriction preset "${preset.name}"?`);
+    if (!ok) return;
+
+    const { error } = await supabase.from('store_age_restriction_presets').delete().eq('id', preset.id);
+
+    if (error) {
+      setPageError(`Could not delete age preset: ${error.message}`);
+      return;
+    }
+
+    showSuccess('Age restriction preset deleted.');
+    await loadSettings();
+  };
+
+  const toggleAgePreset = async (preset: AgeRestrictionPresetRow) => {
+    const { error } = await supabase
+      .from('store_age_restriction_presets')
+      .update({ is_active: !preset.is_active, updated_at: new Date().toISOString() })
+      .eq('id', preset.id);
+
+    if (error) {
+      setPageError(`Could not update age preset: ${error.message}`);
+      return;
+    }
+
+    showSuccess('Age restriction preset updated.');
+    await loadSettings();
+  };
+
   const saveDeal = async () => {
     if (!storeId) return;
 
@@ -805,7 +948,7 @@ export default function StoreSettingsPage() {
         </div>
       )}
 
-      <div className="mb-5 grid gap-4 md:grid-cols-4">
+      <div className="mb-5 grid gap-4 md:grid-cols-5">
         <Card className="p-4">
           <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Tax Categories</p>
           <p className="mt-2 text-2xl font-bold text-foreground">{activeTaxes.length}</p>
@@ -825,15 +968,21 @@ export default function StoreSettingsPage() {
           <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Vendors</p>
           <p className="mt-2 text-2xl font-bold text-foreground">{activeVendors.length}</p>
         </Card>
+
+        <Card className="p-4">
+          <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Age Presets</p>
+          <p className="mt-2 text-2xl font-bold text-foreground">{activeAgePresets.length}</p>
+        </Card>
       </div>
 
       <Card className="mb-5 p-2">
-        <div className="grid gap-2 md:grid-cols-4">
+        <div className="grid gap-2 md:grid-cols-5">
           {[
             { key: 'tax' as const, label: 'Tax', icon: BadgePercent },
             { key: 'deals' as const, label: 'Deals / Promo', icon: Tag },
             { key: 'departments' as const, label: 'Departments', icon: Building2 },
             { key: 'vendors' as const, label: 'Vendors', icon: Truck },
+            { key: 'age' as const, label: 'Age Restrictions', icon: ShieldAlert },
           ].map((tab) => {
             const Icon = tab.icon;
             const active = activeTab === tab.key;
@@ -1043,6 +1192,101 @@ export default function StoreSettingsPage() {
                     </Button>
                   </div>
                 </Card>
+              ))}
+            </div>
+          )}
+        </Card>
+      )}
+
+      {activeTab === 'age' && (
+        <Card className="p-5">
+          <div className="mb-5 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <h2 className="text-lg font-semibold text-foreground">Age Restriction Presets</h2>
+              <p className="mt-1 text-sm text-muted-foreground">
+                Create presets for age-restricted products. These appear as one-click chips when adding products.
+              </p>
+            </div>
+
+            {agePresets.length === 0 && (
+              <Button onClick={() => void importDefaultAgePresets()}>
+                <Plus className="mr-2 h-4 w-4" />
+                Import Defaults
+              </Button>
+            )}
+          </div>
+
+          <div className="mb-5 grid gap-3 rounded-lg border border-border bg-secondary/20 p-3 md:grid-cols-[1fr_120px_1fr_auto]">
+            <Input
+              value={agePresetForm.name}
+              onChange={(event) => setAgePresetForm({ ...agePresetForm, name: event.target.value })}
+              placeholder="Name, e.g. Tobacco"
+            />
+            <Input
+              type="number"
+              min="0"
+              value={agePresetForm.minimumAge}
+              onChange={(event) => setAgePresetForm({ ...agePresetForm, minimumAge: event.target.value })}
+              placeholder="21"
+            />
+            <Input
+              value={agePresetForm.restrictionType}
+              onChange={(event) => setAgePresetForm({ ...agePresetForm, restrictionType: event.target.value })}
+              placeholder="Restriction Type"
+            />
+            <div className="flex gap-2">
+              {editingAgePresetId && (
+                <Button variant="outline" onClick={resetAgePresetForm}>
+                  Cancel
+                </Button>
+              )}
+              <Button onClick={() => void saveAgePreset()}>
+                {editingAgePresetId ? 'Save' : 'Add'}
+              </Button>
+            </div>
+          </div>
+
+          {agePresets.length === 0 ? (
+            <div className="rounded-xl border border-dashed border-border p-10 text-center">
+              <ShieldAlert className="mx-auto h-8 w-8 text-muted-foreground" />
+              <h3 className="mt-3 font-semibold text-foreground">No age presets yet</h3>
+              <p className="mt-1 text-sm text-muted-foreground">
+                Import defaults or add a custom preset above.
+              </p>
+            </div>
+          ) : (
+            <div className="divide-y divide-border overflow-hidden rounded-lg border border-border">
+              {agePresets.map((preset) => (
+                <div key={preset.id} className={cn('flex flex-col gap-3 p-3 sm:flex-row sm:items-center sm:justify-between', !preset.is_active && 'opacity-60')}>
+                  <div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <p className="font-semibold text-foreground">{preset.name}</p>
+                      <span className="rounded-full bg-orange-100 px-2 py-0.5 text-xs font-semibold text-orange-700">
+                        {preset.minimum_age}+
+                      </span>
+                      <span className="rounded-full bg-secondary px-2 py-0.5 text-xs font-semibold text-muted-foreground">
+                        {preset.restriction_type}
+                      </span>
+                      <span className={cn('rounded-full px-2 py-0.5 text-xs font-semibold', preset.is_active ? 'bg-success/10 text-success' : 'bg-muted text-muted-foreground')}>
+                        {preset.is_active ? 'Active' : 'Inactive'}
+                      </span>
+                    </div>
+                  </div>
+
+                  <div className="flex flex-wrap gap-2">
+                    <Button size="sm" variant="outline" onClick={() => editAgePreset(preset)}>
+                      <Pencil className="mr-1 h-3.5 w-3.5" />
+                      Edit
+                    </Button>
+                    <Button size="sm" variant="outline" onClick={() => void toggleAgePreset(preset)}>
+                      {preset.is_active ? 'Disable' : 'Enable'}
+                    </Button>
+                    <Button size="sm" variant="ghost" onClick={() => void deleteAgePreset(preset)}>
+                      <Trash2 className="mr-1 h-3.5 w-3.5" />
+                      Delete
+                    </Button>
+                  </div>
+                </div>
               ))}
             </div>
           )}

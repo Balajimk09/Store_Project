@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState, type ChangeEvent } from 'react';
 import {
   AlertTriangle,
   Camera,
@@ -35,7 +35,12 @@ import { useAuth } from '@/lib/auth';
 import { supabase } from '@/lib/supabase';
 import type { Product } from '@/lib/mock-data';
 import { CHART_COLORS } from '@/lib/mock-data';
-import { computeMargin } from '@/lib/csv';
+import {
+  computeMargin,
+  normalizeHeader as normalizeProductHeader,
+  parseProductsCsv,
+  type ProductImportMode,
+} from '@/lib/csv';
 import { exportToCsv, formatCurrency, formatNumber } from '@/lib/format';
 import { cn } from '@/lib/utils';
 
@@ -43,10 +48,16 @@ type Tab = 'overview' | 'products' | 'receiving' | 'reorder' | 'history';
 
 type ProductFormState = {
   upc: string;
+  plu: string;
+  productCode: string;
+  sku: string;
   name: string;
   department: string;
+  customDepartment: string;
+  category: string;
   brand: string;
   vendor: string;
+  customVendor: string;
   costPrice: string;
   sellPrice: string;
   stock: string;
@@ -58,8 +69,39 @@ type ProductFormState = {
   taxRate: string;
   taxable: boolean;
   ebtEligible: boolean;
+  ageVerification: boolean;
+  minimumAge: string;
+  ageRestrictionType: string;
+  customAgeRestrictionType: string;
   isActive: boolean;
   notes: string;
+};
+
+type DuplicateImportMode = 'skip' | 'update' | 'new-only';
+
+type ProductImportSummary = {
+  inserted: number;
+  updated: number;
+  skipped: number;
+  failed: number;
+  duplicates: number;
+  unmatched: number;
+  errorRows: number;
+} | null;
+
+type TaxCategoryOption = {
+  id: string;
+  name: string;
+  rate: number;
+  is_active: boolean;
+};
+
+type AgeRestrictionPreset = {
+  id: string;
+  name: string;
+  minimum_age: number;
+  restriction_type: string;
+  is_active: boolean;
 };
 
 type ReceivingLineStatus = 'Matched' | 'New Product' | 'Needs Review';
@@ -128,13 +170,20 @@ type VendorOrderItem = {
 
 const RECEIVING_HISTORY_KEY = 'storepulse_receiving_history_v1';
 const INVOICE_BUCKET = 'inventory-invoices';
+const PRESET_AGE_TYPES = ['Tobacco', 'Alcohol', 'Lottery', 'Vape'];
 
 const EMPTY_PRODUCT_FORM: ProductFormState = {
   upc: '',
+  plu: '',
+  productCode: '',
+  sku: '',
   name: '',
   department: '',
+  customDepartment: '',
+  category: '',
   brand: '',
   vendor: '',
+  customVendor: '',
   costPrice: '',
   sellPrice: '',
   stock: '0',
@@ -146,6 +195,10 @@ const EMPTY_PRODUCT_FORM: ProductFormState = {
   taxRate: '0',
   taxable: true,
   ebtEligible: false,
+  ageVerification: false,
+  minimumAge: '',
+  ageRestrictionType: '',
+  customAgeRestrictionType: '',
   isActive: true,
   notes: '',
 };
@@ -180,8 +233,34 @@ function safeFileName(fileName: string) {
   return fileName.replace(/[^a-zA-Z0-9._-]/g, '-');
 }
 
+function readFileAsArrayBuffer(file: File): Promise<ArrayBuffer> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result as ArrayBuffer);
+    reader.onerror = () => reject(reader.error || new Error('Could not read file.'));
+    reader.readAsArrayBuffer(file);
+  });
+}
+
+function quoteCsvValue(value: unknown) {
+  return `"${String(value ?? '').replace(/"/g, '""')}"`;
+}
+
 function normalizeText(value: string | undefined | null) {
   return String(value || '').trim().toLowerCase();
+}
+
+function findProductDuplicate(products: Product[], product: Product) {
+  const upc = normalizeText(product.upc);
+  const plu = normalizeText(product.plu);
+  const productCode = normalizeText(product.productCode);
+
+  return products.find((current) => {
+    if (upc && normalizeText(current.upc) === upc) return true;
+    if (plu && normalizeText(current.plu) === plu) return true;
+    if (productCode && normalizeText(current.productCode) === productCode) return true;
+    return false;
+  }) || null;
 }
 
 function dateOnly(value: string) {
@@ -265,13 +344,29 @@ function productToForm(product: Product): ProductFormState {
     product.looseUnits !== undefined
       ? Number(product.looseUnits) || 0
       : product.stock % unitsPerCase;
+  const ageRestrictionTypeValue = product.ageRestrictionType?.trim() || '';
+  const ageRestrictionType = PRESET_AGE_TYPES.includes(ageRestrictionTypeValue)
+    ? ageRestrictionTypeValue
+    : ageRestrictionTypeValue
+      ? 'Custom'
+      : '';
+  const customAgeRestrictionType =
+    ageRestrictionTypeValue && !PRESET_AGE_TYPES.includes(ageRestrictionTypeValue)
+      ? ageRestrictionTypeValue
+      : '';
 
   return {
     upc: product.upc,
+    plu: product.plu || '',
+    productCode: product.productCode || '',
+    sku: product.sku || '',
     name: product.name,
     department: product.department || product.category || '',
+    customDepartment: '',
+    category: product.category || product.department || '',
     brand: product.brand || '',
     vendor: product.vendor || '',
+    customVendor: '',
     costPrice: product.costPrice.toFixed(2),
     sellPrice: product.sellPrice.toFixed(2),
     stock: String(product.stock),
@@ -283,13 +378,25 @@ function productToForm(product: Product): ProductFormState {
     taxRate: String(product.taxRate ?? 0),
     taxable: product.taxable ?? true,
     ebtEligible: product.ebtEligible ?? false,
+    ageVerification: product.ageVerification ?? false,
+    minimumAge: product.minimumAge ? String(product.minimumAge) : '',
+    ageRestrictionType,
+    customAgeRestrictionType,
     isActive: product.isActive ?? true,
     notes: product.notes || '',
   };
 }
 
 function formToProduct(form: ProductFormState): Product {
-  const department = form.department.trim() || 'General Merchandise';
+  const department =
+    form.department === '__other__'
+      ? form.customDepartment.trim() || 'General Merchandise'
+      : form.department.trim() || 'General Merchandise';
+  const category = form.category.trim() || department;
+  const vendor =
+    form.vendor === '__other__'
+      ? form.customVendor.trim() || undefined
+      : form.vendor.trim() || undefined;
   const unitsPerCase = Math.max(1, safeNumber(form.unitsPerCase, 1));
   const casesOnHand = Math.max(0, safeNumber(form.casesOnHand));
   const looseUnits = Math.max(0, safeNumber(form.looseUnits));
@@ -298,10 +405,10 @@ function formToProduct(form: ProductFormState): Product {
   return {
     upc: form.upc.trim(),
     name: form.name.trim(),
-    category: department,
+    category,
     department,
     brand: form.brand.trim() || 'Unknown',
-    vendor: form.vendor.trim() || undefined,
+    vendor,
     costPrice: safeNumber(form.costPrice),
     sellPrice: safeNumber(form.sellPrice),
     stock: calculatedStock,
@@ -309,10 +416,22 @@ function formToProduct(form: ProductFormState): Product {
     unitsPerCase,
     casesOnHand,
     looseUnits,
+    plu: form.plu.trim() || undefined,
+    productCode: form.productCode.trim() || undefined,
+    sku: form.sku.trim() || undefined,
     taxCategory: form.taxable ? form.taxCategory.trim() || 'standard' : 'non-taxable',
     taxRate: form.taxable ? safeNumber(form.taxRate) : 0,
     taxable: form.taxable,
     ebtEligible: form.ebtEligible,
+    ageVerification: form.ageVerification,
+    minimumAge: form.ageVerification
+      ? (safeNumber(form.minimumAge) || 21)
+      : undefined,
+    ageRestrictionType: form.ageVerification
+      ? (form.ageRestrictionType === 'Custom'
+          ? form.customAgeRestrictionType.trim() || undefined
+          : form.ageRestrictionType || undefined)
+      : undefined,
     isActive: form.isActive,
     notes: form.notes.trim() || undefined,
   };
@@ -321,6 +440,7 @@ function formToProduct(form: ProductFormState): Product {
 function validateProductForm(form: ProductFormState) {
   if (!form.upc.trim()) return 'UPC is required.';
   if (!form.name.trim()) return 'Product name is required.';
+  if (form.department === '__other__' && !form.customDepartment.trim()) return 'Department is required.';
   if (!form.department.trim()) return 'Department is required.';
   if (safeNumber(form.costPrice) < 0) return 'Cost price must be zero or more.';
   if (safeNumber(form.sellPrice) < 0) return 'Selling price must be zero or more.';
@@ -422,6 +542,15 @@ function ProductModal({
   error,
   departments,
   vendors,
+  taxCategoryOptions,
+  ageRestrictionPresets,
+  upcDuplicate,
+  pluDuplicate,
+  productCodeDuplicate,
+  onUpcChange,
+  onUpcBlur,
+  onPluBlur,
+  onProductCodeBlur,
 }: {
   open: boolean;
   mode: 'add' | 'edit';
@@ -433,291 +562,215 @@ function ProductModal({
   error: string | null;
   departments: string[];
   vendors: string[];
+  taxCategoryOptions: TaxCategoryOption[];
+  ageRestrictionPresets: AgeRestrictionPreset[];
+  upcDuplicate: Product | null;
+  pluDuplicate: Product | null;
+  productCodeDuplicate: Product | null;
+  onUpcChange: (value: string) => void;
+  onUpcBlur: () => void;
+  onPluBlur: () => void;
+  onProductCodeBlur: () => void;
 }) {
   if (!open) return null;
 
+  const selectedTax = taxCategoryOptions.find((tax) => tax.name === form.taxCategory);
+  const selectedAge = ageRestrictionPresets.find(
+    (preset) => preset.restriction_type === form.ageRestrictionType && String(preset.minimum_age) === String(form.minimumAge || 21)
+  );
+
+  const fieldClass = 'h-8 px-2 py-1 text-sm';
+  const selectClass = 'h-8 w-full rounded-md border border-input bg-background px-2 py-1 text-sm text-foreground shadow-sm focus:outline-none focus:ring-2 focus:ring-ring';
+  const labelClass = 'space-y-1';
+  const labelTextClass = 'text-xs font-medium text-muted-foreground';
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-background/80 p-4 backdrop-blur-sm">
-      <Card className="max-h-[92vh] w-full max-w-4xl overflow-hidden">
-        <div className="flex items-start justify-between border-b border-border p-5">
+      <div className="flex max-h-[90vh] w-full max-w-2xl flex-col overflow-hidden rounded-lg border border-border bg-background shadow-xl">
+        <div className="flex items-start justify-between border-b border-border px-4 py-3">
           <div>
-            <h2 className="text-xl font-semibold text-foreground">
-              {mode === 'add' ? 'Add Product' : 'Edit Product'}
-            </h2>
-            <p className="mt-1 text-sm text-muted-foreground">
-              Manage product details, pricing, stock, tax, and vendor information.
-            </p>
+            <h2 className="text-lg font-semibold text-foreground">{mode === 'add' ? 'Add Product' : 'Edit Product'}</h2>
+            <p className="text-xs text-muted-foreground">Compact product profile, pricing, tax, and age rules.</p>
           </div>
-
           <Button variant="ghost" size="icon" onClick={onClose} disabled={saving}>
             <X className="h-4 w-4" />
           </Button>
         </div>
 
-        <div className="max-h-[calc(92vh-150px)] overflow-y-auto p-5">
+        <div className="overflow-y-auto px-4 py-3">
           {error && (
-            <div className="mb-5 flex items-start gap-3 rounded-lg border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive">
-              <CircleAlert className="mt-0.5 h-4 w-4 shrink-0" />
+            <div className="mb-3 flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+              <CircleAlert className="mt-0.5 h-3.5 w-3.5 shrink-0" />
               <span>{error}</span>
             </div>
           )}
 
-          <div className="grid gap-5 lg:grid-cols-2">
-            <Card className="p-4">
-              <h3 className="text-sm font-semibold text-foreground">Product Details</h3>
+          <div className="grid gap-3">
+            <div className="grid gap-2 sm:grid-cols-2">
+              <label className={labelClass}>
+                <span className={labelTextClass}>UPC *</span>
+                <Input className={fieldClass} value={form.upc} onChange={(event) => onUpcChange(event.target.value)} onBlur={onUpcBlur} disabled={mode === 'edit'} placeholder="0120000010101" />
+                {upcDuplicate && mode === 'add' && <p className="rounded border border-amber-200 bg-amber-50 px-2 py-1 text-xs text-amber-800">This UPC already exists: {upcDuplicate.name}. Saving will update it.</p>}
+              </label>
 
-              <div className="mt-4 grid gap-4">
-                <label className="space-y-1.5">
-                  <span className="text-xs font-medium text-muted-foreground">UPC *</span>
-                  <Input
-                    value={form.upc}
-                    onChange={(event) => setForm({ ...form, upc: event.target.value })}
-                    disabled={mode === 'edit'}
-                    placeholder="0120000010101"
-                  />
-                </label>
+              <label className={labelClass}>
+                <span className={labelTextClass}>PLU Code</span>
+                <Input className={fieldClass} value={form.plu} onChange={(event) => setForm({ ...form, plu: event.target.value })} onBlur={onPluBlur} placeholder="4011" />
+                {pluDuplicate && mode === 'add' && <p className="rounded border border-amber-200 bg-amber-50 px-2 py-1 text-xs text-amber-800">This PLU already exists: {pluDuplicate.name}.</p>}
+              </label>
+            </div>
 
-                <label className="space-y-1.5">
-                  <span className="text-xs font-medium text-muted-foreground">Product Name *</span>
-                  <Input
-                    value={form.name}
-                    onChange={(event) => setForm({ ...form, name: event.target.value })}
-                    placeholder="Coca-Cola 20oz"
-                  />
-                </label>
+            <label className={labelClass}>
+              <span className={labelTextClass}>Product Name *</span>
+              <Input className={fieldClass} value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} placeholder="Coca-Cola 20oz" />
+            </label>
 
-                <label className="space-y-1.5">
-                  <span className="text-xs font-medium text-muted-foreground">Department *</span>
-                  <select
-                    value={form.department}
-                    onChange={(event) => setForm({ ...form, department: event.target.value })}
-                    className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm text-foreground shadow-sm focus:outline-none focus:ring-2 focus:ring-ring"
-                  >
-                    <option value="">Select department</option>
-                    {departments.map((department) => (
-                      <option key={department} value={department}>
-                        {department}
-                      </option>
+            <div className="grid gap-2 sm:grid-cols-2">
+              <label className={labelClass}>
+                <span className={labelTextClass}>Product Code</span>
+                <Input className={fieldClass} value={form.productCode} onChange={(event) => setForm({ ...form, productCode: event.target.value })} onBlur={onProductCodeBlur} placeholder="Internal code" />
+                {productCodeDuplicate && mode === 'add' && <p className="rounded border border-amber-200 bg-amber-50 px-2 py-1 text-xs text-amber-800">This product code already exists: {productCodeDuplicate.name}.</p>}
+              </label>
+              <label className={labelClass}>
+                <span className={labelTextClass}>SKU</span>
+                <Input className={fieldClass} value={form.sku} onChange={(event) => setForm({ ...form, sku: event.target.value })} placeholder="SKU" />
+              </label>
+            </div>
+
+            <div className="grid gap-2 sm:grid-cols-2">
+              <label className={labelClass}>
+                <span className={labelTextClass}>Department *</span>
+                <select className={selectClass} value={departments.includes(form.department) ? form.department : form.department ? '__other__' : ''} onChange={(event) => setForm({ ...form, department: event.target.value, customDepartment: event.target.value === '__other__' ? form.customDepartment : '' })}>
+                  <option value="">Select department</option>
+                  {departments.map((department) => <option key={department} value={department}>{department}</option>)}
+                  <option value="__other__">Other (type manually)</option>
+                </select>
+                {(form.department === '__other__' || (form.department && !departments.includes(form.department))) && (
+                  <Input className={fieldClass} value={form.department === '__other__' ? form.customDepartment : form.department} onChange={(event) => setForm({ ...form, department: '__other__', customDepartment: event.target.value })} placeholder="Department name" />
+                )}
+              </label>
+
+              <label className={labelClass}>
+                <span className={labelTextClass}>Category</span>
+                <Input className={fieldClass} value={form.category} onChange={(event) => setForm({ ...form, category: event.target.value })} placeholder="Category" />
+              </label>
+            </div>
+
+            <div className="grid gap-2 sm:grid-cols-2">
+              <label className={labelClass}>
+                <span className={labelTextClass}>Brand</span>
+                <Input className={fieldClass} value={form.brand} onChange={(event) => setForm({ ...form, brand: event.target.value })} placeholder="Brand" />
+              </label>
+
+              <label className={labelClass}>
+                <span className={labelTextClass}>Vendor</span>
+                <select className={selectClass} value={vendors.includes(form.vendor) ? form.vendor : form.vendor ? '__other__' : ''} onChange={(event) => setForm({ ...form, vendor: event.target.value, customVendor: event.target.value === '__other__' ? form.customVendor : '' })}>
+                  <option value="">No vendor</option>
+                  {vendors.map((vendor) => <option key={vendor} value={vendor}>{vendor}</option>)}
+                  <option value="__other__">Other (type manually)</option>
+                </select>
+                {(form.vendor === '__other__' || (form.vendor && !vendors.includes(form.vendor))) && (
+                  <Input className={fieldClass} value={form.vendor === '__other__' ? form.customVendor : form.vendor} onChange={(event) => setForm({ ...form, vendor: '__other__', customVendor: event.target.value })} placeholder="Vendor name" />
+                )}
+                <span className="text-xs text-muted-foreground">Manage vendors in Store Settings - Vendors</span>
+              </label>
+            </div>
+
+            <div className="grid gap-2 sm:grid-cols-2">
+              <label className={labelClass}>
+                <span className={labelTextClass}>Cost Price</span>
+                <Input className={fieldClass} type="number" step="0.01" min="0" value={form.costPrice} onChange={(event) => setForm({ ...form, costPrice: event.target.value })} />
+              </label>
+              <label className={labelClass}>
+                <span className={labelTextClass}>Selling Price</span>
+                <Input className={fieldClass} type="number" step="0.01" min="0" value={form.sellPrice} onChange={(event) => setForm({ ...form, sellPrice: event.target.value })} />
+              </label>
+            </div>
+
+            <div className="grid gap-2 sm:grid-cols-2">
+              <label className={labelClass}>
+                <span className={labelTextClass}>Stock</span>
+                <Input className={fieldClass} type="number" min="0" value={String(calculateStockFromCases(form))} readOnly />
+              </label>
+              <label className={labelClass}>
+                <span className={labelTextClass}>Reorder Level</span>
+                <Input className={fieldClass} type="number" min="0" value={form.reorderLevel} onChange={(event) => setForm({ ...form, reorderLevel: event.target.value })} />
+              </label>
+            </div>
+
+            <div className="grid gap-2 sm:grid-cols-3">
+              <label className={labelClass}>
+                <span className={labelTextClass}>Units Per Case</span>
+                <Input className={fieldClass} type="number" min="1" value={form.unitsPerCase} onChange={(event) => setForm({ ...form, unitsPerCase: event.target.value })} />
+              </label>
+              <label className={labelClass}>
+                <span className={labelTextClass}>Cases On Hand</span>
+                <Input className={fieldClass} type="number" min="0" value={form.casesOnHand} onChange={(event) => setForm({ ...form, casesOnHand: event.target.value })} />
+              </label>
+              <label className={labelClass}>
+                <span className={labelTextClass}>Loose Units</span>
+                <Input className={fieldClass} type="number" min="0" value={form.looseUnits} onChange={(event) => setForm({ ...form, looseUnits: event.target.value })} />
+              </label>
+            </div>
+
+            <div className="border-t border-border pt-3 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Product Rules</div>
+            <div className="grid gap-2 sm:grid-cols-3">
+              <label className="inline-flex items-center gap-2 text-sm"><input type="checkbox" checked={form.isActive} onChange={(event) => setForm({ ...form, isActive: event.target.checked })} /> Active</label>
+              <label className="inline-flex items-center gap-2 text-sm"><input type="checkbox" checked={form.taxable} onChange={(event) => setForm({ ...form, taxable: event.target.checked, taxCategory: event.target.checked ? form.taxCategory : 'non-taxable', taxRate: event.target.checked ? form.taxRate : '0' })} /> Taxable</label>
+              <label className="inline-flex items-center gap-2 text-sm"><input type="checkbox" checked={form.ebtEligible} onChange={(event) => setForm({ ...form, ebtEligible: event.target.checked })} /> EBT Eligible</label>
+            </div>
+
+            {form.taxable && (
+              <div className="grid gap-2">
+                <div className="border-t border-border pt-3 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Tax</div>
+                {taxCategoryOptions.length ? (
+                  <div className="flex flex-wrap gap-2">
+                    {taxCategoryOptions.map((tax) => (
+                      <button key={tax.id} type="button" onClick={() => setForm({ ...form, taxCategory: tax.name, taxRate: String(tax.rate) })} className={cn('rounded-full border px-2 py-1 text-xs font-semibold transition', selectedTax?.id === tax.id ? 'border-primary bg-primary text-primary-foreground' : 'border-border text-muted-foreground hover:bg-secondary')}>
+                        {tax.name} {Number(tax.rate || 0).toFixed(Number(tax.rate || 0) % 1 === 0 ? 0 : 2)}%
+                      </button>
                     ))}
-                  </select>
-                </label>
+                  </div>
+                ) : (
+                  <p className="rounded-md border border-dashed border-border px-3 py-2 text-xs text-muted-foreground">No tax categories found. Add them in Store Settings - Tax.</p>
+                )}
+              </div>
+            )}
 
-                <label className="space-y-1.5">
-                  <span className="text-xs font-medium text-muted-foreground">Brand</span>
-                  <Input
-                    value={form.brand}
-                    onChange={(event) => setForm({ ...form, brand: event.target.value })}
-                    placeholder="Coca-Cola"
-                  />
-                </label>
+            <div className="border-t border-border pt-3 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Age Verification</div>
+            <label className="inline-flex items-center gap-2 text-sm"><input type="checkbox" checked={form.ageVerification} onChange={(event) => setForm({ ...form, ageVerification: event.target.checked, minimumAge: event.target.checked ? form.minimumAge || '21' : '', ageRestrictionType: event.target.checked ? form.ageRestrictionType : '', customAgeRestrictionType: '' })} /> Age Verification Required</label>
 
-                <label className="space-y-1.5">
-                  <span className="text-xs font-medium text-muted-foreground">Vendor</span>
-                  <select
-                    value={form.vendor}
-                    onChange={(event) => setForm({ ...form, vendor: event.target.value })}
-                    className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm text-foreground shadow-sm focus:outline-none focus:ring-2 focus:ring-ring"
-                  >
-                    <option value="">No vendor selected</option>
-                    {vendors.map((vendor) => (
-                      <option key={vendor} value={vendor}>
-                        {vendor}
-                      </option>
+            {form.ageVerification && (
+              <div className="grid gap-2">
+                {ageRestrictionPresets.length ? (
+                  <div className="flex flex-wrap gap-2">
+                    {ageRestrictionPresets.map((preset) => (
+                      <button key={preset.id} type="button" onClick={() => setForm({ ...form, ageRestrictionType: preset.restriction_type, minimumAge: String(preset.minimum_age), customAgeRestrictionType: '' })} className={cn('rounded-full border px-2 py-1 text-xs font-semibold transition', selectedAge?.id === preset.id ? 'border-primary bg-primary text-primary-foreground' : 'border-border text-muted-foreground hover:bg-secondary')}>
+                        {preset.name} {preset.minimum_age}+
+                      </button>
                     ))}
-                  </select>
-                </label>
+                  </div>
+                ) : (
+                  <p className="rounded-md border border-dashed border-border px-3 py-2 text-xs text-muted-foreground">No age restriction presets found. Add them in Store Settings - Age Restrictions.</p>
+                )}
               </div>
-            </Card>
+            )}
 
-            <Card className="p-4">
-              <h3 className="text-sm font-semibold text-foreground">Pricing & Stock</h3>
-
-              <div className="mt-4 grid gap-4">
-                <label className="space-y-1.5">
-                  <span className="text-xs font-medium text-muted-foreground">Cost Price *</span>
-                  <Input
-                    type="number"
-                    step="0.01"
-                    min="0"
-                    value={form.costPrice}
-                    onChange={(event) => setForm({ ...form, costPrice: event.target.value })}
-                  />
-                </label>
-
-                <label className="space-y-1.5">
-                  <span className="text-xs font-medium text-muted-foreground">Selling Price *</span>
-                  <Input
-                    type="number"
-                    step="0.01"
-                    min="0"
-                    value={form.sellPrice}
-                    onChange={(event) => setForm({ ...form, sellPrice: event.target.value })}
-                  />
-                </label>
-
-                <div className="rounded-lg bg-secondary/50 p-3 text-sm">
-                  <span className="text-muted-foreground">Margin: </span>
-                  <span className="font-semibold text-foreground">
-                    {computeMargin(safeNumber(form.sellPrice), safeNumber(form.costPrice)).toFixed(1)}%
-                  </span>
-                </div>
-
-                <div className="rounded-lg border border-border bg-secondary/30 p-3">
-  <p className="text-xs font-medium text-muted-foreground">Calculated Current Stock</p>
-  <p className="mt-1 text-2xl font-bold text-foreground">
-    {formatNumber(calculateStockFromCases(form))}
-  </p>
-  <p className="mt-1 text-xs text-muted-foreground">
-    {safeNumber(form.casesOnHand)} cases × {safeNumber(form.unitsPerCase, 1)} units + {safeNumber(form.looseUnits)} loose
-  </p>
-</div>
-
-<div className="grid gap-4 md:grid-cols-3">
-  <label className="space-y-1.5">
-    <span className="text-xs font-medium text-muted-foreground">Units Per Case</span>
-    <Input
-      type="number"
-      step="1"
-      min="1"
-      value={form.unitsPerCase}
-      onChange={(event) => setForm({ ...form, unitsPerCase: event.target.value })}
-    />
-  </label>
-
-  <label className="space-y-1.5">
-    <span className="text-xs font-medium text-muted-foreground">Cases On Hand</span>
-    <Input
-      type="number"
-      step="1"
-      min="0"
-      value={form.casesOnHand}
-      onChange={(event) => setForm({ ...form, casesOnHand: event.target.value })}
-    />
-  </label>
-
-  <label className="space-y-1.5">
-    <span className="text-xs font-medium text-muted-foreground">Loose Units</span>
-    <Input
-      type="number"
-      step="1"
-      min="0"
-      value={form.looseUnits}
-      onChange={(event) => setForm({ ...form, looseUnits: event.target.value })}
-    />
-  </label>
-</div>
-
-<label className="space-y-1.5">
-  <span className="text-xs font-medium text-muted-foreground">Reorder Level</span>
-  <Input
-    type="number"
-    step="1"
-    min="0"
-    value={form.reorderLevel}
-    onChange={(event) => setForm({ ...form, reorderLevel: event.target.value })}
-  />
-</label>
-              </div>
-            </Card>
-
-            <Card className="p-4 lg:col-span-2">
-              <h3 className="text-sm font-semibold text-foreground">Product Rules</h3>
-
-              <div className="mt-4 grid gap-3 md:grid-cols-3">
-                <label className="flex items-start gap-3 rounded-lg border border-border p-3">
-                  <input
-                    type="checkbox"
-                    checked={form.isActive}
-                    onChange={(event) => setForm({ ...form, isActive: event.target.checked })}
-                    className="mt-1 h-4 w-4"
-                  />
-                  <span>
-                    <span className="block text-sm font-medium text-foreground">Active</span>
-                    <span className="text-xs text-muted-foreground">Show this product in active inventory.</span>
-                  </span>
-                </label>
-
-                <label className="flex items-start gap-3 rounded-lg border border-border p-3">
-                  <input
-                    type="checkbox"
-                    checked={form.taxable}
-                    onChange={(event) =>
-                      setForm({
-                        ...form,
-                        taxable: event.target.checked,
-                        taxCategory: event.target.checked ? 'standard' : 'non-taxable',
-                        taxRate: event.target.checked ? form.taxRate : '0',
-                      })
-                    }
-                    className="mt-1 h-4 w-4"
-                  />
-                  <span>
-                    <span className="block text-sm font-medium text-foreground">Taxable</span>
-                    <span className="text-xs text-muted-foreground">Used for product tax reporting.</span>
-                  </span>
-                </label>
-
-                <label className="flex items-start gap-3 rounded-lg border border-border p-3">
-                  <input
-                    type="checkbox"
-                    checked={form.ebtEligible}
-                    onChange={(event) => setForm({ ...form, ebtEligible: event.target.checked })}
-                    className="mt-1 h-4 w-4"
-                  />
-                  <span>
-                    <span className="block text-sm font-medium text-foreground">EBT Eligible</span>
-                    <span className="text-xs text-muted-foreground">Mark food stamp eligible products.</span>
-                  </span>
-                </label>
-              </div>
-
-              <div className="mt-4 grid gap-4 md:grid-cols-[1fr_160px]">
-                <label className="space-y-1.5">
-                  <span className="text-xs font-medium text-muted-foreground">Tax Category</span>
-                  <Input
-                    value={form.taxCategory}
-                    disabled={!form.taxable}
-                    onChange={(event) => setForm({ ...form, taxCategory: event.target.value })}
-                    placeholder="standard"
-                  />
-                </label>
-
-                <label className="space-y-1.5">
-                  <span className="text-xs font-medium text-muted-foreground">Tax Rate %</span>
-                  <Input
-                    type="number"
-                    step="0.01"
-                    min="0"
-                    value={form.taxRate}
-                    disabled={!form.taxable}
-                    onChange={(event) => setForm({ ...form, taxRate: event.target.value })}
-                  />
-                </label>
-              </div>
-
-              <textarea
-                value={form.notes}
-                onChange={(event) => setForm({ ...form, notes: event.target.value })}
-                placeholder="Optional product notes."
-                className="mt-4 min-h-[90px] w-full rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground shadow-sm placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
-              />
-            </Card>
+            <label className={labelClass}>
+              <span className={labelTextClass}>Notes</span>
+              <textarea rows={2} value={form.notes} onChange={(event) => setForm({ ...form, notes: event.target.value })} placeholder="Optional product notes." className="w-full rounded-md border border-input bg-background px-2 py-1 text-sm text-foreground shadow-sm placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring" />
+            </label>
           </div>
         </div>
 
-        <div className="flex flex-col-reverse gap-3 border-t border-border p-5 sm:flex-row sm:justify-end">
-          <Button variant="outline" onClick={onClose} disabled={saving}>
-            Cancel
-          </Button>
-          <Button onClick={onSave} disabled={saving}>
-            {saving ? 'Saving...' : mode === 'add' ? 'Add Product' : 'Save Changes'}
-          </Button>
+        <div className="flex justify-end gap-2 border-t border-border px-4 py-3">
+          <Button variant="outline" onClick={onClose} disabled={saving}>Cancel</Button>
+          <Button onClick={onSave} disabled={saving}>{saving ? 'Saving...' : mode === 'add' ? (upcDuplicate ? 'Update Existing Product' : 'Add Product') : 'Save Changes'}</Button>
         </div>
-      </Card>
+      </div>
     </div>
   );
 }
-
 export default function ProductsPage() {
   const { store } = useAuth();
 
@@ -736,12 +789,47 @@ export default function ProductsPage() {
   const [activeTab, setActiveTab] = useState<Tab>('overview');
   const [query, setQuery] = useState('');
   const [departmentFilter, setDepartmentFilter] = useState('All');
+  const [vendorFilter, setVendorFilter] = useState('All');
+  const [minPrice, setMinPrice] = useState('');
+  const [maxPrice, setMaxPrice] = useState('');
+  const [ebtFilter, setEbtFilter] = useState(false);
+  const [ageVerificationFilter, setAgeVerificationFilter] = useState(false);
+  const [taxableFilter, setTaxableFilter] = useState(false);
   const [stockFilter, setStockFilter] = useState('All');
   const [modalMode, setModalMode] = useState<'add' | 'edit'>('add');
   const [modalOpen, setModalOpen] = useState(false);
   const [form, setForm] = useState<ProductFormState>(EMPTY_PRODUCT_FORM);
   const [formError, setFormError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  const [upcDuplicate, setUpcDuplicate] = useState<Product | null>(null);
+  const [pluDuplicate, setPluDuplicate] = useState<Product | null>(null);
+  const [productCodeDuplicate, setProductCodeDuplicate] = useState<Product | null>(null);
+  const [productImportResult, setProductImportResult] = useState<ReturnType<typeof parseProductsCsv> | null>(null);
+  const [productImportFileName, setProductImportFileName] = useState('');
+  const [productImportError, setProductImportError] = useState<string | null>(null);
+  const [productImportSummary, setProductImportSummary] = useState<ProductImportSummary>(null);
+  const [productImportMode, setProductImportMode] = useState<ProductImportMode>('add_update');
+  const [duplicateImportMode, setDuplicateImportMode] = useState<DuplicateImportMode>('skip');
+  const [importingProducts, setImportingProducts] = useState(false);
+  const [bulkEditMode, setBulkEditMode] = useState(false);
+  const [selectedUpcs, setSelectedUpcs] = useState<Set<string>>(new Set());
+  const [bulkDepartment, setBulkDepartment] = useState('');
+  const [bulkCategory, setBulkCategory] = useState('');
+  const [bulkVendor, setBulkVendor] = useState('');
+  const [bulkCustomVendor, setBulkCustomVendor] = useState('');
+  const [bulkBrand, setBulkBrand] = useState('');
+  const [bulkCostPrice, setBulkCostPrice] = useState('');
+  const [bulkSellPrice, setBulkSellPrice] = useState('');
+  const [bulkTaxCategory, setBulkTaxCategory] = useState('');
+  const [bulkTaxable, setBulkTaxable] = useState('');
+  const [bulkEbt, setBulkEbt] = useState('');
+  const [bulkActive, setBulkActive] = useState('');
+  const [bulkAgeVerification, setBulkAgeVerification] = useState('');
+  const [bulkMinimumAge, setBulkMinimumAge] = useState('');
+  const [bulkAgeRestrictionType, setBulkAgeRestrictionType] = useState('');
+  const [bulkMessage, setBulkMessage] = useState<string | null>(null);
+  const [taxCategoryOptions, setTaxCategoryOptions] = useState<TaxCategoryOption[]>([]);
+  const [ageRestrictionPresets, setAgeRestrictionPresets] = useState<AgeRestrictionPreset[]>([]);
 
   const [invoiceFile, setInvoiceFile] = useState<File | null>(null);
   const [invoiceFileName, setInvoiceFileName] = useState('');
@@ -760,7 +848,7 @@ export default function ProductsPage() {
   const [editingHistoryId, setEditingHistoryId] = useState<string | null>(null);
   const [historyQuery, setHistoryQuery] = useState('');
   const [historyVendorFilter, setHistoryVendorFilter] = useState('All');
-  const [storeVendorOptions, setStoreVendorOptions] = useState<string[]>([]);
+  const [storeVendors, setStoreVendors] = useState<string[]>([]);
   const [reorderSearch, setReorderSearch] = useState('');
   const [reorderPriorityFilter, setReorderPriorityFilter] = useState<'All' | ReorderPriority>('All');
   const [selectedReorderUpcs, setSelectedReorderUpcs] = useState<string[]>([]);
@@ -838,7 +926,7 @@ export default function ProductsPage() {
   useEffect(() => {
     const loadStoreVendors = async () => {
       if (!store?.id) {
-        setStoreVendorOptions([]);
+        setStoreVendors([]);
         return;
       }
 
@@ -850,11 +938,11 @@ export default function ProductsPage() {
         .order('vendor_name', { ascending: true });
 
       if (error) {
-        setStoreVendorOptions([]);
+        setStoreVendors([]);
         return;
       }
 
-      setStoreVendorOptions(
+      setStoreVendors(
         (data || [])
           .map((vendor: any) => String(vendor.vendor_name || '').trim())
           .filter(Boolean)
@@ -885,10 +973,34 @@ export default function ProductsPage() {
     return Array.from(set).sort((a, b) => a.localeCompare(b));
   }, [items]);
 
+  const allVendorOptions = useMemo(() => {
+    const set = new Set<string>();
+
+    storeVendors.forEach((vendor) => {
+      if (vendor.trim()) set.add(vendor.trim());
+    });
+
+    vendors.forEach((vendor) => {
+      if (vendor.trim()) set.add(vendor.trim());
+    });
+
+    return Array.from(set).sort((a, b) => a.localeCompare(b));
+  }, [storeVendors, vendors]);
+
+  const categories = useMemo(() => {
+    const set = new Set<string>();
+
+    items.forEach((product) => {
+      if (product.category) set.add(product.category);
+    });
+
+    return Array.from(set).sort((a, b) => a.localeCompare(b));
+  }, [items]);
+
   const vendorOptions = useMemo(() => {
     const set = new Set<string>();
 
-    storeVendorOptions.forEach((vendor) => {
+    storeVendors.forEach((vendor) => {
       if (vendor.trim()) set.add(vendor.trim());
     });
 
@@ -903,7 +1015,45 @@ export default function ProductsPage() {
     if (receiptVendor.trim()) set.add(receiptVendor.trim());
 
     return Array.from(set).sort((a, b) => a.localeCompare(b));
-  }, [storeVendorOptions, vendors, receivingLines, receiptVendor]);
+  }, [storeVendors, vendors, receivingLines, receiptVendor]);
+
+  const loadTaxCategories = useCallback(async () => {
+    if (!store?.id) {
+      setTaxCategoryOptions([]);
+      return;
+    }
+
+    const { data, error } = await supabase
+      .from('tax_categories')
+      .select('id, name, rate, is_active')
+      .eq('store_id', store.id)
+      .eq('is_active', true)
+      .order('name', { ascending: true });
+
+    setTaxCategoryOptions(error ? [] : ((data || []) as TaxCategoryOption[]));
+  }, [store?.id]);
+
+  const loadAgeRestrictionPresets = useCallback(async () => {
+    if (!store?.id) {
+      setAgeRestrictionPresets([]);
+      return;
+    }
+
+    const { data, error } = await supabase
+      .from('store_age_restriction_presets')
+      .select('id, name, minimum_age, restriction_type, is_active')
+      .eq('store_id', store.id)
+      .eq('is_active', true)
+      .order('name', { ascending: true });
+
+    setAgeRestrictionPresets(error ? [] : ((data || []) as AgeRestrictionPreset[]));
+  }, [store?.id]);
+
+  useEffect(() => {
+    if (!store?.id) return;
+    void loadTaxCategories();
+    void loadAgeRestrictionPresets();
+  }, [store?.id, loadTaxCategories, loadAgeRestrictionPresets]);
 
   const filteredReceivingHistory = useMemo(() => {
     const search = historyQuery.trim().toLowerCase();
@@ -1428,6 +1578,9 @@ export default function ProductsPage() {
       const stockStatus = product.stock <= product.reorderLevel ? 'Reorder' : 'In Stock';
       const haystack = [
         product.upc,
+        product.plu,
+        product.productCode,
+        product.sku,
         product.name,
         product.department,
         product.category,
@@ -1441,11 +1594,28 @@ export default function ProductsPage() {
 
       if (query.trim() && !haystack.includes(query.trim().toLowerCase())) return false;
       if (departmentFilter !== 'All' && (product.department || product.category) !== departmentFilter) return false;
+      if (vendorFilter !== 'All' && product.vendor !== vendorFilter) return false;
       if (stockFilter !== 'All' && stockStatus !== stockFilter) return false;
+      if (minPrice.trim() && product.sellPrice < Number(minPrice)) return false;
+      if (maxPrice.trim() && product.sellPrice > Number(maxPrice)) return false;
+      if (ebtFilter && product.ebtEligible !== true) return false;
+      if (ageVerificationFilter && product.ageVerification !== true) return false;
+      if (taxableFilter && product.taxable !== true) return false;
 
       return true;
     });
-  }, [items, query, departmentFilter, stockFilter]);
+  }, [
+    items,
+    query,
+    departmentFilter,
+    vendorFilter,
+    stockFilter,
+    minPrice,
+    maxPrice,
+    ebtFilter,
+    ageVerificationFilter,
+    taxableFilter,
+  ]);
 
   const invoiceTotal = receivingLines.reduce((sum, line) => sum + line.totalCost, 0);
 
@@ -1618,6 +1788,11 @@ export default function ProductsPage() {
     setModalMode('add');
     setForm(EMPTY_PRODUCT_FORM);
     setFormError(null);
+    setUpcDuplicate(null);
+    setPluDuplicate(null);
+    setProductCodeDuplicate(null);
+    void loadTaxCategories();
+    void loadAgeRestrictionPresets();
     setModalOpen(true);
   };
 
@@ -1625,7 +1800,43 @@ export default function ProductsPage() {
     setModalMode('edit');
     setForm(productToForm(product));
     setFormError(null);
+    setUpcDuplicate(null);
+    setPluDuplicate(null);
+    setProductCodeDuplicate(null);
+    void loadTaxCategories();
+    void loadAgeRestrictionPresets();
     setModalOpen(true);
+  };
+
+  const closeProductModal = () => {
+    setModalOpen(false);
+    setFormError(null);
+    setUpcDuplicate(null);
+    setPluDuplicate(null);
+    setProductCodeDuplicate(null);
+  };
+
+  const checkUpcDuplicate = (value = form.upc) => {
+    if (modalMode !== 'add') return;
+    const trimmed = value.trim();
+    setUpcDuplicate(trimmed ? items.find((product) => product.upc.trim() === trimmed) || null : null);
+  };
+
+  const checkPluDuplicate = () => {
+    if (modalMode !== 'add') return;
+    const trimmed = form.plu.trim();
+    setPluDuplicate(trimmed ? items.find((product) => product.plu?.trim() === trimmed) || null : null);
+  };
+
+  const checkProductCodeDuplicate = () => {
+    if (modalMode !== 'add') return;
+    const trimmed = form.productCode.trim();
+    setProductCodeDuplicate(trimmed ? items.find((product) => product.productCode?.trim() === trimmed) || null : null);
+  };
+
+  const handleProductUpcChange = (value: string) => {
+    setForm({ ...form, upc: value });
+    if (modalMode === 'add') checkUpcDuplicate(value);
   };
 
   const saveProduct = async () => {
@@ -1640,7 +1851,8 @@ export default function ProductsPage() {
     setFormError(null);
 
     const product = formToProduct(form);
-    const result = modalMode === 'add' ? await createProduct(product) : await updateProduct(product);
+    const productToSave = modalMode === 'add' && upcDuplicate ? { ...upcDuplicate, ...product, upc: upcDuplicate.upc } : product;
+    const result = modalMode === 'add' && !upcDuplicate ? await createProduct(productToSave) : await updateProduct(productToSave);
 
     setSaving(false);
 
@@ -1649,7 +1861,270 @@ export default function ProductsPage() {
       return;
     }
 
-    setModalOpen(false);
+    closeProductModal();
+  };
+
+  const handleProductImportFile = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+
+    if (!file) return;
+
+    setProductImportFileName(file.name);
+    setProductImportError(null);
+    setProductImportSummary(null);
+
+    try {
+      const lowerName = file.name.toLowerCase();
+      const isSpreadsheet = lowerName.endsWith('.xlsx') || lowerName.endsWith('.xls');
+      let csvText = '';
+
+      if (isSpreadsheet) {
+        const XLSX = await import('xlsx');
+        const buffer = await readFileAsArrayBuffer(file);
+        const workbook = XLSX.read(buffer, { type: 'array', raw: false });
+        const sheet = workbook.Sheets[workbook.SheetNames[0]];
+        const rows = XLSX.utils.sheet_to_json(sheet, {
+          raw: false,
+          defval: '',
+          header: 1,
+        }) as string[][];
+
+        if (!rows.length) {
+          throw new Error('No rows found in this spreadsheet.');
+        }
+
+        const normalizedRows = rows.map((row, index) =>
+          row.map((cell) => (index === 0 ? normalizeProductHeader(String(cell ?? '')) : String(cell ?? '')))
+        );
+
+        csvText = normalizedRows
+          .map((row) => row.map((cell) => quoteCsvValue(cell)).join(','))
+          .join('\n');
+      } else {
+        csvText = await file.text();
+      }
+
+      const parsed = parseProductsCsv(csvText, { mode: productImportMode });
+      setProductImportResult(parsed);
+
+      if (!parsed.ok) {
+        setProductImportError('Missing required columns. Review the parser summary before importing.');
+      }
+    } catch (error) {
+      setProductImportResult(null);
+      setProductImportError(error instanceof Error ? error.message : 'Could not parse this product file.');
+    }
+  };
+
+  const importParsedProducts = async () => {
+    if (!productImportResult || productImportResult.products.length === 0) return;
+
+    setImportingProducts(true);
+    setProductImportError(null);
+
+    const summary: NonNullable<ProductImportSummary> = {
+      inserted: 0,
+      updated: 0,
+      skipped: 0,
+      failed: 0,
+      duplicates: 0,
+      unmatched: 0,
+      errorRows: productImportResult.invalidRows,
+    };
+
+    let workingProducts = [...items];
+    const updateMode = productImportMode !== 'add_update';
+    const validRows = productImportResult.rows.filter((row) => row.valid && row.product);
+
+    for (const row of validRows) {
+      const product = row.product as Product;
+      const duplicate =
+        productImportMode === 'update_by_upc'
+          ? workingProducts.find((current) => normalizeText(current.upc) === normalizeText(product.upc)) || null
+          : productImportMode === 'update_by_plu'
+            ? workingProducts.find((current) => normalizeText(current.plu) === normalizeText(product.plu)) || null
+            : productImportMode === 'update_by_product_code'
+              ? workingProducts.find((current) => normalizeText(current.productCode) === normalizeText(product.productCode)) || null
+              : findProductDuplicate(workingProducts, product);
+
+      try {
+        if (updateMode) {
+          if (!duplicate) {
+            summary.unmatched += 1;
+            continue;
+          }
+
+          const present = new Set(row.presentFields || []);
+          const patch: Partial<Product> = {};
+          if (present.has('item_name')) patch.name = product.name;
+          if (present.has('category')) patch.category = product.category;
+          if (present.has('department')) patch.department = product.department;
+          if (present.has('brand')) patch.brand = product.brand;
+          if (present.has('vendor')) patch.vendor = product.vendor;
+          if (present.has('sku')) patch.sku = product.sku;
+          if (present.has('plu')) patch.plu = product.plu;
+          if (present.has('product_code')) patch.productCode = product.productCode;
+          if (present.has('cost_price')) patch.costPrice = product.costPrice;
+          if (present.has('selling_price')) patch.sellPrice = product.sellPrice;
+          if (present.has('stock')) patch.stock = product.stock;
+          if (present.has('reorder_level')) patch.reorderLevel = product.reorderLevel;
+          if (present.has('tax_rate')) patch.taxRate = product.taxRate;
+          if (present.has('tax_category')) patch.taxCategory = product.taxCategory;
+          if (present.has('taxable')) patch.taxable = product.taxable;
+          if (present.has('ebt_eligible')) patch.ebtEligible = product.ebtEligible;
+          if (present.has('age_verification')) patch.ageVerification = product.ageVerification;
+          if (present.has('minimum_age')) patch.minimumAge = product.minimumAge;
+          if (present.has('age_restriction_type')) patch.ageRestrictionType = product.ageRestrictionType;
+          if (present.has('is_active')) patch.isActive = product.isActive;
+          if (present.has('notes')) patch.notes = product.notes;
+
+          const updatedProduct = { ...duplicate, ...patch, upc: duplicate.upc };
+          const result = await updateProduct(updatedProduct);
+          if (result.error) throw new Error(result.error);
+          workingProducts = workingProducts.map((current) =>
+            current.upc === duplicate.upc ? updatedProduct : current
+          );
+          summary.updated += 1;
+          continue;
+        }
+
+        if (duplicate) {
+          summary.duplicates += 1;
+
+          if (duplicateImportMode === 'update') {
+            const updatedProduct = { ...duplicate, ...product, upc: duplicate.upc };
+            const result = await updateProduct(updatedProduct);
+            if (result.error) throw new Error(result.error);
+            workingProducts = workingProducts.map((current) =>
+              current.upc === duplicate.upc ? updatedProduct : current
+            );
+            summary.updated += 1;
+          } else {
+            summary.skipped += 1;
+          }
+        } else {
+          const result = await createProduct(product);
+          if (result.error) throw new Error(result.error);
+          workingProducts = [product, ...workingProducts];
+          summary.inserted += 1;
+        }
+      } catch {
+        summary.failed += 1;
+      }
+    }
+
+    setItems(workingProducts);
+    setProductImportSummary(summary);
+    setImportingProducts(false);
+  };
+
+  const resetBulkFields = () => {
+    setBulkDepartment('');
+    setBulkCategory('');
+    setBulkVendor('');
+    setBulkCustomVendor('');
+    setBulkBrand('');
+    setBulkCostPrice('');
+    setBulkSellPrice('');
+    setBulkTaxCategory('');
+    setBulkTaxable('');
+    setBulkEbt('');
+    setBulkActive('');
+    setBulkAgeVerification('');
+    setBulkMinimumAge('');
+    setBulkAgeRestrictionType('');
+  };
+
+  const exitBulkEdit = () => {
+    setBulkEditMode(false);
+    setSelectedUpcs(new Set());
+    resetBulkFields();
+  };
+
+  const toggleBulkEdit = () => {
+    if (bulkEditMode) {
+      exitBulkEdit();
+    } else {
+      setBulkEditMode(true);
+      setBulkMessage(null);
+    }
+  };
+
+  const toggleSelectedProduct = (upc: string) => {
+    setSelectedUpcs((previous) => {
+      const next = new Set(previous);
+      if (next.has(upc)) {
+        next.delete(upc);
+      } else {
+        next.add(upc);
+      }
+      return next;
+    });
+  };
+
+  const toggleAllFilteredProducts = () => {
+    setSelectedUpcs((previous) => {
+      const allSelected = filteredProducts.length > 0 && filteredProducts.every((product) => previous.has(product.upc));
+      if (allSelected) return new Set();
+      return new Set(filteredProducts.map((product) => product.upc));
+    });
+  };
+
+  const applyBulkChanges = async () => {
+    const changes: Partial<Product> = {};
+
+    if (bulkDepartment.trim()) changes.department = bulkDepartment.trim();
+    if (bulkCategory.trim()) changes.category = bulkCategory.trim();
+    if (bulkVendor === '__other__' && bulkCustomVendor.trim()) changes.vendor = bulkCustomVendor.trim();
+    if (bulkVendor && bulkVendor !== '__other__') changes.vendor = bulkVendor;
+    if (bulkBrand.trim()) changes.brand = bulkBrand.trim();
+    if (bulkCostPrice.trim() && Number.isFinite(Number(bulkCostPrice))) changes.costPrice = Number(bulkCostPrice);
+    if (bulkSellPrice.trim() && Number.isFinite(Number(bulkSellPrice))) changes.sellPrice = Number(bulkSellPrice);
+    if (bulkTaxCategory) changes.taxCategory = bulkTaxCategory;
+    if (bulkTaxable) changes.taxable = bulkTaxable === 'true';
+    if (bulkEbt) changes.ebtEligible = bulkEbt === 'true';
+    if (bulkActive) changes.isActive = bulkActive === 'true';
+    if (bulkAgeVerification) {
+      changes.ageVerification = bulkAgeVerification === 'true';
+      if (bulkAgeVerification === 'false') {
+        changes.minimumAge = undefined;
+        changes.ageRestrictionType = undefined;
+      }
+    }
+    if (bulkMinimumAge.trim()) changes.minimumAge = safeNumber(bulkMinimumAge, 21);
+    if (bulkAgeRestrictionType) changes.ageRestrictionType = bulkAgeRestrictionType;
+
+    if (Object.keys(changes).length === 0) {
+      setBulkMessage('Choose at least one change before applying.');
+      return;
+    }
+
+    const count = selectedUpcs.size;
+    if (!window.confirm(`Update ${count} products with these changes?`)) return;
+
+    let updatedCount = 0;
+    let nextItems = [...items];
+
+    for (const upc of selectedUpcs) {
+      const existing = nextItems.find((product) => product.upc === upc);
+      if (!existing) continue;
+
+      const updatedProduct: Product = {
+        ...existing,
+        ...changes,
+      };
+
+      const result = await updateProduct(updatedProduct);
+      if (!result.error) {
+        updatedCount += 1;
+        nextItems = nextItems.map((product) => (product.upc === upc ? updatedProduct : product));
+      }
+    }
+
+    setItems(nextItems);
+    setBulkMessage(`${updatedCount} products updated successfully.`);
+    exitBulkEdit();
   };
 
   const exportProducts = () => {
@@ -1657,7 +2132,10 @@ export default function ProductsPage() {
       'storepulse-products-inventory.csv',
       filteredProducts.map((product) => ({
         UPC: product.upc,
+        PLU: product.plu || '',
+        ProductCode: product.productCode || '',
         Product: product.name,
+        SKU: product.sku || '',
         Department: product.department || product.category,
         Brand: product.brand || '',
         Vendor: product.vendor || '',
@@ -1667,7 +2145,12 @@ export default function ProductsPage() {
         Stock: product.stock,
         ReorderLevel: product.reorderLevel,
         Taxable: (product.taxable ?? true) ? 'Yes' : 'No',
+        TaxCategory: product.taxCategory || '',
         EBT: product.ebtEligible ? 'Yes' : 'No',
+        EBTEligible: product.ebtEligible ? 'Yes' : 'No',
+        AgeVerification: product.ageVerification ? 'Yes' : 'No',
+        MinimumAge: product.minimumAge || '',
+        AgeRestrictionType: product.ageRestrictionType || '',
         Active: (product.isActive ?? true) ? 'Yes' : 'No',
       }))
     );
@@ -2151,13 +2634,13 @@ const nextBreakdown = getCaseBreakdown(nextStock, unitsPerCase);
       {activeTab === 'products' && (
         <div className="space-y-5">
           <Card className="p-4">
-            <div className="grid gap-3 lg:grid-cols-[1fr_220px_180px]">
+            <div className="grid gap-3 lg:grid-cols-[minmax(240px,1fr)_180px_180px_150px_120px_120px_auto]">
               <div className="relative">
                 <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
                 <Input
                   value={query}
                   onChange={(event) => setQuery(event.target.value)}
-                  placeholder="Search by product, UPC, brand, vendor, or department..."
+                  placeholder="Search name, UPC, PLU, code, SKU, brand, vendor, department..."
                   className="pl-9"
                 />
               </div>
@@ -2176,6 +2659,19 @@ const nextBreakdown = getCaseBreakdown(nextStock, unitsPerCase);
               </select>
 
               <select
+                value={vendorFilter}
+                onChange={(event) => setVendorFilter(event.target.value)}
+                className="h-10 rounded-md border border-input bg-background px-3 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+              >
+                <option value="All">All Vendors</option>
+                {vendors.map((vendor) => (
+                  <option key={vendor} value={vendor}>
+                    {vendor}
+                  </option>
+                ))}
+              </select>
+
+              <select
                 value={stockFilter}
                 onChange={(event) => setStockFilter(event.target.value)}
                 className="h-10 rounded-md border border-input bg-background px-3 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
@@ -2184,14 +2680,253 @@ const nextBreakdown = getCaseBreakdown(nextStock, unitsPerCase);
                 <option value="In Stock">In Stock</option>
                 <option value="Reorder">Reorder</option>
               </select>
+
+              <Input
+                type="number"
+                min="0"
+                value={minPrice}
+                onChange={(event) => setMinPrice(event.target.value)}
+                placeholder="Min $"
+              />
+
+              <Input
+                type="number"
+                min="0"
+                value={maxPrice}
+                onChange={(event) => setMaxPrice(event.target.value)}
+                placeholder="Max $"
+              />
+
+              <Button variant="outline" onClick={toggleBulkEdit}>
+                {bulkEditMode ? 'Exit Bulk Edit' : 'Bulk Edit'}
+              </Button>
+            </div>
+
+            <div className="mt-3 flex flex-wrap gap-4 text-sm text-muted-foreground">
+              <label className="inline-flex items-center gap-2">
+                <input type="checkbox" checked={ebtFilter} onChange={(event) => setEbtFilter(event.target.checked)} />
+                EBT Only
+              </label>
+              <label className="inline-flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  checked={ageVerificationFilter}
+                  onChange={(event) => setAgeVerificationFilter(event.target.checked)}
+                />
+                Age Restricted Only
+              </label>
+              <label className="inline-flex items-center gap-2">
+                <input type="checkbox" checked={taxableFilter} onChange={(event) => setTaxableFilter(event.target.checked)} />
+                Taxable Only
+              </label>
             </div>
           </Card>
+
+          <Card className="p-4">
+            <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+              <div>
+                <h2 className="font-semibold text-foreground">Import Products</h2>
+                <p className="text-sm text-muted-foreground">Upload a CSV or XLSX pricebook and choose how duplicates are handled.</p>
+              </div>
+
+              <label className="inline-flex cursor-pointer items-center justify-center gap-2 rounded-md border border-input bg-background px-3 py-2 text-sm font-medium shadow-sm hover:bg-secondary/50">
+                <Upload className="h-4 w-4" />
+                CSV or XLSX
+                <input
+                  type="file"
+                  accept=".csv,.xlsx,.xls,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel"
+                  className="hidden"
+                  onChange={handleProductImportFile}
+                />
+              </label>
+            </div>
+
+            {productImportFileName && (
+              <p className="mt-3 text-sm text-muted-foreground">
+                Selected product file: <span className="font-medium text-foreground">{productImportFileName}</span>
+              </p>
+            )}
+
+            {productImportError && (
+              <div className="mt-3 rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+                {productImportError}
+              </div>
+            )}
+
+            {productImportResult && (
+              <div className="mt-4 grid gap-4 lg:grid-cols-[1fr_auto]">
+                <div className="rounded-lg border border-border p-3 text-sm">
+                  <p className="font-medium text-foreground">
+                    {productImportResult.validRows} valid row(s), {productImportResult.invalidRows} error row(s)
+                  </p>
+                  <p className="mt-1 text-muted-foreground">
+                    Duplicate matches use UPC first, then PLU, then Product Code.
+                  </p>
+
+                  <div className="mt-3">
+                    <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Import Mode</p>
+                    <div className="flex flex-wrap gap-3">
+                      {[
+                        ['add_update', 'Add / Update Products'],
+                        ['update_by_upc', 'Update Existing by UPC'],
+                        ['update_by_plu', 'Update Existing by PLU'],
+                        ['update_by_product_code', 'Update Existing by Product Code'],
+                      ].map(([value, label]) => (
+                        <label key={value} className="inline-flex items-center gap-2">
+                          <input
+                            type="radio"
+                            name="productImportMode"
+                            value={value}
+                            checked={productImportMode === value}
+                            onChange={() => setProductImportMode(value as ProductImportMode)}
+                          />
+                          {label}
+                        </label>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div className="mt-3 flex flex-wrap gap-3">
+                    {[
+                      ['skip', 'Skip duplicates'],
+                      ['update', 'Update existing products'],
+                      ['new-only', 'Add only new products'],
+                    ].map(([value, label]) => (
+                      <label key={value} className="inline-flex items-center gap-2">
+                        <input
+                          type="radio"
+                          name="duplicateImportMode"
+                          value={value}
+                          checked={duplicateImportMode === value}
+                          onChange={() => setDuplicateImportMode(value as DuplicateImportMode)}
+                        />
+                        {label}
+                      </label>
+                    ))}
+                  </div>
+                </div>
+
+                <Button onClick={() => void importParsedProducts()} disabled={importingProducts || productImportResult.validRows === 0}>
+                  {importingProducts ? 'Importing...' : 'Import Products'}
+                </Button>
+              </div>
+            )}
+
+            {productImportSummary && (
+              <div className="mt-4 rounded-lg border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-900">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="grid gap-1 sm:grid-cols-2 lg:grid-cols-3">
+                    <span>Inserted: {productImportSummary.inserted}</span>
+                    <span>Updated: {productImportSummary.updated}</span>
+                    <span>Skipped: {productImportSummary.skipped}</span>
+                    <span>Failed: {productImportSummary.failed}</span>
+                    <span>Duplicates found: {productImportSummary.duplicates}</span>
+                    <span>Unmatched: {productImportSummary.unmatched}</span>
+                    <span>Error rows: {productImportSummary.errorRows}</span>
+                  </div>
+                  <Button variant="outline" size="sm" onClick={() => setProductImportSummary(null)}>
+                    Dismiss
+                  </Button>
+                </div>
+              </div>
+            )}
+          </Card>
+
+          {bulkMessage && (
+            <div className="rounded-lg border border-border bg-card px-4 py-3 text-sm text-muted-foreground">
+              {bulkMessage}
+            </div>
+          )}
+
+          {bulkEditMode && selectedUpcs.size > 0 && (
+            <Card className="sticky top-3 z-20 border-primary/30 p-4 shadow-md">
+              <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+                <p className="font-semibold text-foreground">{selectedUpcs.size} products selected</p>
+                <Button size="sm" onClick={() => void applyBulkChanges()}>
+                  Apply Changes
+                </Button>
+              </div>
+
+              <div className="grid gap-2 md:grid-cols-3 xl:grid-cols-6">
+                <select value={bulkDepartment} onChange={(event) => setBulkDepartment(event.target.value)} className="h-10 rounded-md border border-input bg-background px-3 text-sm">
+                  <option value="">Department: No change</option>
+                  {departments.map((department) => (
+                    <option key={department} value={department}>{department}</option>
+                  ))}
+                </select>
+                <select value={bulkCategory} onChange={(event) => setBulkCategory(event.target.value)} className="h-10 rounded-md border border-input bg-background px-3 text-sm">
+                  <option value="">Category: No change</option>
+                  {categories.map((category) => (
+                    <option key={category} value={category}>{category}</option>
+                  ))}
+                </select>
+                <select value={bulkVendor} onChange={(event) => setBulkVendor(event.target.value)} className="h-10 rounded-md border border-input bg-background px-3 text-sm">
+                  <option value="">Vendor: No change</option>
+                  {allVendorOptions.map((vendor) => (
+                    <option key={vendor} value={vendor}>{vendor}</option>
+                  ))}
+                  <option value="__other__">Other</option>
+                </select>
+                {bulkVendor === '__other__' && (
+                  <Input value={bulkCustomVendor} onChange={(event) => setBulkCustomVendor(event.target.value)} placeholder="Vendor name" />
+                )}
+                <Input value={bulkBrand} onChange={(event) => setBulkBrand(event.target.value)} placeholder="Brand" />
+                <Input type="number" min="0" step="0.01" value={bulkCostPrice} onChange={(event) => setBulkCostPrice(event.target.value)} placeholder="New cost $" />
+                <Input type="number" min="0" step="0.01" value={bulkSellPrice} onChange={(event) => setBulkSellPrice(event.target.value)} placeholder="New sell $" />
+                <select value={bulkTaxCategory} onChange={(event) => setBulkTaxCategory(event.target.value)} className="h-10 rounded-md border border-input bg-background px-3 text-sm">
+                  <option value="">Tax Category</option>
+                  <option value="standard">standard</option>
+                  <option value="non-taxable">non-taxable</option>
+                  <option value="tobacco">tobacco</option>
+                  <option value="alcohol">alcohol</option>
+                  <option value="fuel">fuel</option>
+                </select>
+                <select value={bulkTaxable} onChange={(event) => setBulkTaxable(event.target.value)} className="h-10 rounded-md border border-input bg-background px-3 text-sm">
+                  <option value="">Taxable: No change</option>
+                  <option value="true">Taxable: Yes</option>
+                  <option value="false">Taxable: No</option>
+                </select>
+                <select value={bulkEbt} onChange={(event) => setBulkEbt(event.target.value)} className="h-10 rounded-md border border-input bg-background px-3 text-sm">
+                  <option value="">EBT: No change</option>
+                  <option value="true">EBT: Yes</option>
+                  <option value="false">EBT: No</option>
+                </select>
+                <select value={bulkActive} onChange={(event) => setBulkActive(event.target.value)} className="h-10 rounded-md border border-input bg-background px-3 text-sm">
+                  <option value="">Active: No change</option>
+                  <option value="true">Active: Yes</option>
+                  <option value="false">Active: No</option>
+                </select>
+                <select value={bulkAgeVerification} onChange={(event) => setBulkAgeVerification(event.target.value)} className="h-10 rounded-md border border-input bg-background px-3 text-sm">
+                  <option value="">Age Verification: No change</option>
+                  <option value="true">Age Verification: Yes</option>
+                  <option value="false">Age Verification: No</option>
+                </select>
+                <Input type="number" min="0" max="100" value={bulkMinimumAge} onChange={(event) => setBulkMinimumAge(event.target.value)} placeholder="Minimum Age" />
+                <select value={bulkAgeRestrictionType} onChange={(event) => setBulkAgeRestrictionType(event.target.value)} className="h-10 rounded-md border border-input bg-background px-3 text-sm">
+                  <option value="">Restriction Type</option>
+                  {PRESET_AGE_TYPES.map((type) => (
+                    <option key={type} value={type}>{type}</option>
+                  ))}
+                </select>
+              </div>
+            </Card>
+          )}
 
           <Card className="overflow-hidden">
             <div className="overflow-x-auto">
               <table className="w-full min-w-[980px] text-sm">
                 <thead className="bg-secondary/50 text-xs uppercase tracking-wide text-muted-foreground">
                   <tr>
+                    {bulkEditMode && (
+                      <th className="w-12 px-4 py-3 text-left">
+                        <input
+                          type="checkbox"
+                          checked={filteredProducts.length > 0 && filteredProducts.every((product) => selectedUpcs.has(product.upc))}
+                          onChange={toggleAllFilteredProducts}
+                          aria-label="Select all products"
+                        />
+                      </th>
+                    )}
                     <th className="px-4 py-3 text-left">Product</th>
                     <th className="px-4 py-3 text-left">Department</th>
                     <th className="px-4 py-3 text-left">Price</th>
@@ -2208,6 +2943,16 @@ const nextBreakdown = getCaseBreakdown(nextStock, unitsPerCase);
 
                     return (
                       <tr key={product.upc} className="border-t border-border/70 hover:bg-secondary/30">
+                        {bulkEditMode && (
+                          <td className="px-4 py-4">
+                            <input
+                              type="checkbox"
+                              checked={selectedUpcs.has(product.upc)}
+                              onChange={() => toggleSelectedProduct(product.upc)}
+                              aria-label={`Select ${product.name}`}
+                            />
+                          </td>
+                        )}
                         <td className="px-4 py-4">
                           <div className="flex items-start gap-3">
                             <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-secondary text-muted-foreground">
@@ -2217,6 +2962,12 @@ const nextBreakdown = getCaseBreakdown(nextStock, unitsPerCase);
                             <div>
                               <p className="font-semibold text-foreground">{product.name}</p>
                               <p className="font-mono text-xs text-muted-foreground">UPC {product.upc}</p>
+                              {product.plu && (
+                                <p className="font-mono text-xs text-muted-foreground">PLU: {product.plu}</p>
+                              )}
+                              {product.productCode && (
+                                <p className="font-mono text-xs text-muted-foreground">Code: {product.productCode}</p>
+                              )}
                               <p className="text-xs text-muted-foreground">{product.brand || 'Unknown brand'}</p>
                             </div>
                           </div>
@@ -2252,6 +3003,12 @@ const nextBreakdown = getCaseBreakdown(nextStock, unitsPerCase);
                           {product.ebtEligible && (
                             <span className="mt-1 inline-flex rounded-full bg-success/10 px-2 py-0.5 text-[10px] font-semibold text-success">
                               EBT
+                            </span>
+                          )}
+                          {product.ageVerification && (
+                            <span className="mt-1 inline-flex rounded-full bg-orange-100 px-2 py-0.5 text-[10px] font-semibold text-orange-700">
+                              Age {product.minimumAge || 21}
+                              {product.ageRestrictionType ? ` · ${product.ageRestrictionType}` : ''}
                             </span>
                           )}
                         </td>
@@ -3243,14 +4000,24 @@ const nextBreakdown = getCaseBreakdown(nextStock, unitsPerCase);
         form={form}
         setForm={setForm}
         onClose={() => {
-          if (!saving) setModalOpen(false);
+          if (!saving) closeProductModal();
         }}
         onSave={saveProduct}
         saving={saving}
         error={formError}
         departments={departments}
-        vendors={vendors}
+        vendors={allVendorOptions}
+        taxCategoryOptions={taxCategoryOptions}
+        ageRestrictionPresets={ageRestrictionPresets}
+        upcDuplicate={upcDuplicate}
+        pluDuplicate={pluDuplicate}
+        productCodeDuplicate={productCodeDuplicate}
+        onUpcChange={handleProductUpcChange}
+        onUpcBlur={() => checkUpcDuplicate()}
+        onPluBlur={checkPluDuplicate}
+        onProductCodeBlur={checkProductCodeDuplicate}
       />
     </DashboardShell>
   );
 }
+

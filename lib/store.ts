@@ -55,6 +55,13 @@ function mapDbTransaction(row: TransactionRow): Transaction {
 
 function mapDbProduct(row: ProductRow): Product {
   const category = row.category ?? row.department ?? 'Uncategorized';
+  const extendedRow = row as ProductRow & {
+    plu?: string | null;
+    product_code?: string | null;
+    age_verification?: boolean | null;
+    minimum_age?: number | null;
+    age_restriction_type?: string | null;
+  };
 
   return {
     upc: row.upc,
@@ -62,6 +69,8 @@ function mapDbProduct(row: ProductRow): Product {
     category,
     department: row.department ?? category,
     sku: row.sku ?? undefined,
+    plu: extendedRow.plu ?? undefined,
+    productCode: extendedRow.product_code ?? undefined,
     brand: row.brand ?? 'Unknown',
     costPrice: row.cost_price,
     sellPrice: row.selling_price,
@@ -72,6 +81,9 @@ function mapDbProduct(row: ProductRow): Product {
     taxCategory: row.tax_category ?? 'standard',
     taxable: row.taxable ?? true,
     ebtEligible: row.ebt_eligible ?? false,
+    ageVerification: extendedRow.age_verification ?? false,
+    minimumAge: extendedRow.minimum_age ?? undefined,
+    ageRestrictionType: extendedRow.age_restriction_type ?? undefined,
     isActive: row.is_active ?? true,
     notes: row.notes ?? undefined,
     unitsPerCase: Number(row.units_per_case) || 1,
@@ -168,10 +180,15 @@ function normalizeProduct(product: Product): Product {
     reorderLevel: Number(product.reorderLevel) || 10,
     vendor: product.vendor?.trim() || undefined,
     sku: product.sku?.trim() || undefined,
+    plu: product.plu?.trim() || undefined,
+    productCode: product.productCode?.trim() || undefined,
     taxRate: Number(product.taxRate) || 0,
     taxCategory: product.taxCategory?.trim() || 'standard',
     taxable: product.taxable ?? true,
     ebtEligible: product.ebtEligible ?? false,
+    ageVerification: product.ageVerification ?? false,
+    minimumAge: product.ageVerification ? Number(product.minimumAge) || 21 : undefined,
+    ageRestrictionType: product.ageVerification ? product.ageRestrictionType?.trim() || undefined : undefined,
     isActive: product.isActive ?? true,
     notes: product.notes?.trim() || undefined,
     unitsPerCase,
@@ -188,6 +205,8 @@ function productToDbFields(product: Product) {
     category: normalized.category,
     department: normalized.department ?? normalized.category,
     sku: normalized.sku ?? null,
+    plu: normalized.plu ?? null,
+    product_code: normalized.productCode ?? null,
     brand: normalized.brand ?? 'Unknown',
     cost_price: normalized.costPrice,
     selling_price: normalized.sellPrice,
@@ -198,6 +217,9 @@ function productToDbFields(product: Product) {
     tax_category: normalized.taxCategory ?? 'standard',
     taxable: normalized.taxable ?? true,
     ebt_eligible: normalized.ebtEligible ?? false,
+    age_verification: normalized.ageVerification ?? false,
+    minimum_age: normalized.minimumAge ?? null,
+    age_restriction_type: normalized.ageRestrictionType ?? null,
     is_active: normalized.isActive ?? true,
     notes: normalized.notes ?? null,
     units_per_case: normalized.unitsPerCase ?? 1,

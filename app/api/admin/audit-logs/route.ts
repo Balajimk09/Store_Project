@@ -9,115 +9,180 @@ type UserProfile = {
   username?: string | null;
 };
 
-function clampPage(value: string | null) {
-  const parsed = Number(value || '1');
-  if (!Number.isFinite(parsed) || parsed < 1) return 1;
-  return Math.floor(parsed);
+type StoreRow = {
+  id: string;
+  store_name?: string | null;
+};
+
+const EDITABLE_FIELDS = [
+  'action',
+  'reason',
+  'metadata',
+  'target_table',
+  'target_record_id',
+] as const;
+
+function parsePage(value: string | null) {
+  const parsed = Number(value || '0');
+  return Number.isFinite(parsed) && parsed >= 0 ? Math.floor(parsed) : 0;
 }
 
-function clampPageSize(value: string | null) {
-  const parsed = Number(value || '25');
-  if (!Number.isFinite(parsed) || parsed < 1) return 25;
-  return Math.min(50, Math.floor(parsed));
+function parseLimit(value: string | null) {
+  const parsed = Number(value || '50');
+  if (!Number.isFinite(parsed) || parsed < 1) return 50;
+  return Math.min(100, Math.floor(parsed));
 }
 
-function cleanSearch(value: string | null) {
-  return String(value || '')
-    .trim()
-    .replace(/[%_,()]/g, ' ')
-    .replace(/\s+/g, ' ')
-    .slice(0, 120);
+function clean(value: string | null) {
+  return (value || '').trim();
 }
 
-function normalizeAuditLog(row: any, profileMap: Map<string, UserProfile>) {
-  const actorUserId = row.actor_user_id || null;
-  const targetUserId = row.target_user_id || null;
+function wildcard(value: string) {
+  return value.replace(/[%_]/g, '\\$&');
+}
 
-  return {
-    id: String(row.id || `${row.created_at}-${row.action}-${row.target_record_id || ''}`),
-    created_at: row.created_at || null,
-    actor_user_id: actorUserId,
-    actor: actorUserId ? profileMap.get(actorUserId) || null : null,
-    action: row.action || 'unknown.action',
-    target_user_id: targetUserId,
-    target_user: targetUserId ? profileMap.get(targetUserId) || null : null,
-    target_store_id: row.target_store_id || null,
-    target_table: row.target_table || null,
-    target_record_id: row.target_record_id || null,
-    old_values: row.old_values || null,
-    new_values: row.new_values || null,
-    metadata: row.metadata || {},
-    reason: row.reason || null,
-  };
+function buildEditablePayload(body: Record<string, unknown>) {
+  const payload: Record<string, unknown> = {};
+
+  for (const field of EDITABLE_FIELDS) {
+    if (Object.prototype.hasOwnProperty.call(body, field)) {
+      const value = body[field];
+      payload[field] = value === '' || value === undefined ? null : value;
+    }
+  }
+
+  return payload;
+}
+
+async function profileIdsForActorSearch(search: string) {
+  if (!search) return [];
+
+  const supabaseAdmin = getSupabaseAdmin();
+  const term = wildcard(search);
+
+  const { data, error } = await supabaseAdmin
+    .from('user_profiles')
+    .select('user_id')
+    .or(`email.ilike.%${term}%,full_name.ilike.%${term}%,username.ilike.%${term}%`)
+    .limit(200);
+
+  if (error) return [];
+
+  return (data || []).map((profile: Pick<UserProfile, 'user_id'>) => profile.user_id);
+}
+
+async function enrichLogs(rows: any[]) {
+  const supabaseAdmin = getSupabaseAdmin();
+  const userIds = Array.from(
+    new Set(
+      rows.flatMap((row) => [row.actor_user_id, row.target_user_id]).filter(Boolean)
+    )
+  );
+  const storeIds = Array.from(
+    new Set(rows.map((row) => row.target_store_id).filter(Boolean))
+  );
+
+  const profileMap = new Map<string, UserProfile>();
+  const storeMap = new Map<string, StoreRow>();
+
+  if (userIds.length > 0) {
+    const { data } = await supabaseAdmin
+      .from('user_profiles')
+      .select('user_id, full_name, email, username')
+      .in('user_id', userIds);
+
+    for (const profile of data || []) {
+      profileMap.set(profile.user_id, profile);
+    }
+  }
+
+  if (storeIds.length > 0) {
+    const { data } = await supabaseAdmin
+      .from('stores')
+      .select('id, store_name')
+      .in('id', storeIds);
+
+    for (const store of data || []) {
+      storeMap.set(store.id, store);
+    }
+  }
+
+  return rows.map((row) => {
+    const actor = row.actor_user_id ? profileMap.get(row.actor_user_id) : null;
+    const targetUser = row.target_user_id ? profileMap.get(row.target_user_id) : null;
+    const targetStore = row.target_store_id ? storeMap.get(row.target_store_id) : null;
+
+    return {
+      id: row.id,
+      action: row.action,
+      actor_user_id: row.actor_user_id,
+      actor_email: actor?.email || null,
+      actor_name: actor?.full_name || actor?.username || null,
+      target_user_id: row.target_user_id,
+      target_user_email: targetUser?.email || null,
+      target_user_name: targetUser?.full_name || targetUser?.username || null,
+      target_store_id: row.target_store_id,
+      target_store_name: targetStore?.store_name || null,
+      target_table: row.target_table,
+      target_record_id: row.target_record_id,
+      old_values: row.old_values,
+      new_values: row.new_values,
+      metadata: row.metadata || {},
+      reason: row.reason,
+      created_at: row.created_at,
+    };
+  });
 }
 
 export async function GET(request: NextRequest) {
-  const auth = await requirePermission(request, 'audit_logs.view');
-
-  if (!auth.ok) {
-    return auth.response;
-  }
+  const auth = await requirePermission(request, 'platform.superadmin');
+  if (!auth.ok) return auth.response;
 
   const supabaseAdmin = getSupabaseAdmin();
   const { searchParams } = request.nextUrl;
-
-  const page = clampPage(searchParams.get('page'));
-  const pageSize = clampPageSize(searchParams.get('pageSize'));
-  const search = cleanSearch(searchParams.get('search'));
-  const actionFilter = String(searchParams.get('action') || 'all').trim();
-  const targetFilter = String(searchParams.get('target') || 'all').trim();
-
-  const from = (page - 1) * pageSize;
-  const to = from + pageSize - 1;
-
-  let matchingProfileIds: string[] = [];
-
-  if (search) {
-    const { data: profiles } = await supabaseAdmin
-      .from('user_profiles')
-      .select('user_id')
-      .or(
-        [
-          `full_name.ilike.%${search}%`,
-          `email.ilike.%${search}%`,
-          `username.ilike.%${search}%`,
-        ].join(',')
-      )
-      .limit(100);
-
-    matchingProfileIds = (profiles || [])
-      .map((profile: any) => profile.user_id)
-      .filter(Boolean);
-  }
+  const page = parsePage(searchParams.get('page'));
+  const limit = parseLimit(searchParams.get('limit'));
+  const search = clean(searchParams.get('search'));
+  const actorSearch = clean(searchParams.get('actor_search'));
+  const action = clean(searchParams.get('action'));
+  const targetTable = clean(searchParams.get('target_table'));
+  const targetStoreId = clean(searchParams.get('target_store_id'));
+  const fromDate = clean(searchParams.get('from'));
+  const toDate = clean(searchParams.get('to'));
 
   let query = supabaseAdmin
     .from('admin_audit_logs')
     .select('*', { count: 'exact' });
 
-  if (actionFilter && actionFilter !== 'all') {
-    query = query.eq('action', actionFilter);
-  }
-
-  if (targetFilter && targetFilter !== 'all') {
-    query = query.eq('target_table', targetFilter);
-  }
-
   if (search) {
-    const searchTerms = [
-      `action.ilike.%${search}%`,
-      `target_table.ilike.%${search}%`,
-      `target_record_id.ilike.%${search}%`,
-      `reason.ilike.%${search}%`,
-    ];
+    const term = wildcard(search);
+    query = query.or(
+      `action.ilike.%${term}%,reason.ilike.%${term}%,target_table.ilike.%${term}%`
+    );
+  }
 
-    if (matchingProfileIds.length > 0) {
-      const ids = matchingProfileIds.join(',');
-      searchTerms.push(`actor_user_id.in.(${ids})`);
-      searchTerms.push(`target_user_id.in.(${ids})`);
+  if (actorSearch) {
+    const actorIds = await profileIdsForActorSearch(actorSearch);
+
+    if (actorIds.length === 0) {
+      return NextResponse.json({ logs: [], total: 0, page, limit });
     }
 
-    query = query.or(searchTerms.join(','));
+    query = query.in('actor_user_id', actorIds);
   }
+
+  if (action) query = query.eq('action', action);
+  if (targetTable) query = query.eq('target_table', targetTable);
+  if (targetStoreId) query = query.eq('target_store_id', targetStoreId);
+  if (fromDate) query = query.gte('created_at', new Date(fromDate).toISOString());
+  if (toDate) {
+    const end = new Date(toDate);
+    end.setHours(23, 59, 59, 999);
+    query = query.lte('created_at', end.toISOString());
+  }
+
+  const from = page * limit;
+  const to = from + limit - 1;
 
   const { data, error, count } = await query
     .order('created_at', { ascending: false })
@@ -127,59 +192,105 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ error: error.message }, { status: 500 });
   }
 
-  const rows = data || [];
+  return NextResponse.json({
+    logs: await enrichLogs(data || []),
+    total: count || 0,
+    page,
+    limit,
+  });
+}
 
-  const userIds = Array.from(
-    new Set(
-      rows
-        .flatMap((row: any) => [row.actor_user_id, row.target_user_id])
-        .filter(Boolean)
-    )
-  );
+export async function POST(request: NextRequest) {
+  const auth = await requirePermission(request, 'platform.superadmin');
+  if (!auth.ok) return auth.response;
 
-  const profileMap = new Map<string, UserProfile>();
+  const body = (await request.json()) as Record<string, unknown>;
+  const action = clean(String(body.action || 'platform.manual_note')) || 'platform.manual_note';
+  const reason = clean(String(body.reason || ''));
 
-  if (userIds.length > 0) {
-    const { data: profiles } = await supabaseAdmin
-      .from('user_profiles')
-      .select('user_id, full_name, email, username')
-      .in('user_id', userIds);
-
-    (profiles || []).forEach((profile: UserProfile) => {
-      profileMap.set(profile.user_id, profile);
-    });
+  if (!action || !reason) {
+    return NextResponse.json(
+      { error: 'Action and reason are required.' },
+      { status: 400 }
+    );
   }
 
-  const { data: filterRows } = await supabaseAdmin
+  const supabaseAdmin = getSupabaseAdmin();
+  const { data, error } = await supabaseAdmin
     .from('admin_audit_logs')
-    .select('action, target_table')
-    .order('created_at', { ascending: false })
-    .limit(1000);
+    .insert({
+      actor_user_id: auth.user.id,
+      action,
+      target_store_id: body.target_store_id || null,
+      target_user_id: body.target_user_id || null,
+      target_table: body.target_table || null,
+      target_record_id: body.target_record_id || null,
+      old_values: null,
+      new_values: null,
+      metadata:
+        body.metadata && typeof body.metadata === 'object' && !Array.isArray(body.metadata)
+          ? body.metadata
+          : {},
+      reason,
+    })
+    .select('*')
+    .single();
 
-  const actions = Array.from(
-    new Set((filterRows || []).map((row: any) => row.action).filter(Boolean))
-  ).sort();
+  if (error) {
+    return NextResponse.json({ error: error.message }, { status: 500 });
+  }
 
-  const targetTables = Array.from(
-    new Set((filterRows || []).map((row: any) => row.target_table).filter(Boolean))
-  ).sort();
+  return NextResponse.json({ log: data });
+}
 
-  const total = count || 0;
+export async function PATCH(request: NextRequest) {
+  const auth = await requirePermission(request, 'platform.superadmin');
+  if (!auth.ok) return auth.response;
 
-  return NextResponse.json({
-    summary: {
-      totalAuditLogs: total,
-    },
-    logs: rows.map((row: any) => normalizeAuditLog(row, profileMap)),
-    filters: {
-      actions,
-      targetTables,
-    },
-    pagination: {
-      page,
-      pageSize,
-      total,
-      totalPages: Math.max(1, Math.ceil(total / pageSize)),
-    },
-  });
+  const body = (await request.json()) as Record<string, unknown>;
+  const id = clean(String(body.id || ''));
+
+  if (!id) {
+    return NextResponse.json({ error: 'Audit log id is required.' }, { status: 400 });
+  }
+
+  const payload = buildEditablePayload(body);
+
+  if (Object.keys(payload).length === 0) {
+    return NextResponse.json({ error: 'No supported fields to update.' }, { status: 400 });
+  }
+
+  const supabaseAdmin = getSupabaseAdmin();
+  const { data, error } = await supabaseAdmin
+    .from('admin_audit_logs')
+    .update(payload)
+    .eq('id', id)
+    .select('*')
+    .single();
+
+  if (error) {
+    return NextResponse.json({ error: error.message }, { status: 500 });
+  }
+
+  return NextResponse.json({ log: data });
+}
+
+export async function DELETE(request: NextRequest) {
+  const auth = await requirePermission(request, 'platform.superadmin');
+  if (!auth.ok) return auth.response;
+
+  const id = clean(request.nextUrl.searchParams.get('id'));
+
+  if (!id) {
+    return NextResponse.json({ error: 'Audit log id is required.' }, { status: 400 });
+  }
+
+  const supabaseAdmin = getSupabaseAdmin();
+  const { error } = await supabaseAdmin.from('admin_audit_logs').delete().eq('id', id);
+
+  if (error) {
+    return NextResponse.json({ error: error.message }, { status: 500 });
+  }
+
+  return NextResponse.json({ message: 'Deleted successfully.' });
 }

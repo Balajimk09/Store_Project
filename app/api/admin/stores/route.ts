@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getSupabaseAdmin } from '@/lib/supabase-admin';
 import { requirePermission } from '@/lib/admin-auth';
+import { createAdminAuditLog } from '@/lib/audit-log';
 
 function textOrNull(value: unknown) {
   return typeof value === 'string' && value.trim() ? value.trim() : null;
@@ -109,6 +110,17 @@ export async function POST(request: NextRequest) {
     .single();
 
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+
+  await createAdminAuditLog({
+    actorUserId: auth.user.id,
+    action: 'stores.created',
+    targetStoreId: store.id,
+    targetTable: 'stores',
+    targetRecordId: store.id,
+    newValues: store,
+    metadata: {},
+    reason: `Created store "${store.store_name}"`,
+  });
 
   return NextResponse.json({ store, message: 'Store created successfully.' });
 }

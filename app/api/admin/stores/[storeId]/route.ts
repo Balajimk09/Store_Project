@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getSupabaseAdmin } from '@/lib/supabase-admin';
 import { requirePermission } from '@/lib/admin-auth';
+import { createAdminAuditLog } from '@/lib/audit-log';
 
 type RouteContext = { params: { storeId: string } };
 
@@ -119,6 +120,11 @@ export async function PATCH(request: NextRequest, context: RouteContext) {
   }
 
   const supabaseAdmin = getSupabaseAdmin();
+  const { data: oldStore } = await supabaseAdmin
+    .from('stores')
+    .select('*')
+    .eq('id', context.params.storeId)
+    .maybeSingle();
 
   const { data: store, error } = await supabaseAdmin
     .from('stores')
@@ -129,6 +135,32 @@ export async function PATCH(request: NextRequest, context: RouteContext) {
 
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
 
+  const changedActiveOnly =
+    Object.prototype.hasOwnProperty.call(payload, 'is_active') &&
+    Object.keys(payload).filter((key) => key !== 'updated_at').length === 1;
+  const action = changedActiveOnly
+    ? store.is_active === false
+      ? 'stores.deactivated'
+      : 'stores.activated'
+    : 'stores.updated';
+  const verb = changedActiveOnly
+    ? store.is_active === false
+      ? 'Deactivated'
+      : 'Activated'
+    : 'Updated';
+
+  await createAdminAuditLog({
+    actorUserId: auth.user.id,
+    action,
+    targetStoreId: store.id,
+    targetTable: 'stores',
+    targetRecordId: store.id,
+    oldValues: oldStore || null,
+    newValues: store,
+    metadata: {},
+    reason: `${verb} store "${store.store_name}"`,
+  });
+
   return NextResponse.json({ store, message: 'Store updated successfully.' });
 }
 
@@ -137,6 +169,11 @@ export async function DELETE(request: NextRequest, context: RouteContext) {
   if (!auth.ok) return auth.response;
 
   const supabaseAdmin = getSupabaseAdmin();
+  const { data: oldStore } = await supabaseAdmin
+    .from('stores')
+    .select('*')
+    .eq('id', context.params.storeId)
+    .maybeSingle();
 
   const { error } = await supabaseAdmin
     .from('stores')
@@ -144,6 +181,17 @@ export async function DELETE(request: NextRequest, context: RouteContext) {
     .eq('id', context.params.storeId);
 
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+
+  await createAdminAuditLog({
+    actorUserId: auth.user.id,
+    action: 'stores.deleted',
+    targetStoreId: context.params.storeId,
+    targetTable: 'stores',
+    targetRecordId: context.params.storeId,
+    oldValues: oldStore || null,
+    metadata: {},
+    reason: `Deleted store "${oldStore?.store_name || context.params.storeId}"`,
+  });
 
   return NextResponse.json({ message: 'Store deleted successfully.' });
 }

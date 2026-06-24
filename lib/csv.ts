@@ -409,21 +409,26 @@ export const PRODUCT_OPTIONAL_COLUMNS = [
   'vendor',
   'department',
   'sku',
+  'plu',
+  'product_code',
   'tax_rate',
   'tax_category',
   'taxable',
   'ebt_eligible',
+  'age_verification',
+  'minimum_age',
+  'age_restriction_type',
   'is_active',
   'notes',
 ] as const;
 
-export const SAMPLE_PRODUCTS_CSV = `upc,item_name,category,brand,cost_price,selling_price,stock,reorder_level,vendor,department,sku,tax_rate,tax_category,taxable,ebt_eligible,is_active,notes
-0120000010101,Coca-Cola 20oz,Beverages,Coca-Cola,1.25,2.49,142,48,Coke Distributing,Beverages,COKE20,8.5,standard,true,true,true,Top seller
-0284000900001,Doritos Cool Ranch,Snacks,Frito-Lay,1.10,2.79,38,40,Frito-Lay,Snacks,DORITOSCR,8.5,standard,true,true,true,
-0123456789001,Marlboro Red,Tobacco,Philip Morris,5.80,9.49,96,40,PM USA,Tobacco,MARLRED,12,tobacco,true,false,true,Age restricted
-0820001000011,Bud Light 24oz,Beer,Anheuser-Busch,1.65,3.49,12,40,AB Distributing,Beer,BUD24,10,alcohol,true,false,true,Age restricted
-0200000000099,Regular Unleaded,Fuel,Store Brand,3.02,3.49,8400,2000,Shell Wholesale,Fuel,FUELREG,0,fuel,false,false,true,
-0048000011111,Snickers Bar,Candy,Mars,0.65,1.79,9,50,Mars Wrigley,Candy,SNICKERS,8.5,standard,true,true,true,`;
+export const SAMPLE_PRODUCTS_CSV = `upc,item_name,category,brand,cost_price,selling_price,stock,reorder_level,vendor,department,sku,plu,product_code,tax_rate,tax_category,taxable,ebt_eligible,age_verification,minimum_age,age_restriction_type,is_active,notes
+0120000010101,Coca-Cola 20oz,Beverages,Coca-Cola,1.25,2.49,142,48,Coke Distributing,Beverages,COKE20,,COKE-20OZ,8.5,standard,true,true,,,,true,Top seller
+0284000900001,Doritos Cool Ranch,Snacks,Frito-Lay,1.10,2.79,38,40,Frito-Lay,Snacks,DORITOSCR,,DORITOS-CR,8.5,standard,true,true,,,,true,
+0123456789001,Marlboro Red,Tobacco,Philip Morris,5.80,9.49,96,40,PM USA,Tobacco,MARLRED,,MARL-RED,12,tobacco,true,false,true,21,Tobacco,true,Age restricted
+0820001000011,Bud Light 24oz,Beer,Anheuser-Busch,1.65,3.49,12,40,AB Distributing,Beer,BUD24,,BUD-24OZ,10,alcohol,true,false,true,21,Alcohol,true,Age restricted
+0200000000099,Regular Unleaded,Fuel,Store Brand,3.02,3.49,8400,2000,Shell Wholesale,Fuel,FUELREG,,FUEL-REG,0,fuel,false,false,,,,true,
+0048000011111,Snickers Bar,Candy,Mars,0.65,1.79,9,50,Mars Wrigley,Candy,SNICKERS,,SNICKERS,8.5,standard,true,true,,,,true,`;
 
 export interface ParsedProductRow {
   row: number;
@@ -432,6 +437,7 @@ export interface ParsedProductRow {
   errors: string[];
   product?: Product;
   margin?: number;
+  presentFields?: string[];
 }
 
 export interface ProductParseResult {
@@ -445,19 +451,88 @@ export interface ProductParseResult {
   products: Product[];
 }
 
+export type ProductImportMode =
+  | 'add_update'
+  | 'update_by_upc'
+  | 'update_by_plu'
+  | 'update_by_product_code';
+
+export interface ProductParseOptions {
+  mode?: ProductImportMode;
+}
+
 export function computeMargin(sellPrice: number, costPrice: number): number {
   if (sellPrice <= 0) return 0;
 
   return +(((sellPrice - costPrice) / sellPrice) * 100).toFixed(1);
 }
 
-export function parseProductsCsv(text: string): ProductParseResult {
+export function normalizeHeader(header: string): string {
+  return String(header || '').trim().toLowerCase().replace(/\s+/g, '_');
+}
+
+const COLUMN_ALIASES: Record<string, string> = {
+  item: 'item_name',
+  description: 'item_name',
+  product_name: 'item_name',
+  product: 'item_name',
+  name: 'item_name',
+  price: 'selling_price',
+  sell_price: 'selling_price',
+  retail_price: 'selling_price',
+  retail: 'selling_price',
+  sale_price: 'selling_price',
+  cost: 'cost_price',
+  unit_cost: 'cost_price',
+  wholesale: 'cost_price',
+  dept: 'department',
+  dept_name: 'department',
+  department_name: 'department',
+  cat: 'category',
+  category_name: 'category',
+  item_category: 'category',
+  barcode: 'upc',
+  ean: 'upc',
+  gtin: 'upc',
+  item_upc: 'upc',
+  plu_code: 'plu',
+  plu_number: 'plu',
+  item_plu: 'plu',
+  code: 'product_code',
+  item_code: 'product_code',
+  prod_code: 'product_code',
+  vendor_name: 'vendor',
+  supplier: 'vendor',
+  qty: 'stock',
+  quantity: 'stock',
+  on_hand: 'stock',
+  reorder: 'reorder_level',
+  min_stock: 'reorder_level',
+  tax: 'tax_rate',
+  tax_pct: 'tax_rate',
+  taxable_yn: 'taxable',
+  ebt: 'ebt_eligible',
+  food_stamp: 'ebt_eligible',
+  active: 'is_active',
+  age_restrict: 'age_verification',
+  age_required: 'age_verification',
+  min_age: 'minimum_age',
+  restrict_type: 'age_restriction_type',
+};
+
+function canonicalHeader(header: string): string {
+  const normalized = normalizeHeader(header);
+  return COLUMN_ALIASES[normalized] || normalized;
+}
+
+export function parseProductsCsv(text: string, options: ProductParseOptions = {}): ProductParseResult {
+  const mode = options.mode || 'add_update';
   const rows = parseCsvText(text);
 
   if (rows.length === 0) {
     return {
       ok: false,
-      missingColumns: [...PRODUCT_REQUIRED_COLUMNS],
+      missingColumns: [],
       unknownColumns: [],
       rows: [],
       totalRows: 0,
@@ -467,8 +542,15 @@ export function parseProductsCsv(text: string): ProductParseResult {
     };
   }
 
-  const header = rows[0].map((heading) => heading.trim().toLowerCase());
-  const missingColumns = PRODUCT_REQUIRED_COLUMNS.filter((column) => !header.includes(column));
+  const header = rows[0].map((heading) => canonicalHeader(heading));
+  const missingColumns =
+    mode === 'update_by_upc'
+      ? header.includes('upc') ? [] : ['upc']
+      : mode === 'update_by_plu'
+        ? header.includes('plu') ? [] : ['plu']
+        : mode === 'update_by_product_code'
+          ? header.includes('product_code') ? [] : ['product_code']
+          : [];
   const known = new Set<string>([...PRODUCT_REQUIRED_COLUMNS, ...PRODUCT_OPTIONAL_COLUMNS]);
   const unknownColumns = header.filter((column) => !known.has(column));
 
@@ -477,13 +559,19 @@ export function parseProductsCsv(text: string): ProductParseResult {
 
   for (let i = 1; i < rows.length; i++) {
     const rawRow = rows[i];
+
+    if (rawRow.every((value) => String(value ?? '').trim() === '')) {
+      continue;
+    }
+
     const raw: Record<string, string> = {};
 
     header.forEach((heading, index) => {
-      raw[heading] = rawRow[index] ?? '';
+      raw[heading] = String(rawRow[index] ?? '').trim();
     });
 
     const errors: string[] = [];
+    const presentFields = header.filter((heading) => String(raw[heading] ?? '').trim() !== '');
 
     if (missingColumns.length > 0) {
       result.push({
@@ -495,17 +583,32 @@ export function parseProductsCsv(text: string): ProductParseResult {
       continue;
     }
 
-    const upc = normalizeUpc(raw['upc']);
+    const plu = (raw['plu'] || '').trim() || undefined;
+    const productCode = (raw['product_code'] || '').trim() || undefined;
+    const sku = (raw['sku'] || '').trim() || undefined;
+    const upcRaw = (raw['upc'] || '').trim();
+    const upc =
+      upcRaw ||
+      (mode === 'add_update' && plu ? plu : '') ||
+      (mode === 'add_update' && sku ? sku : '') ||
+      (mode === 'add_update' && productCode ? productCode : '') ||
+      (mode === 'add_update' ? `PLU-${Date.now()}-${i}` : '');
     const name = (raw['item_name'] || '').trim();
 
-    if (!upc) errors.push('Missing UPC');
-    if (!name) errors.push('Missing item_name');
+    if (mode === 'add_update') {
+      if (!name) errors.push('Missing item_name');
+      if (!upcRaw && !plu && !productCode && !sku) errors.push('Missing identifier');
+    }
 
-    const costPrice = toNumber(raw['cost_price'], NaN);
-    const sellPrice = toNumber(raw['selling_price'], NaN);
+    if (mode === 'update_by_upc' && !upcRaw) errors.push('Missing UPC');
+    if (mode === 'update_by_plu' && !plu) errors.push('Missing PLU');
+    if (mode === 'update_by_product_code' && !productCode) errors.push('Missing product_code');
 
-    if (Number.isNaN(costPrice)) errors.push('Invalid cost_price');
-    if (Number.isNaN(sellPrice)) errors.push('Invalid selling_price');
+    const costPrice = toNumber(raw['cost_price'], 0);
+    const sellPrice = toNumber(raw['selling_price'], 0);
+
+    if (raw['cost_price'] && Number.isNaN(toNumber(raw['cost_price'], NaN))) errors.push('Invalid cost_price');
+    if (raw['selling_price'] && Number.isNaN(toNumber(raw['selling_price'], NaN))) errors.push('Invalid selling_price');
 
     const stockRaw = raw['stock'];
     const stock = stockRaw == null || stockRaw.trim() === '' ? 0 : toNumber(stockRaw, NaN);
@@ -542,10 +645,19 @@ export function parseProductsCsv(text: string): ProductParseResult {
     const department = (raw['department'] || raw['category'] || '').trim() || category;
     const brand = (raw['brand'] || '').trim() || 'Unknown';
     const vendor = (raw['vendor'] || '').trim() || undefined;
-    const sku = (raw['sku'] || '').trim() || undefined;
     const taxCategory = (raw['tax_category'] || '').trim() || 'standard';
     const taxable = toBoolean(raw['taxable'], true);
     const ebtEligible = toBoolean(raw['ebt_eligible'], false);
+    const ageVerification = toBoolean(raw['age_verification'], false);
+    let minimumAge: number | undefined;
+    const minimumAgeRaw = raw['minimum_age'];
+    if (minimumAgeRaw && minimumAgeRaw.trim()) {
+      minimumAge = Math.floor(Number(minimumAgeRaw)) || undefined;
+    }
+    if (ageVerification && minimumAge === undefined) {
+      minimumAge = 21;
+    }
+    const ageRestrictionType = (raw['age_restriction_type'] || '').trim() || undefined;
     const isActive = toBoolean(raw['is_active'], true);
     const notes = (raw['notes'] || '').trim() || undefined;
 
@@ -577,10 +689,15 @@ export function parseProductsCsv(text: string): ProductParseResult {
       reorderLevel: finalReorder,
       vendor,
       sku,
+      plu,
+      productCode,
       taxRate: finalTaxRate,
       taxCategory,
       taxable,
       ebtEligible,
+      ageVerification,
+      minimumAge,
+      ageRestrictionType,
       isActive,
       notes,
     };
@@ -594,6 +711,7 @@ export function parseProductsCsv(text: string): ProductParseResult {
       errors: [],
       product,
       margin: computeMargin(finalSell, finalCost),
+      presentFields,
     });
   }
 

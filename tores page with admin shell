@@ -1,0 +1,1140 @@
+warning: in the working copy of 'app/admin/stores/page.tsx', LF will be replaced by CRLF the next time Git touches it
+[1mdiff --git a/app/admin/stores/page.tsx b/app/admin/stores/page.tsx[m
+[1mindex 3633b12..4131ec6 100644[m
+[1m--- a/app/admin/stores/page.tsx[m
+[1m+++ b/app/admin/stores/page.tsx[m
+[36m@@ -1,881 +1,331 @@[m
+ 'use client';[m
+ [m
+ import { useCallback, useEffect, useMemo, useState } from 'react';[m
+[31m-import {[m
+[31m-  AlertCircle,[m
+[31m-  BadgeCheck,[m
+[31m-  ChevronLeft,[m
+[31m-  ChevronRight,[m
+[31m-  Edit3,[m
+[31m-  Loader2,[m
+[31m-  Plus,[m
+[31m-  RefreshCcw,[m
+[31m-  Search,[m
+[31m-  Store,[m
+[31m-  StoreIcon,[m
+[31m-  ToggleLeft,[m
+[31m-  ToggleRight,[m
+[31m-  Users,[m
+[31m-} from 'lucide-react';[m
+[32m+[m[32mimport { Loader2, Plus, RefreshCcw, Store } from 'lucide-react';[m
+ import { AdminPageHeader, AdminShell } from '@/components/layout/admin-shell';[m
+ import { Button } from '@/components/ui/button';[m
+ import { Card } from '@/components/ui/card';[m
+[31m-import { Input } from '@/components/ui/input';[m
+[31m-import { adminFetch } from '@/lib/admin-client';[m
+[31m-[m
+[31m-type OwnerProfile = {[m
+[31m-  user_id: string;[m
+[31m-  full_name?: string | null;[m
+[31m-  email?: string | null;[m
+[31m-  username?: string | null;[m
+[31m-  account_type_key?: string | null;[m
+[31m-};[m
+[31m-[m
+[31m-type AdminStore = {[m
+[32m+[m[32mimport { supabase } from '@/lib/supabase';[m
+[32m+[m[32mimport StoreProfileForm, {[m
+[32m+[m[32m  LoginAccountOption,[m
+[32m+[m[32m  PosTypeOption,[m
+[32m+[m[32m  StoreProfileFormValues,[m
+[32m+[m[32m} from '@/components/stores/store-profile-form';[m
+[32m+[m
+[32m+[m[32mtype StoreRow = StoreProfileFormValues & {[m
+   id: string;[m
+[31m-  owner_id: string | null;[m
+[31m-  ownerId: string | null;[m
+[31m-  owner: OwnerProfile | null;[m
+[31m-[m
+[31m-  store_name: string;[m
+[31m-  storeName: string;[m
+[31m-  address: string;[m
+[31m-  city: string;[m
+[31m-  state: string;[m
+[31m-  zip_code: string;[m
+[31m-  zipCode: string;[m
+[31m-  phone_number: string;[m
+[31m-  phoneNumber: string;[m
+[31m-  pos_type: string;[m
+[31m-  posType: string;[m
+[31m-  register_count: number;[m
+[31m-  registerCount: number;[m
+[31m-[m
+[31m-  status: string;[m
+[31m-  is_active: boolean;[m
+[31m-  isActive: boolean;[m
+[31m-[m
+[31m-  setup_status: string;[m
+[31m-  setupStatus: string;[m
+[31m-[m
+[31m-  product_count: number;[m
+[31m-  productCount: number;[m
+[31m-  transaction_count: number;[m
+[31m-  transactionCount: number;[m
+[31m-[m
+[31m-  created_at: string | null;[m
+[31m-  createdAt: string | null;[m
+[31m-  updated_at: string | null;[m
+[31m-  updatedAt: string | null;[m
+[31m-};[m
+[31m-[m
+[31m-type StoresResponse = {[m
+[31m-  summary: {[m
+[31m-    totalStores: number;[m
+[31m-    activeStores: number;[m
+[31m-    inactiveStores: number;[m
+[31m-    storesOnPage: number;[m
+[31m-    setupCompleteStores: number;[m
+[31m-    totalProductsOnPage: number;[m
+[31m-    totalTransactionsOnPage: number;[m
+[31m-  };[m
+[31m-  stores: AdminStore[];[m
+[31m-  ownerOptions: OwnerProfile[];[m
+[31m-  pagination: {[m
+[31m-    page: number;[m
+[31m-    pageSize: number;[m
+[31m-    total: number;[m
+[31m-    totalPages: number;[m
+[31m-  };[m
+[32m+[m[32m  created_at?: string;[m
+[32m+[m[32m  updated_at?: string;[m
+ };[m
+ [m
+[31m-type StoreFormState = {[m
+[31m-  id?: string;[m
+[31m-  owner_id: string;[m
+[31m-  store_name: string;[m
+[31m-  address: string;[m
+[31m-  city: string;[m
+[31m-  state: string;[m
+[31m-  zip_code: string;[m
+[31m-  phone_number: string;[m
+[31m-  pos_type: string;[m
+[31m-  register_count: string;[m
+[31m-  reason: string;[m
+[31m-};[m
+[32m+[m[32masync function getAuthHeaders() {[m
+[32m+[m[32m  const {[m
+[32m+[m[32m    data: { session },[m
+[32m+[m[32m  } = await supabase.auth.getSession();[m
+ [m
+[31m-const emptyForm: StoreFormState = {[m
+[31m-  owner_id: '',[m
+[31m-  store_name: '',[m
+[31m-  address: '',[m
+[31m-  city: '',[m
+[31m-  state: '',[m
+[31m-  zip_code: '',[m
+[31m-  phone_number: '',[m
+[31m-  pos_type: '',[m
+[31m-  register_count: '1',[m
+[31m-  reason: '',[m
+[31m-};[m
+[32m+[m[32m  const headers: Record<string, string> = {[m
+[32m+[m[32m    'Content-Type': 'application/json',[m
+[32m+[m[32m  };[m
+ [m
+[31m-function formatDate(value: string | null | undefined) {[m
+[31m-  if (!value) return '—';[m
+[32m+[m[32m  if (session?.access_token) {[m
+[32m+[m[32m    headers.Authorization = `Bearer ${session.access_token}`;[m
+[32m+[m[32m  }[m
+ [m
+[31m-  return new Intl.DateTimeFormat('en-US', {[m
+[31m-    dateStyle: 'medium',[m
+[31m-  }).format(new Date(value));[m
+[32m+[m[32m  return headers;[m
+ }[m
+ [m
+[31m-function formatOwner(owner: OwnerProfile | null, ownerId?: string | null) {[m
+[31m-  if (!owner) return ownerId ? `Unknown owner (${ownerId.slice(0, 8)})` : 'Unassigned';[m
+[32m+[m[32mfunction normalizeStores(data: unknown): StoreRow[] {[m
+[32m+[m[32m  if (Array.isArray(data)) return data as StoreRow[];[m
+ [m
+[31m-  return owner.full_name || owner.email || owner.username || `User ${owner.user_id.slice(0, 8)}`;[m
+[31m-}[m
+[32m+[m[32m  if (data && typeof data === 'object') {[m
+[32m+[m[32m    const objectData = data as {[m
+[32m+[m[32m      stores?: StoreRow[];[m
+[32m+[m[32m      data?: StoreRow[];[m
+[32m+[m[32m      results?: StoreRow[];[m
+[32m+[m[32m    };[m
+ [m
+[31m-function formatOwnerSubtext(owner: OwnerProfile | null) {[m
+[31m-  if (!owner) return '';[m
+[32m+[m[32m    return objectData.stores || objectData.data || objectData.results || [];[m
+[32m+[m[32m  }[m
+ [m
+[31m-  return owner.email || owner.username || owner.account_type_key || '';[m
+[32m+[m[32m  return [];[m
+ }[m
+ [m
+[31m-function getSetupBadgeClass(status: string) {[m
+[31m-  if (status === 'complete') {[m
+[31m-    return 'bg-emerald-500/10 text-emerald-700';[m
+[31m-  }[m
+[32m+[m[32mfunction normalizeAccounts(data: unknown): LoginAccountOption[] {[m
+[32m+[m[32m  if (!data || typeof data !== 'object') return [];[m
+ [m
+[31m-  if (status === 'partial') {[m
+[31m-    return 'bg-amber-500/10 text-amber-700';[m
+[31m-  }[m
+[32m+[m[32m  const objectData = data as {[m
+[32m+[m[32m    users?: LoginAccountOption[];[m
+[32m+[m[32m    accounts?: LoginAccountOption[];[m
+[32m+[m[32m    loginAccounts?: LoginAccountOption[];[m
+[32m+[m[32m    owners?: LoginAccountOption[];[m
+[32m+[m[32m  };[m
+ [m
+[31m-  return 'bg-muted text-muted-foreground';[m
+[32m+[m[32m  return ([m
+[32m+[m[32m    objectData.users ||[m
+[32m+[m[32m    objectData.accounts ||[m
+[32m+[m[32m    objectData.loginAccounts ||[m
+[32m+[m[32m    objectData.owners ||[m
+[32m+[m[32m    [][m
+[32m+[m[32m  );[m
+ }[m
+ [m
+[31m-function storeToForm(store: AdminStore): StoreFormState {[m
+[31m-  return {[m
+[31m-    id: store.id,[m
+[31m-    owner_id: store.owner_id || '',[m
+[31m-    store_name: store.store_name || '',[m
+[31m-    address: store.address || '',[m
+[31m-    city: store.city || '',[m
+[31m-    state: store.state || '',[m
+[31m-    zip_code: store.zip_code || '',[m
+[31m-    phone_number: store.phone_number || '',[m
+[31m-    pos_type: store.pos_type || '',[m
+[31m-    register_count: String(store.register_count || 0),[m
+[31m-    reason: '',[m
+[31m-  };[m
+[31m-}[m
+[32m+[m[32mfunction normalizePosTypes(data: unknown): PosTypeOption[] {[m
+[32m+[m[32m  if (Array.isArray(data)) return data as PosTypeOption[];[m
+[32m+[m
+[32m+[m[32m  if (data && typeof data === 'object') {[m
+[32m+[m[32m    const objectData = data as {[m
+[32m+[m[32m      posTypes?: PosTypeOption[];[m
+[32m+[m[32m      pos_types?: PosTypeOption[];[m
+[32m+[m[32m      data?: PosTypeOption[];[m
+[32m+[m[32m    };[m
+ [m
+[31m-function ownerOptionLabel(owner: OwnerProfile) {[m
+[31m-  const name = owner.full_name || owner.email || owner.username || owner.user_id;[m
+[31m-  const email = owner.email && owner.email !== name ? ` - ${owner.email}` : '';[m
+[32m+[m[32m    return objectData.posTypes || objectData.pos_types || objectData.data || [];[m
+[32m+[m[32m  }[m
+ [m
+[31m-  return `${name}${email}`;[m
+[32m+[m[32m  return [];[m
+ }[m
+ [m
+ export default function AdminStoresPage() {[m
+[31m-  const [stores, setStores] = useState<AdminStore[]>([]);[m
+[31m-  const [ownerOptions, setOwnerOptions] = useState<OwnerProfile[]>([]);[m
+[31m-  const [summary, setSummary] = useState({[m
+[31m-    totalStores: 0,[m
+[31m-    activeStores: 0,[m
+[31m-    inactiveStores: 0,[m
+[31m-    storesOnPage: 0,[m
+[31m-    setupCompleteStores: 0,[m
+[31m-    totalProductsOnPage: 0,[m
+[31m-    totalTransactionsOnPage: 0,[m
+[31m-  });[m
+[31m-  const [pagination, setPagination] = useState({[m
+[31m-    page: 1,[m
+[31m-    pageSize: 25,[m
+[31m-    total: 0,[m
+[31m-    totalPages: 1,[m
+[31m-  });[m
+[31m-[m
+[31m-  const [search, setSearch] = useState('');[m
+[31m-  const [debouncedSearch, setDebouncedSearch] = useState('');[m
+[31m-  const [statusFilter, setStatusFilter] = useState('all');[m
+[31m-  const [page, setPage] = useState(1);[m
+[31m-[m
+[31m-  const [loading, setLoading] = useState(true);[m
+[31m-  const [refreshing, setRefreshing] = useState(false);[m
+[31m-  const [saving, setSaving] = useState(false);[m
+[31m-  const [statusChangingId, setStatusChangingId] = useState<string | null>(null);[m
+[31m-  const [error, setError] = useState<string | null>(null);[m
+[31m-  const [message, setMessage] = useState<string | null>(null);[m
+[31m-[m
+[31m-  const [formOpen, setFormOpen] = useState(false);[m
+[31m-  const [formMode, setFormMode] = useState<'create' | 'edit'>('create');[m
+[31m-  const [form, setForm] = useState<StoreFormState>(emptyForm);[m
+[31m-[m
+[31m-  const sortedOwnerOptions = useMemo(() => {[m
+[31m-    return [...ownerOptions].sort((a, b) => ownerOptionLabel(a).localeCompare(ownerOptionLabel(b)));[m
+[31m-  }, [ownerOptions]);[m
+[31m-[m
+[31m-  const loadStores = useCallback([m
+[31m-    async (mode: 'initial' | 'refresh' = 'initial') => {[m
+[31m-      if (mode === 'refresh') {[m
+[31m-        setRefreshing(true);[m
+[31m-      } else {[m
+[31m-        setLoading(true);[m
+[31m-      }[m
+[32m+[m[32m  const [stores, setStores] = useState<StoreRow[]>([]);[m
+[32m+[m[32m  const [loginAccounts, setLoginAccounts] = useState<LoginAccountOption[]>([]);[m
+[32m+[m[32m  const [posTypes, setPosTypes] = useState<PosTypeOption[]>([]);[m
+[32m+[m[32m  const [selectedStore, setSelectedStore] = useState<StoreRow | null>(null);[m
+[32m+[m[32m  const [isFormOpen, setIsFormOpen] = useState(false);[m
+[32m+[m[32m  const [isLoading, setIsLoading] = useState(true);[m
+[32m+[m[32m  const [isSaving, setIsSaving] = useState(false);[m
+[32m+[m[32m  const [errorMessage, setErrorMessage] = useState<string | null>(null);[m
+[32m+[m
+[32m+[m[32m  const sortedStores = useMemo(() => {[m
+[32m+[m[32m    return [...stores].sort((a, b) => {[m
+[32m+[m[32m      return (a.store_name || '').localeCompare(b.store_name || '');[m
+[32m+[m[32m    });[m
+[32m+[m[32m  }, [stores]);[m
+[32m+[m
+[32m+[m[32m  const loadStores = useCallback(async () => {[m
+[32m+[m[32m    const headers = await getAuthHeaders();[m
+[32m+[m
+[32m+[m[32m    const response = await fetch('/api/admin/stores', {[m
+[32m+[m[32m      method: 'GET',[m
+[32m+[m[32m      headers,[m
+[32m+[m[32m      cache: 'no-store',[m
+[32m+[m[32m    });[m
+[32m+[m
+[32m+[m[32m    const data = await response.json().catch(() => null);[m
+[32m+[m
+[32m+[m[32m    if (!response.ok) {[m
+[32m+[m[32m      throw new Error(data?.error || 'Unable to load stores.');[m
+[32m+[m[32m    }[m
+ [m
+[31m-      setError(null);[m
+[31m-[m
+[31m-      try {[m
+[31m-        const params = new URLSearchParams({[m
+[31m-          page: String(page),[m
+[31m-          pageSize: '25',[m
+[31m-        });[m
+[31m-[m
+[31m-        if (debouncedSearch) params.set('search', debouncedSearch);[m
+[31m-        if (statusFilter !== 'all') params.set('status', statusFilter);[m
+[31m-[m
+[31m-        const payload = await adminFetch<StoresResponse>([m
+[31m-          `/api/admin/stores?${params.toString()}`[m
+[31m-        );[m
+[31m-[m
+[31m-        setStores(payload.stores || []);[m
+[31m-        setOwnerOptions(payload.ownerOptions || []);[m
+[31m-        setSummary(payload.summary || {[m
+[31m-          totalStores: 0,[m
+[31m-          activeStores: 0,[m
+[31m-          inactiveStores: 0,[m
+[31m-          storesOnPage: 0,[m
+[31m-          setupCompleteStores: 0,[m
+[31m-          totalProductsOnPage: 0,[m
+[31m-          totalTransactionsOnPage: 0,[m
+[31m-        });[m
+[31m-        setPagination(payload.pagination || {[m
+[31m-          page,[m
+[31m-          pageSize: 25,[m
+[31m-          total: 0,[m
+[31m-          totalPages: 1,[m
+[31m-        });[m
+[31m-      } catch (loadError) {[m
+[31m-        setError(loadError instanceof Error ? loadError.message : 'Could not load stores.');[m
+[31m-      } finally {[m
+[31m-        setLoading(false);[m
+[31m-        setRefreshing(false);[m
+[31m-      }[m
+[31m-    },[m
+[31m-    [debouncedSearch, page, statusFilter][m
+[31m-  );[m
+[32m+[m[32m    setStores(normalizeStores(data));[m
+[32m+[m[32m    setLoginAccounts(normalizeAccounts(data));[m
+[32m+[m[32m  }, []);[m
+ [m
+[31m-  useEffect(() => {[m
+[31m-    const timer = window.setTimeout(() => {[m
+[31m-      setDebouncedSearch(search.trim());[m
+[31m-      setPage(1);[m
+[31m-    }, 300);[m
+[32m+[m[32m  const loadPosTypes = useCallback(async () => {[m
+[32m+[m[32m    const response = await fetch('/api/admin/pos-types', {[m
+[32m+[m[32m      method: 'GET',[m
+[32m+[m[32m      cache: 'no-store',[m
+[32m+[m[32m    });[m
+ [m
+[31m-    return () => window.clearTimeout(timer);[m
+[31m-  }, [search]);[m
+[32m+[m[32m    const data = await response.json().catch(() => null);[m
+ [m
+[31m-  useEffect(() => {[m
+[31m-    void loadStores();[m
+[31m-  }, [loadStores]);[m
+[31m-[m
+[31m-  const openCreateForm = () => {[m
+[31m-    setFormMode('create');[m
+[31m-    setForm(emptyForm);[m
+[31m-    setMessage(null);[m
+[31m-    setError(null);[m
+[31m-    setFormOpen(true);[m
+[31m-  };[m
+[32m+[m[32m    if (!response.ok) {[m
+[32m+[m[32m      throw new Error(data?.error || 'Unable to load POS types.');[m
+[32m+[m[32m    }[m
+ [m
+[31m-  const openEditForm = (store: AdminStore) => {[m
+[31m-    setFormMode('edit');[m
+[31m-    setForm(storeToForm(store));[m
+[31m-    setMessage(null);[m
+[31m-    setError(null);[m
+[31m-    setFormOpen(true);[m
+[31m-  };[m
+[32m+[m[32m    setPosTypes(normalizePosTypes(data));[m
+[32m+[m[32m  }, []);[m
+ [m
+[31m-  const closeForm = () => {[m
+[31m-    if (saving) return;[m
+[32m+[m[32m  const loadPageData = useCallback(async () => {[m
+[32m+[m[32m    setIsLoading(true);[m
+[32m+[m[32m    setErrorMessage(null);[m
+ [m
+[31m-    setFormOpen(false);[m
+[31m-    setForm(emptyForm);[m
+[31m-  };[m
+[32m+[m[32m    try {[m
+[32m+[m[32m      await Promise.all([loadStores(), loadPosTypes()]);[m
+[32m+[m[32m    } catch (error) {[m
+[32m+[m[32m      setErrorMessage(error instanceof Error ? error.message : 'Unable to load admin stores.');[m
+[32m+[m[32m    } finally {[m
+[32m+[m[32m      setIsLoading(false);[m
+[32m+[m[32m    }[m
+[32m+[m[32m  }, [loadPosTypes, loadStores]);[m
+ [m
+[31m-  const updateFormField = (field: keyof StoreFormState, value: string) => {[m
+[31m-    setForm((current) => ({[m
+[31m-      ...current,[m
+[31m-      [field]: value,[m
+[31m-    }));[m
+[31m-  };[m
+[32m+[m[32m  useEffect(() => {[m
+[32m+[m[32m    void loadPageData();[m
+[32m+[m[32m  }, [loadPageData]);[m
+ [m
+[31m-  const validateForm = () => {[m
+[31m-    if (!form.store_name.trim()) {[m
+[31m-      return 'Store name is required.';[m
+[31m-    }[m
+[32m+[m[32m  function handleCreateStore() {[m
+[32m+[m[32m    setSelectedStore(null);[m
+[32m+[m[32m    setIsFormOpen(true);[m
+[32m+[m[32m    setErrorMessage(null);[m
+[32m+[m[32m  }[m
+ [m
+[31m-    if (form.register_count && Number(form.register_count) < 0) {[m
+[31m-      return 'Register count cannot be negative.';[m
+[31m-    }[m
+[32m+[m[32m  function handleEditStore(store: StoreRow) {[m
+[32m+[m[32m    setSelectedStore(store);[m
+[32m+[m[32m    setIsFormOpen(true);[m
+[32m+[m[32m    setErrorMessage(null);[m
+[32m+[m[32m  }[m
+ [m
+[31m-    return null;[m
+[31m-  };[m
+[32m+[m[32m  async function handleSaveStore(values: StoreProfileFormValues) {[m
+[32m+[m[32m    setIsSaving(true);[m
+[32m+[m[32m    setErrorMessage(null);[m
+ [m
+[31m-  const handleSubmitStore = async () => {[m
+[31m-    const validationError = validateForm();[m
+[32m+[m[32m    try {[m
+[32m+[m[32m      const headers = await getAuthHeaders();[m
+[32m+[m[32m      const method = values.id ? 'PATCH' : 'POST';[m
+ [m
+[31m-    if (validationError) {[m
+[31m-      setError(validationError);[m
+[31m-      return;[m
+[31m-    }[m
+[32m+[m[32m      const response = await fetch('/api/admin/stores', {[m
+[32m+[m[32m        method,[m
+[32m+[m[32m        headers,[m
+[32m+[m[32m        body: JSON.stringify(values),[m
+[32m+[m[32m      });[m
+ [m
+[31m-    setSaving(true);[m
+[31m-    setError(null);[m
+[31m-    setMessage(null);[m
+[31m-[m
+[31m-    const payload = {[m
+[31m-      id: form.id,[m
+[31m-      owner_id: form.owner_id || null,[m
+[31m-      store_name: form.store_name,[m
+[31m-      address: form.address,[m
+[31m-      city: form.city,[m
+[31m-      state: form.state,[m
+[31m-      zip_code: form.zip_code,[m
+[31m-      phone_number: form.phone_number,[m
+[31m-      pos_type: form.pos_type,[m
+[31m-      register_count: Number(form.register_count || 0),[m
+[31m-      reason: form.reason || null,[m
+[31m-    };[m
+[32m+[m[32m      const data = await response.json().catch(() => null);[m
+ [m
+[31m-    try {[m
+[31m-      if (formMode === 'create') {[m
+[31m-        await adminFetch('/api/admin/stores', {[m
+[31m-          method: 'POST',[m
+[31m-          body: JSON.stringify(payload),[m
+[31m-        });[m
+[31m-[m
+[31m-        setMessage(`Created store: ${form.store_name}`);[m
+[31m-      } else {[m
+[31m-        await adminFetch('/api/admin/stores', {[m
+[31m-          method: 'PATCH',[m
+[31m-          body: JSON.stringify({[m
+[31m-            ...payload,[m
+[31m-            action: 'update',[m
+[31m-          }),[m
+[31m-        });[m
+[31m-[m
+[31m-        setMessage(`Updated store: ${form.store_name}`);[m
+[32m+[m[32m      if (!response.ok) {[m
+[32m+[m[32m        throw new Error(data?.error || 'Unable to save store.');[m
+       }[m
+ [m
+[31m-      setFormOpen(false);[m
+[31m-      setForm(emptyForm);[m
+[31m-      await loadStores('refresh');[m
+[31m-    } catch (submitError) {[m
+[31m-      setError(submitError instanceof Error ? submitError.message : 'Could not save store.');[m
+[32m+[m[32m      await loadStores();[m
+[32m+[m[32m      setSelectedStore(null);[m
+[32m+[m[32m      setIsFormOpen(false);[m
+[32m+[m[32m    } catch (error) {[m
+[32m+[m[32m      setErrorMessage(error instanceof Error ? error.message : 'Unable to save store.');[m
+     } finally {[m
+[31m-      setSaving(false);[m
+[32m+[m[32m      setIsSaving(false);[m
+     }[m
+[31m-  };[m
+[32m+[m[32m  }[m
+ [m
+[31m-  const handleToggleStoreStatus = async (store: AdminStore) => {[m
+[31m-    const action = store.is_active ? 'deactivate' : 'reactivate';[m
+[31m-    const confirmMessage = store.is_active[m
+[31m-      ? `Deactivate ${store.store_name}? Store history will stay available.`[m
+[31m-      : `Reactivate ${store.store_name}?`;[m
+[32m+[m[32m  async function handleAddPosType() {[m
+[32m+[m[32m    const name = window.prompt('Enter POS type name, for example Verifone Commander:');[m
+ [m
+[31m-    const confirmed = window.confirm(confirmMessage);[m
+[32m+[m[32m    if (!name || !name.trim()) {[m
+[32m+[m[32m      return;[m
+[32m+[m[32m    }[m
+ [m
+[31m-    if (!confirmed) return;[m
+[32m+[m[32m    const description = window.prompt('Optional description for this POS type:') || '';[m
+ [m
+[31m-    setStatusChangingId(store.id);[m
+[31m-    setError(null);[m
+[31m-    setMessage(null);[m
+[32m+[m[32m    setErrorMessage(null);[m
+ [m
+     try {[m
+[31m-      await adminFetch('/api/admin/stores', {[m
+[31m-        method: 'PATCH',[m
+[32m+[m[32m      const headers = await getAuthHeaders();[m
+[32m+[m
+[32m+[m[32m      const response = await fetch('/api/admin/pos-types', {[m
+[32m+[m[32m        method: 'POST',[m
+[32m+[m[32m        headers,[m
+         body: JSON.stringify({[m
+[31m-          id: store.id,[m
+[31m-          action,[m
+[31m-          reason: `Store ${action} from Superadmin Stores page.`,[m
+[32m+[m[32m          name: name.trim(),[m
+[32m+[m[32m          description: description.trim() || null,[m
+         }),[m
+       });[m
+ [m
+[31m-      setMessage([m
+[31m-        store.is_active[m
+[31m-          ? `Deactivated store: ${store.store_name}`[m
+[31m-          : `Reactivated store: ${store.store_name}`[m
+[31m-      );[m
+[32m+[m[32m      const data = await response.json().catch(() => null);[m
+ [m
+[31m-      await loadStores('refresh');[m
+[31m-    } catch (statusError) {[m
+[31m-      setError(statusError instanceof Error ? statusError.message : 'Could not update store status.');[m
+[31m-    } finally {[m
+[31m-      setStatusChangingId(null);[m
+[32m+[m[32m      if (!response.ok) {[m
+[32m+[m[32m        throw new Error(data?.error || 'Unable to create POS type.');[m
+[32m+[m[32m      }[m
+[32m+[m
+[32m+[m[32m      await loadPosTypes();[m
+[32m+[m[32m    } catch (error) {[m
+[32m+[m[32m      setErrorMessage(error instanceof Error ? error.message : 'Unable to create POS type.');[m
+     }[m
+[31m-  };[m
+[32m+[m[32m  }[m
+ [m
+   return ([m
+     <AdminShell>[m
+       <AdminPageHeader[m
+[31m-        title="Stores"[m
+[31m-        description="Create, edit, deactivate, and manage store profiles across the platform."[m
+[32m+[m[32m        title="Admin Stores"[m
+[32m+[m[32m        description="Manage store profiles, owner access, POS setup, billing, and support controls."[m
+       >[m
+[31m-        <div className="flex items-center gap-2">[m
+[31m-          <Button[m
+[31m-            variant="outline"[m
+[31m-            onClick={() => void loadStores('refresh')}[m
+[31m-            disabled={refreshing}[m
+[31m-          >[m
+[31m-            {refreshing ? ([m
+[31m-              <Loader2 className="mr-2 h-4 w-4 animate-spin" />[m
+[31m-            ) : ([m
+[31m-              <RefreshCcw className="mr-2 h-4 w-4" />[m
+[31m-            )}[m
+[31m-            Refresh[m
+[31m-          </Button>[m
+[31m-[m
+[31m-          <Button onClick={openCreateForm}>[m
+[31m-            <Plus className="mr-2 h-4 w-4" />[m
+[31m-            Add Store[m
+[31m-          </Button>[m
+[31m-        </div>[m
+[32m+[m[32m        <Button variant="outline" onClick={() => void loadPageData()} disabled={isLoading}>[m
+[32m+[m[32m          {isLoading ? ([m
+[32m+[m[32m            <Loader2 className="mr-2 h-4 w-4 animate-spin" />[m
+[32m+[m[32m          ) : ([m
+[32m+[m[32m            <RefreshCcw className="mr-2 h-4 w-4" />[m
+[32m+[m[32m          )}[m
+[32m+[m[32m          Refresh[m
+[32m+[m[32m        </Button>[m
+[32m+[m
+[32m+[m[32m        <Button onClick={handleCreateStore}>[m
+[32m+[m[32m          <Plus className="mr-2 h-4 w-4" />[m
+[32m+[m[32m          Add Store[m
+[32m+[m[32m        </Button>[m
+       </AdminPageHeader>[m
+ [m
+[31m-      <div className="mb-5 grid gap-4 md:grid-cols-4">[m
+[31m-        <Card className="p-5">[m
+[31m-          <div className="flex items-center gap-3">[m
+[31m-            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-primary/10 text-primary">[m
+[31m-              <StoreIcon className="h-5 w-5" />[m
+[31m-            </div>[m
+[31m-[m
+[31m-            <div>[m
+[31m-              <p className="text-sm text-muted-foreground">Total Stores</p>[m
+[31m-              <p className="text-2xl font-semibold text-foreground">[m
+[31m-                {summary.totalStores.toLocaleString()}[m
+[31m-              </p>[m
+[31m-            </div>[m
+[31m-          </div>[m
+[31m-        </Card>[m
+[31m-[m
+[31m-        <Card className="p-5">[m
+[31m-          <div className="flex items-center gap-3">[m
+[31m-            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-emerald-500/10 text-emerald-600">[m
+[31m-              <ToggleRight className="h-5 w-5" />[m
+[31m-            </div>[m
+[31m-[m
+[31m-            <div>[m
+[31m-              <p className="text-sm text-muted-foreground">Active</p>[m
+[31m-              <p className="text-2xl font-semibold text-foreground">[m
+[31m-                {summary.activeStores.toLocaleString()}[m
+[31m-              </p>[m
+[31m-            </div>[m
+[31m-          </div>[m
+[31m-        </Card>[m
+[31m-[m
+[31m-        <Card className="p-5">[m
+[31m-          <div className="flex items-center gap-3">[m
+[31m-            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-muted text-muted-foreground">[m
+[31m-              <ToggleLeft className="h-5 w-5" />[m
+[31m-            </div>[m
+[31m-[m
+[31m-            <div>[m
+[31m-              <p className="text-sm text-muted-foreground">Inactive</p>[m
+[31m-              <p className="text-2xl font-semibold text-foreground">[m
+[31m-                {summary.inactiveStores.toLocaleString()}[m
+[31m-              </p>[m
+[31m-            </div>[m
+[31m-          </div>[m
+[31m-        </Card>[m
+[31m-[m
+[31m-        <Card className="p-5">[m
+[31m-          <div className="flex items-center gap-3">[m
+[31m-            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-blue-500/10 text-blue-600">[m
+[31m-              <Users className="h-5 w-5" />[m
+[31m-            </div>[m
+[31m-[m
+[31m-            <div>[m
+[31m-              <p className="text-sm text-muted-foreground">Owner Options</p>[m
+[31m-              <p className="text-2xl font-semibold text-foreground">[m
+[31m-                {ownerOptions.length.toLocaleString()}[m
+[31m-              </p>[m
+[31m-            </div>[m
+[31m-          </div>[m
+[31m-        </Card>[m
+[31m-      </div>[m
+[31m-[m
+[31m-      {message && ([m
+[31m-        <Card className="mb-5 border-emerald-300 bg-emerald-50 p-4 text-emerald-900">[m
+[31m-          <div className="flex items-start gap-3">[m
+[31m-            <BadgeCheck className="mt-0.5 h-5 w-5 shrink-0" />[m
+[31m-            <p className="text-sm font-medium">{message}</p>[m
+[31m-          </div>[m
+[31m-        </Card>[m
+[31m-      )}[m
+[31m-[m
+[31m-      {error && ([m
+[31m-        <Card className="mb-5 border-destructive/30 bg-destructive/10 p-4 text-destructive">[m
+[31m-          <div className="flex items-start gap-3">[m
+[31m-            <AlertCircle className="mt-0.5 h-5 w-5 shrink-0" />[m
+[31m-[m
+[31m-            <div>[m
+[31m-              <p className="text-sm font-semibold">Stores error</p>[m
+[31m-              <p className="mt-1 text-sm">{error}</p>[m
+[31m-            </div>[m
+[31m-          </div>[m
+[31m-        </Card>[m
+[31m-      )}[m
+[31m-[m
+[31m-      <Card className="mb-5 p-5">[m
+[31m-        <div className="grid gap-3 lg:grid-cols-[1fr_220px]">[m
+[31m-          <div className="relative">[m
+[31m-            <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />[m
+[31m-            <Input[m
+[31m-              value={search}[m
+[31m-              onChange={(event) => setSearch(event.target.value)}[m
+[31m-              placeholder="Search store name, city, state, ZIP, phone, POS type..."[m
+[31m-              className="pl-9"[m
+[32m+[m[32m      <div className="space-y-6">[m
+[32m+[m[32m        {errorMessage ? ([m
+[32m+[m[32m          <Card className="border-destructive/30 bg-destructive/5 p-4 text-sm text-destructive">[m
+[32m+[m[32m            {errorMessage}[m
+[32m+[m[32m          </Card>[m
+[32m+[m[32m        ) : null}[m
+[32m+[m
+[32m+[m[32m        {isFormOpen ? ([m
+[32m+[m[32m          <Card className="p-4">[m
+[32m+[m[32m            <StoreProfileForm[m
+[32m+[m[32m              initialValues={selectedStore}[m
+[32m+[m[32m              loginAccounts={loginAccounts}[m
+[32m+[m[32m              posTypes={posTypes}[m
+[32m+[m[32m              isSubmitting={isSaving}[m
+[32m+[m[32m              submitLabel={selectedStore ? 'Update Store' : 'Create Store'}[m
+[32m+[m[32m              onSubmit={handleSaveStore}[m
+[32m+[m[32m              onCancel={() => {[m
+[32m+[m[32m                setSelectedStore(null);[m
+[32m+[m[32m                setIsFormOpen(false);[m
+[32m+[m[32m              }}[m
+[32m+[m[32m              onAddPosType={handleAddPosType}[m
+             />[m
+[31m-          </div>[m
+[32m+[m[32m          </Card>[m
+[32m+[m[32m        ) : null}[m
+ [m
+[31m-          <select[m
+[31m-            value={statusFilter}[m
+[31m-            onChange={(event) => {[m
+[31m-              setStatusFilter(event.target.value);[m
+[31m-              setPage(1);[m
+[31m-            }}[m
+[31m-            className="h-10 rounded-md border border-input bg-background px-3 text-sm text-foreground shadow-sm focus:outline-none focus:ring-2 focus:ring-ring"[m
+[31m-          >[m
+[31m-            <option value="all">All statuses</option>[m
+[31m-            <option value="active">Active only</option>[m
+[31m-            <option value="inactive">Inactive only</option>[m
+[31m-          </select>[m
+[31m-        </div>[m
+[31m-      </Card>[m
+[31m-[m
+[31m-      <Card className="overflow-hidden">[m
+[31m-        {loading ? ([m
+[31m-          <div className="flex items-center gap-3 p-6 text-sm text-muted-foreground">[m
+[31m-            <Loader2 className="h-4 w-4 animate-spin" />[m
+[31m-            Loading stores...[m
+[31m-          </div>[m
+[31m-        ) : stores.length === 0 ? ([m
+[31m-          <div className="flex flex-col items-center justify-center border border-dashed border-border p-12 text-center">[m
+[31m-            <Store className="h-10 w-10 text-muted-foreground" />[m
+[31m-            <p className="mt-3 font-semibold text-foreground">No stores found</p>[m
+[31m-            <p className="mt-1 text-sm text-muted-foreground">[m
+[31m-              Create your first store using the Add Store button.[m
+[32m+[m[32m        <Card className="overflow-hidden">[m
+[32m+[m[32m          <div className="border-b px-5 py-4">[m
+[32m+[m[32m            <h2 className="text-lg font-semibold text-foreground">Stores</h2>[m
+[32m+[m[32m            <p className="text-sm text-muted-foreground">[m
+[32m+[m[32m              Select a store to edit the full Store Profile form.[m
+             </p>[m
+[31m-[m
+[31m-            <Button className="mt-5" onClick={openCreateForm}>[m
+[31m-              <Plus className="mr-2 h-4 w-4" />[m
+[31m-              Add Store[m
+[31m-            </Button>[m
+           </div>[m
+[31m-        ) : ([m
+[31m-          <>[m
+[31m-            <div className="overflow-x-auto">[m
+[31m-              <table className="w-full min-w-[1250px] text-sm">[m
+[31m-                <thead className="bg-secondary/50 text-xs uppercase tracking-wide text-muted-foreground">[m
+[31m-                  <tr>[m
+[31m-                    <th className="px-4 py-3 text-left">Store</th>[m
+[31m-                    <th className="px-4 py-3 text-left">Owner</th>[m
+[31m-                    <th className="px-4 py-3 text-left">Location</th>[m
+[31m-                    <th className="px-4 py-3 text-left">POS</th>[m
+[31m-                    <th className="px-4 py-3 text-left">Setup</th>[m
+[31m-                    <th className="px-4 py-3 text-left">Products</th>[m
+[31m-                    <th className="px-4 py-3 text-left">Status</th>[m
+[31m-                    <th className="px-4 py-3 text-left">Created</th>[m
+[31m-                    <th className="px-4 py-3 text-right">Actions</th>[m
+[31m-                  </tr>[m
+[31m-                </thead>[m
+[31m-[m
+[31m-                <tbody>[m
+[31m-                  {stores.map((store) => ([m
+[31m-                    <tr[m
+[31m-                      key={store.id}[m
+[31m-                      className="border-t border-border align-top hover:bg-secondary/30"[m
+[31m-                    >[m
+[31m-                      <td className="px-4 py-4">[m
+[31m-                        <p className="font-medium text-foreground">{store.store_name}</p>[m
+[31m-                        <p className="font-mono text-xs text-muted-foreground">[m
+[31m-                          {store.id.slice(0, 8)}[m
+[31m-                        </p>[m
+[31m-                        {store.phone_number && ([m
+[31m-                          <p className="text-xs text-muted-foreground">{store.phone_number}</p>[m
+[31m-                        )}[m
+[31m-                      </td>[m
+[31m-[m
+[31m-                      <td className="px-4 py-4">[m
+[31m-                        <p className="font-medium text-foreground">[m
+[31m-                          {formatOwner(store.owner, store.owner_id)}[m
+[31m-                        </p>[m
+[31m-                        {formatOwnerSubtext(store.owner) && ([m
+[31m-                          <p className="text-xs text-muted-foreground">[m
+[31m-                            {formatOwnerSubtext(store.owner)}[m
+[31m-                          </p>[m
+[31m-                        )}[m
+[31m-                      </td>[m
+[31m-[m
+[31m-                      <td className="px-4 py-4">[m
+[31m-                        <p className="text-muted-foreground">[m
+[31m-                          {[store.city, store.state].filter(Boolean).join(', ') || '—'}[m
+[31m-                        </p>[m
+[31m-                        <p className="text-xs text-muted-foreground">[m
+[31m-                          {[store.address, store.zip_code].filter(Boolean).join(' ') || '—'}[m
+[31m-                        </p>[m
+[31m-                      </td>[m
+[31m-[m
+[31m-                      <td className="px-4 py-4">[m
+[31m-                        <p className="text-muted-foreground">{store.pos_type || '—'}</p>[m
+[31m-                        <p className="text-xs text-muted-foreground">[m
+[31m-                          {store.register_count.toLocaleString()} registers[m
+[31m-                        </p>[m
+[31m-                      </td>[m
+[31m-[m
+[31m-                      <td className="px-4 py-4">[m
+[31m-                        <span[m
+[31m-                          className={`inline-flex rounded-full px-2.5 py-1 text-xs font-semibold ${getSetupBadgeClass([m
+[31m-                            store.setup_status[m
+[31m-                          )}`}[m
+[31m-                        >[m
+[31m-                          {store.setup_status}[m
+[31m-                        </span>[m
+[31m-                      </td>[m
+[31m-[m
+[31m-                      <td className="px-4 py-4">[m
+[31m-                        <p className="font-medium text-foreground">[m
+[31m-                          {store.product_count.toLocaleString()}[m
+[31m-                        </p>[m
+[31m-                        <p className="text-xs text-muted-foreground">[m
+[31m-                          {store.transaction_count.toLocaleString()} transactions[m
+[31m-                        </p>[m
+[31m-                      </td>[m
+[31m-[m
+[31m-                      <td className="px-4 py-4">[m
+[31m-                        {store.is_active ? ([m
+[31m-                          <span className="inline-flex rounded-full bg-emerald-500/10 px-2.5 py-1 text-xs font-semibold text-emerald-700">[m
+[31m-                            Active[m
+[31m-                          </span>[m
+[31m-                        ) : ([m
+[31m-                          <span className="inline-flex rounded-full bg-muted px-2.5 py-1 text-xs font-semibold text-muted-foreground">[m
+[31m-                            Inactive[m
+[31m-                          </span>[m
+[31m-                        )}[m
+[31m-                      </td>[m
+[31m-[m
+[31m-                      <td className="px-4 py-4 text-muted-foreground">[m
+[31m-                        {formatDate(store.created_at)}[m
+[31m-                      </td>[m
+[31m-[m
+[31m-                      <td className="px-4 py-4">[m
+[31m-                        <div className="flex justify-end gap-2">[m
+[31m-                          <Button[m
+[31m-                            variant="outline"[m
+[31m-                            size="sm"[m
+[31m-                            onClick={() => openEditForm(store)}[m
+[31m-                          >[m
+[31m-                            <Edit3 className="mr-1 h-4 w-4" />[m
+[31m-                            Edit[m
+[31m-                          </Button>[m
+[31m-[m
+[31m-                          <Button[m
+[31m-                            variant="outline"[m
+[31m-                            size="sm"[m
+[31m-                            disabled={statusChangingId === store.id}[m
+[31m-                            onClick={() => void handleToggleStoreStatus(store)}[m
+[31m-                          >[m
+[31m-                            {statusChangingId === store.id ? ([m
+[31m-                              <Loader2 className="mr-1 h-4 w-4 animate-spin" />[m
+[31m-                            ) : store.is_active ? ([m
+[31m-                              <ToggleLeft className="mr-1 h-4 w-4" />[m
+[31m-                            ) : ([m
+[31m-                              <ToggleRight className="mr-1 h-4 w-4" />[m
+[31m-                            )}[m
+[31m-                            {store.is_active ? 'Deactivate' : 'Reactivate'}[m
+[31m-                          </Button>[m
+[31m-                        </div>[m
+[31m-                      </td>[m
+[31m-                    </tr>[m
+[31m-                  ))}[m
+[31m-                </tbody>[m
+[31m-              </table>[m
+[31m-            </div>[m
+[31m-[m
+[31m-            <div className="flex flex-col gap-3 border-t border-border p-4 sm:flex-row sm:items-center sm:justify-between">[m
+[31m-              <p className="text-sm text-muted-foreground">[m
+[31m-                Showing page {pagination.page} of {pagination.totalPages} - {pagination.total.toLocaleString()} matching stores[m
+[31m-              </p>[m
+ [m
+[31m-              <div className="flex items-center gap-2">[m
+[31m-                <Button[m
+[31m-                  variant="outline"[m
+[31m-                  size="sm"[m
+[31m-                  disabled={pagination.page <= 1}[m
+[31m-                  onClick={() => setPage((current) => Math.max(1, current - 1))}[m
+[31m-                >[m
+[31m-                  <ChevronLeft className="mr-1 h-4 w-4" />[m
+[31m-                  Previous[m
+[31m-                </Button>[m
+[31m-[m
+[31m-                <Button[m
+[31m-                  variant="outline"[m
+[31m-                  size="sm"[m
+[31m-                  disabled={pagination.page >= pagination.totalPages}[m
+[31m-                  onClick={() => setPage((current) => current + 1)}[m
+[31m-                >[m
+[31m-                  Next[m
+[31m-                  <ChevronRight className="ml-1 h-4 w-4" />[m
+[31m-                </Button>[m
+[31m-              </div>[m
+[32m+[m[32m          {isLoading ? ([m
+[32m+[m[32m            <div className="flex items-center gap-2 p-5 text-sm text-muted-foreground">[m
+[32m+[m[32m              <Loader2 className="h-4 w-4 animate-spin" />[m
+[32m+[m[32m              Loading stores...[m
+             </div>[m
+[31m-          </>[m
+[31m-        )}[m
+[31m-      </Card>[m
+[31m-[m
+[31m-      {formOpen && ([m
+[31m-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">[m
+[31m-          <Card className="max-h-[90vh] w-full max-w-3xl overflow-y-auto p-6">[m
+[31m-            <div className="mb-5">[m
+[31m-              <h2 className="text-xl font-semibold text-foreground">[m
+[31m-                {formMode === 'create' ? 'Add Store' : 'Edit Store'}[m
+[31m-              </h2>[m
+[32m+[m[32m          ) : sortedStores.length === 0 ? ([m
+[32m+[m[32m            <div className="p-8 text-center">[m
+[32m+[m[32m              <Store className="mx-auto h-10 w-10 text-muted-foreground" />[m
+[32m+[m[32m              <h3 className="mt-3 text-base font-semibold text-foreground">No stores yet</h3>[m
+               <p className="mt-1 text-sm text-muted-foreground">[m
+[31m-                {formMode === 'create'[m
+[31m-                  ? 'Create a new store profile in the platform.'[m
+[31m-                  : 'Update store details. Changes will be recorded in audit logs.'}[m
+[32m+[m[32m                Create your first store profile from the superadmin panel.[m
+               </p>[m
+             </div>[m
+[31m-[m
+[31m-            <div className="grid gap-4 md:grid-cols-2">[m
+[31m-              <div className="md:col-span-2">[m
+[31m-                <label className="mb-1.5 block text-sm font-medium text-foreground">[m
+[31m-                  Store name *[m
+[31m-                </label>[m
+[31m-                <Input[m
+[31m-                  value={form.store_name}[m
+[31m-                  onChange={(event) => updateFormField('store_name', event.target.value)}[m
+[31m-                  placeholder="Example: Main Street Convenience"[m
+[31m-                />[m
+[31m-              </div>[m
+[31m-[m
+[31m-              <div className="md:col-span-2">[m
+[31m-                <label className="mb-1.5 block text-sm font-medium text-foreground">[m
+[31m-                  Owner[m
+[31m-                </label>[m
+[31m-                <select[m
+[31m-                  value={form.owner_id}[m
+[31m-                  onChange={(event) => updateFormField('owner_id', event.target.value)}[m
+[31m-                  className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm text-foreground shadow-sm focus:outline-none focus:ring-2 focus:ring-ring"[m
+[32m+[m[32m          ) : ([m
+[32m+[m[32m            <div className="divide-y">[m
+[32m+[m[32m              {sortedStores.map((store) => ([m
+[32m+[m[32m                <button[m
+[32m+[m[32m                  key={store.id}[m
+[32m+[m[32m                  type="button"[m
+[32m+[m[32m                  onClick={() => handleEditStore(store)}[m
+[32m+[m[32m                  className="flex w-full items-start justify-between gap-4 px-5 py-4 text-left hover:bg-secondary/50"[m
+                 >[m
+[31m-                  <option value="">Unassigned</option>[m
+[31m-                  {sortedOwnerOptions.map((owner) => ([m
+[31m-                    <option key={owner.user_id} value={owner.user_id}>[m
+[31m-                      {ownerOptionLabel(owner)}[m
+[31m-                    </option>[m
+[31m-                  ))}[m
+[31m-                </select>[m
+[31m-              </div>[m
+[31m-[m
+[31m-              <div className="md:col-span-2">[m
+[31m-                <label className="mb-1.5 block text-sm font-medium text-foreground">[m
+[31m-                  Address[m
+[31m-                </label>[m
+[31m-                <Input[m
+[31m-                  value={form.address}[m
+[31m-                  onChange={(event) => updateFormField('address', event.target.value)}[m
+[31m-                  placeholder="Street address"[m
+[31m-                />[m
+[31m-              </div>[m
+[31m-[m
+[31m-              <div>[m
+[31m-                <label className="mb-1.5 block text-sm font-medium text-foreground">[m
+[31m-                  City[m
+[31m-                </label>[m
+[31m-                <Input[m
+[31m-                  value={form.city}[m
+[31m-                  onChange={(event) => updateFormField('city', event.target.value)}[m
+[31m-                  placeholder="City"[m
+[31m-                />[m
+[31m-              </div>[m
+[31m-[m
+[31m-              <div>[m
+[31m-                <label className="mb-1.5 block text-sm font-medium text-foreground">[m
+[31m-                  State[m
+[31m-                </label>[m
+[31m-                <Input[m
+[31m-                  value={form.state}[m
+[31m-                  onChange={(event) => updateFormField('state', event.target.value)}[m
+[31m-                  placeholder="State"[m
+[31m-                />[m
+[31m-              </div>[m
+[31m-[m
+[31m-              <div>[m
+[31m-                <label className="mb-1.5 block text-sm font-medium text-foreground">[m
+[31m-                  ZIP code[m
+[31m-                </label>[m
+[31m-                <Input[m
+[31m-                  value={form.zip_code}[m
+[31m-                  onChange={(event) => updateFormField('zip_code', event.target.value)}[m
+[31m-                  placeholder="ZIP"[m
+[31m-                />[m
+[31m-              </div>[m
+[31m-[m
+[31m-              <div>[m
+[31m-                <label className="mb-1.5 block text-sm font-medium text-foreground">[m
+[31m-                  Phone number[m
+[31m-                </label>[m
+[31m-                <Input[m
+[31m-                  value={form.phone_number}[m
+[31m-                  onChange={(event) => updateFormField('phone_number', event.target.value)}[m
+[31m-                  placeholder="Store phone"[m
+[31m-                />[m
+[31m-              </div>[m
+[31m-[m
+[31m-              <div>[m
+[31m-                <label className="mb-1.5 block text-sm font-medium text-foreground">[m
+[31m-                  POS type[m
+[31m-                </label>[m
+[31m-                <Input[m
+[31m-                  value={form.pos_type}[m
+[31m-                  onChange={(event) => updateFormField('pos_type', event.target.value)}[m
+[31m-                  placeholder="Example: Verifone, Clover, NCR"[m
+[31m-                />[m
+[31m-              </div>[m
+[31m-[m
+[31m-              <div>[m
+[31m-                <label className="mb-1.5 block text-sm font-medium text-foreground">[m
+[31m-                  Register count[m
+[31m-                </label>[m
+[31m-                <Input[m
+[31m-                  type="number"[m
+[31m-                  min="0"[m
+[31m-                  value={form.register_count}[m
+[31m-                  onChange={(event) => updateFormField('register_count', event.target.value)}[m
+[31m-                  placeholder="1"[m
+[31m-                />[m
+[31m-              </div>[m
+[31m-[m
+[31m-              <div className="md:col-span-2">[m
+[31m-                <label className="mb-1.5 block text-sm font-medium text-foreground">[m
+[31m-                  Change reason[m
+[31m-                </label>[m
+[31m-                <textarea[m
+[31m-                  value={form.reason}[m
+[31m-                  onChange={(event) => updateFormField('reason', event.target.value)}[m
+[31m-                  placeholder="Optional reason for audit log"[m
+[31m-                  className="min-h-[90px] w-full rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground shadow-sm focus:outline-none focus:ring-2 focus:ring-ring"[m
+[31m-                />[m
+[31m-              </div>[m
+[32m+[m[32m                  <div>[m
+[32m+[m[32m                    <div className="font-semibold text-foreground">{store.store_name}</div>[m
+[32m+[m[32m                    <div className="mt-1 text-sm text-muted-foreground">[m
+[32m+[m[32m                      {[store.address_line1, store.city, store.state, store.zip_code][m
+[32m+[m[32m                        .filter(Boolean)[m
+[32m+[m[32m                        .join(', ') || 'No address saved'}[m
+[32m+[m[32m                    </div>[m
+[32m+[m[32m                    <div className="mt-1 text-xs text-muted-foreground">[m
+[32m+[m[32m                      POS: {store.pos_type || 'Not selected'} - Plan: {store.plan || 'Not set'}[m
+[32m+[m[32m                    </div>[m
+[32m+[m[32m                  </div>[m
+[32m+[m
+[32m+[m[32m                  <span className="rounded-full border px-3 py-1 text-xs font-medium text-muted-foreground">[m
+[32m+[m[32m                    Edit[m
+[32m+[m[32m                  </span>[m
+[32m+[m[32m                </button>[m
+[32m+[m[32m              ))}[m
+             </div>[m
+[31m-[m
+[31m-            <div className="mt-6 flex justify-end gap-2">[m
+[31m-              <Button variant="outline" onClick={closeForm} disabled={saving}>[m
+[31m-                Cancel[m
+[31m-              </Button>[m
+[31m-[m
+[31m-              <Button onClick={handleSubmitStore} disabled={saving}>[m
+[31m-                {saving && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}[m
+[31m-                {formMode === 'create' ? 'Create Store' : 'Save Changes'}[m
+[31m-              </Button>[m
+[31m-            </div>[m
+[31m-          </Card>[m
+[31m-        </div>[m
+[31m-      )}[m
+[32m+[m[32m          )}[m
+[32m+[m[32m        </Card>[m
+[32m+[m[32m      </div>[m
+     </AdminShell>[m
+   );[m
+[31m-}[m
+\ No newline at end of file[m
+[32m+[m[32m}[m

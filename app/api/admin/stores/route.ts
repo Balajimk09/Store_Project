@@ -337,21 +337,50 @@ function buildStorePayload(input: Record<string, unknown>) {
   };
 }
 
-function buildSubscriptionPayload(input: Record<string, unknown>, actorUserId: string) {
-  const planId = cleanText(input.plan_id || input.planId, 80);
+const SUBSCRIPTION_FIELDS = [
+  'plan',
+  'subscription_status',
+  'billing_status',
+  'billing_provider',
+  'billing_customer_id',
+  'billing_subscription_id',
+  'current_period_start',
+  'current_period_end',
+  'trial_ends_at',
+  'cancel_at',
+  'subscription_notes',
+] as const;
 
-  return {
-    plan_id: planId,
-    subscription_status: cleanSubscriptionStatus(
-      input.subscription_status || input.subscriptionStatus
-    ),
-    billing_status: cleanBillingStatus(input.billing_status || input.billingStatus),
-    trial_ends_at: cleanDateOrNull(input.trial_ends_at || input.trialEndsAt),
-    notes: cleanText(input.subscription_notes || input.subscriptionNotes, 1000),
-    created_by: actorUserId,
-    updated_at: new Date().toISOString(),
-  };
+type SubscriptionField = (typeof SUBSCRIPTION_FIELDS)[number];
+
+function hasSubscriptionFields(input: Record<string, unknown>) {
+  return SUBSCRIPTION_FIELDS.some((field) =>
+    Object.prototype.hasOwnProperty.call(input, field)
+  );
 }
+
+function cleanString(value: unknown) {
+  if (value === undefined) return undefined;
+  if (value === null) return null;
+  if (typeof value !== 'string') return value;
+
+  const trimmed = value.trim();
+  return trimmed.length ? trimmed : null;
+}
+
+function buildSubscriptionPayload(input: Record<string, unknown>) {
+  const payload: Partial<Record<SubscriptionField, unknown>> = {};
+
+  for (const field of SUBSCRIPTION_FIELDS) {
+    if (Object.prototype.hasOwnProperty.call(input, field)) {
+      payload[field] = cleanString(input[field]);
+    }
+  }
+
+  return payload;
+}
+
+
 
 function normalizePlan(plan: PlatformPlan) {
   return {
@@ -817,7 +846,7 @@ async function upsertStoreSubscription(input: {
   body: Record<string, unknown>;
 }) {
   const supabaseAdmin = getSupabaseAdmin();
-  const subscriptionPayload = buildSubscriptionPayload(input.body, input.actorUserId);
+  const subscriptionPayload = buildSubscriptionPayload(input.body);
 
   const { data, error } = await supabaseAdmin
     .from('store_subscriptions')
@@ -1004,25 +1033,13 @@ export async function POST(request: NextRequest) {
 
     let subscription = null;
 
-    if (
-      body.plan_id !== undefined ||
-      body.planId !== undefined ||
-      body.subscription_status !== undefined ||
-      body.subscriptionStatus !== undefined ||
-      body.billing_status !== undefined ||
-      body.billingStatus !== undefined ||
-      body.trial_ends_at !== undefined ||
-      body.trialEndsAt !== undefined ||
-      body.subscription_notes !== undefined ||
-      body.subscriptionNotes !== undefined
-    ) {
-      subscription = await upsertStoreSubscription({
-        storeId: data.id,
-        actorUserId: auth.user.id,
-        body,
-      });
-    }
-
+    if (hasSubscriptionFields(body)) {
+  subscription = await upsertStoreSubscription({
+    storeId: data.id,
+    actorUserId: auth.user.id,
+    body,
+  });
+}
     await logAdminAction({
       actorUserId: auth.user.id,
       action: 'store.created',
@@ -1169,24 +1186,13 @@ export async function PATCH(request: NextRequest) {
 
     let subscription = existingSubscription || null;
 
-    if (
-      body.plan_id !== undefined ||
-      body.planId !== undefined ||
-      body.subscription_status !== undefined ||
-      body.subscriptionStatus !== undefined ||
-      body.billing_status !== undefined ||
-      body.billingStatus !== undefined ||
-      body.trial_ends_at !== undefined ||
-      body.trialEndsAt !== undefined ||
-      body.subscription_notes !== undefined ||
-      body.subscriptionNotes !== undefined
-    ) {
-      subscription = await upsertStoreSubscription({
-        storeId,
-        actorUserId: auth.user.id,
-        body,
-      });
-    }
+    if (hasSubscriptionFields(body)) {
+  subscription = await upsertStoreSubscription({
+    storeId,
+    actorUserId: auth.user.id,
+    body,
+  });
+}
 
     await logAdminAction({
       actorUserId: auth.user.id,

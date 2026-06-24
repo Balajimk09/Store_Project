@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useState, type ChangeEvent } from 'react';
 import {
   AlertTriangle,
+  Bell,
   Camera,
   CheckCircle2,
   CircleAlert,
@@ -168,6 +169,15 @@ type VendorOrderItem = {
   estimatedCost: number;
 };
 
+type StoreVendorData = {
+  vendor_name: string;
+  expected_invoice_amount?: number | null;
+  payment_terms?: string | null;
+  order_days?: string[];
+  delivery_days?: string[];
+  notification_enabled?: boolean;
+};
+
 const RECEIVING_HISTORY_KEY = 'storepulse_receiving_history_v1';
 const INVOICE_BUCKET = 'inventory-invoices';
 const PRESET_AGE_TYPES = ['Tobacco', 'Alcohol', 'Lottery', 'Vape'];
@@ -270,6 +280,10 @@ function dateOnly(value: string) {
 function formatShortDate(value: string | null) {
   if (!value) return 'No delivery yet';
   return new Date(value).toLocaleDateString();
+}
+
+function formatDayAbbreviation(day: string) {
+  return day.slice(0, 3);
 }
 
 function getReorderPriority(product: Product, daysLeft: number | null): ReorderPriority {
@@ -849,6 +863,7 @@ export default function ProductsPage() {
   const [historyQuery, setHistoryQuery] = useState('');
   const [historyVendorFilter, setHistoryVendorFilter] = useState('All');
   const [storeVendors, setStoreVendors] = useState<string[]>([]);
+  const [storeVendorMap, setStoreVendorMap] = useState<Map<string, StoreVendorData>>(new Map());
   const [reorderSearch, setReorderSearch] = useState('');
   const [reorderPriorityFilter, setReorderPriorityFilter] = useState<'All' | ReorderPriority>('All');
   const [selectedReorderUpcs, setSelectedReorderUpcs] = useState<string[]>([]);
@@ -856,6 +871,7 @@ export default function ProductsPage() {
   const [openVendorOrder, setOpenVendorOrder] = useState<string | null>(null);
   const [vendorProductSearch, setVendorProductSearch] = useState('');
   const [orderUnitOverrides, setOrderUnitOverrides] = useState<Record<string, string>>({});
+  const [todayVendorNoticeDismissed, setTodayVendorNoticeDismissed] = useState(false);
 
   useEffect(() => {
     setItems(storeProducts);
@@ -927,26 +943,36 @@ export default function ProductsPage() {
     const loadStoreVendors = async () => {
       if (!store?.id) {
         setStoreVendors([]);
+        setStoreVendorMap(new Map());
         return;
       }
 
       const { data, error } = await supabase
         .from('store_vendors')
-        .select('vendor_name')
+        .select(
+          'vendor_name, expected_invoice_amount, payment_terms, order_days, delivery_days, notification_enabled'
+        )
         .eq('store_id', store.id)
         .eq('is_active', true)
         .order('vendor_name', { ascending: true });
 
       if (error) {
         setStoreVendors([]);
+        setStoreVendorMap(new Map());
         return;
       }
 
-      setStoreVendors(
-        (data || [])
-          .map((vendor: any) => String(vendor.vendor_name || '').trim())
-          .filter(Boolean)
-      );
+      const vendorMap = new Map<string, StoreVendorData>();
+      const vendorOptions = ((data || []) as StoreVendorData[])
+        .map((vendor) => {
+          const vendorName = String(vendor.vendor_name || '').trim();
+          if (vendorName) vendorMap.set(vendorName, { ...vendor, vendor_name: vendorName });
+          return vendorName;
+        })
+        .filter(Boolean);
+
+      setStoreVendors(vendorOptions);
+      setStoreVendorMap(vendorMap);
     };
 
     void loadStoreVendors();
@@ -1334,6 +1360,23 @@ export default function ProductsPage() {
       return b.estimatedCost - a.estimatedCost;
     });
   }, [filteredReorderInsights, getOrderUnitsForProduct]);
+
+  const todayVendorReminders = useMemo(() => {
+    const today = new Date().toLocaleDateString('en-US', { weekday: 'long' });
+    const reminders: string[] = [];
+
+    storeVendorMap.forEach((vendor) => {
+      if (vendor.order_days?.includes(today)) {
+        reminders.push(`${vendor.vendor_name} order`);
+      }
+
+      if (vendor.delivery_days?.includes(today)) {
+        reminders.push(`${vendor.vendor_name} delivery expected`);
+      }
+    });
+
+    return reminders;
+  }, [storeVendorMap]);
 
   const activeVendorOrder = useMemo(() => {
     if (!openVendorOrder) return null;
@@ -3345,6 +3388,25 @@ const nextBreakdown = getCaseBreakdown(nextStock, unitsPerCase);
 
       {activeTab === 'reorder' && (
         <div className="space-y-5">
+          {!todayVendorNoticeDismissed && todayVendorReminders.length > 0 && (
+            <div className="flex items-start justify-between gap-3 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+              <div className="flex items-start gap-2">
+                <Bell className="mt-0.5 h-4 w-4 shrink-0" />
+                <p>
+                  <span className="font-semibold">Today:</span> {todayVendorReminders.join(' · ')}
+                </p>
+              </div>
+              <button
+                type="button"
+                className="rounded p-0.5 text-amber-800 hover:bg-amber-100"
+                onClick={() => setTodayVendorNoticeDismissed(true)}
+                aria-label="Dismiss vendor reminder"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+          )}
+
           <div className="grid gap-4 md:grid-cols-4">
             <Card className="p-4">
               <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Critical</p>
@@ -3442,6 +3504,13 @@ const nextBreakdown = getCaseBreakdown(nextStock, unitsPerCase);
                   }).length;
 
                   const isOpen = openVendorOrder === group.vendor;
+                  const vendorSchedule = storeVendorMap.get(group.vendor);
+                  const hasSchedule =
+                    Boolean(vendorSchedule) &&
+                    ((vendorSchedule?.order_days?.length || 0) > 0 ||
+                      (vendorSchedule?.delivery_days?.length || 0) > 0 ||
+                      vendorSchedule?.expected_invoice_amount != null ||
+                      Boolean(vendorSchedule?.payment_terms));
 
                   return (
                     <Card
@@ -3476,6 +3545,57 @@ const nextBreakdown = getCaseBreakdown(nextStock, unitsPerCase);
                         </p>
                         <p>Open vendor to add products, edit cases, and export.</p>
                       </div>
+
+                      {vendorSchedule && hasSchedule && (
+                        <div className="mt-3 space-y-1 border-t border-border pt-3 text-xs">
+                          {vendorSchedule.order_days && vendorSchedule.order_days.length > 0 && (
+                            <div className="flex flex-wrap items-center gap-1.5">
+                              <span className="font-medium text-muted-foreground">Order:</span>
+                              {vendorSchedule.order_days.map((day) => (
+                                <span
+                                  key={day}
+                                  className="rounded-full border border-primary/40 px-1.5 py-0.5 font-medium text-primary"
+                                >
+                                  {formatDayAbbreviation(day)}
+                                </span>
+                              ))}
+                            </div>
+                          )}
+
+                          {vendorSchedule.delivery_days &&
+                            vendorSchedule.delivery_days.length > 0 && (
+                              <div className="flex flex-wrap items-center gap-1.5">
+                                <span className="font-medium text-muted-foreground">Delivery:</span>
+                                {vendorSchedule.delivery_days.map((day) => (
+                                  <span
+                                    key={day}
+                                    className="rounded-full border border-amber-400/70 px-1.5 py-0.5 font-medium text-amber-700"
+                                  >
+                                    {formatDayAbbreviation(day)}
+                                  </span>
+                                ))}
+                              </div>
+                            )}
+
+                          {(vendorSchedule.expected_invoice_amount != null ||
+                            vendorSchedule.payment_terms) && (
+                            <p className="text-muted-foreground">
+                              {vendorSchedule.expected_invoice_amount != null && (
+                                <span className="font-semibold text-emerald-700">
+                                  Expected Invoice:{' '}
+                                  {formatCurrency(vendorSchedule.expected_invoice_amount || 0)}
+                                </span>
+                              )}
+                              {vendorSchedule.payment_terms && (
+                                <span>
+                                  {vendorSchedule.expected_invoice_amount != null ? ' · ' : ''}
+                                  Terms: {vendorSchedule.payment_terms}
+                                </span>
+                              )}
+                            </p>
+                          )}
+                        </div>
+                      )}
 
                       <div className="mt-4 flex flex-wrap gap-2">
                         <Button

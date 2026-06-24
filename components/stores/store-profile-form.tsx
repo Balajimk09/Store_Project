@@ -1,6 +1,7 @@
 'use client';
 
 import { FormEvent, useEffect, useMemo, useState } from 'react';
+import { supabase } from '@/lib/supabase';
 
 export type DayKey =
   | 'sunday'
@@ -19,13 +20,6 @@ export type OperatingHourRow = {
 
 export type OperatingHours = Record<DayKey, OperatingHourRow>;
 
-export type LoginAccountOption = {
-  id: string;
-  email?: string | null;
-  full_name?: string | null;
-  name?: string | null;
-};
-
 export type PosTypeOption = {
   id?: string;
   name: string;
@@ -33,10 +27,39 @@ export type PosTypeOption = {
   description?: string | null;
 };
 
+export type StoreUserProfile = {
+  id?: string;
+  name?: string | null;
+  email?: string | null;
+  phone?: string | null;
+  role?: string | null;
+  customRole?: string | null;
+  isActive?: boolean;
+};
+
+export type CustomField = {
+  id?: string;
+  label: string;
+  value: string;
+};
+
+export type PrimaryContact = {
+  id?: string;
+  name?: string | null;
+  email?: string | null;
+  phone?: string | null;
+  role?: string | null;
+  customRole?: string | null;
+};
+
 export type StoreProfileFormValues = {
   id?: string;
 
   owner_id?: string | null;
+  allowed_user_count?: number | null;
+  primary_owner_email?: string | null;
+  primary_contacts?: PrimaryContact[] | null;
+  custom_fields?: CustomField[] | null;
 
   store_name: string;
   store_code?: string | null;
@@ -75,6 +98,7 @@ export type StoreProfileFormValues = {
   ebt_accepted?: boolean;
 
   operating_hours?: OperatingHours | null;
+  store_users?: StoreUserProfile[] | null;
 
   plan?: string | null;
   subscription_status?: string | null;
@@ -87,13 +111,16 @@ export type StoreProfileFormValues = {
   trial_ends_at?: string | null;
   cancel_at?: string | null;
   subscription_notes?: string | null;
+  billing_custom_fields?: CustomField[] | null;
 
+  compliance_fields?: CustomField[] | null;
+  compliance_notes?: string | null;
+  compliance_file_urls?: string[] | null;
   notes?: string | null;
 };
 
 type StoreProfileFormProps = {
   initialValues?: Partial<StoreProfileFormValues> | null;
-  loginAccounts?: LoginAccountOption[];
   posTypes?: PosTypeOption[];
   isSubmitting?: boolean;
   submitLabel?: string;
@@ -104,12 +131,19 @@ type StoreProfileFormProps = {
 
 type StoreProfileFormState = Omit<
   StoreProfileFormValues,
-  'register_count' | 'latitude' | 'longitude' | 'operating_hours'
+  'allowed_user_count' | 'register_count' | 'latitude' | 'longitude' | 'operating_hours'
 > & {
   register_count: string;
   latitude: string;
   longitude: string;
   operating_hours: OperatingHours;
+  allowed_user_count: string;
+  primary_contacts: PrimaryContact[];
+  custom_fields: CustomField[];
+  store_users: StoreUserProfile[];
+  billing_custom_fields: CustomField[];
+  compliance_fields: CustomField[];
+  compliance_file_urls: string[];
 };
 
 const DAY_LABELS: Array<{ key: DayKey; label: string }> = [
@@ -134,6 +168,10 @@ const DEFAULT_OPERATING_HOURS: OperatingHours = {
 
 const DEFAULT_FORM_VALUES: StoreProfileFormState = {
   owner_id: '',
+  allowed_user_count: '1',
+  primary_owner_email: '',
+  primary_contacts: [],
+  custom_fields: [],
 
   store_name: '',
   store_code: '',
@@ -172,6 +210,7 @@ const DEFAULT_FORM_VALUES: StoreProfileFormState = {
   ebt_accepted: false,
 
   operating_hours: DEFAULT_OPERATING_HOURS,
+  store_users: [],
 
   plan: 'starter',
   subscription_status: 'trialing',
@@ -184,7 +223,11 @@ const DEFAULT_FORM_VALUES: StoreProfileFormState = {
   trial_ends_at: '',
   cancel_at: '',
   subscription_notes: '',
+  billing_custom_fields: [],
 
+  compliance_fields: [],
+  compliance_notes: '',
+  compliance_file_urls: [],
   notes: '',
 };
 
@@ -225,6 +268,71 @@ function normalizeOperatingHours(value: unknown): OperatingHours {
   }, {} as OperatingHours);
 }
 
+function normalizeStoreUsers(value: unknown): StoreUserProfile[] {
+  if (!Array.isArray(value)) return [];
+
+  return value
+    .filter((item) => item && typeof item === 'object')
+    .map((item) => {
+      const user = item as StoreUserProfile & {
+        role_label?: string | null;
+        custom_role_label?: string | null;
+        is_active?: boolean;
+      };
+
+      return {
+        id: valueToString(user.id) || crypto.randomUUID(),
+        name: valueToString(user.name),
+        email: valueToString(user.email),
+        phone: valueToString(user.phone),
+        role: valueToString(user.role || user.role_label || 'Employee'),
+        customRole: valueToString(user.customRole || user.custom_role_label),
+        isActive: user.isActive !== false && user.is_active !== false,
+      };
+    });
+}
+
+function normalizeCustomFields(value: unknown): CustomField[] {
+  if (!Array.isArray(value)) return [];
+
+  return value
+    .filter((item) => item && typeof item === 'object')
+    .map((item) => {
+      const field = item as CustomField;
+
+      return {
+        id: valueToString(field.id) || crypto.randomUUID(),
+        label: valueToString(field.label),
+        value: valueToString(field.value),
+      };
+    })
+    .filter((field) => field.label || field.value);
+}
+
+function normalizePrimaryContacts(value: unknown): PrimaryContact[] {
+  if (!Array.isArray(value)) return [];
+
+  return value
+    .filter((item) => item && typeof item === 'object')
+    .map((item) => {
+      const contact = item as PrimaryContact;
+
+      return {
+        id: valueToString(contact.id) || crypto.randomUUID(),
+        name: valueToString(contact.name),
+        email: valueToString(contact.email),
+        phone: valueToString(contact.phone),
+        role: valueToString(contact.role || 'Owner'),
+        customRole: valueToString(contact.customRole),
+      };
+    });
+}
+
+function normalizeStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((item): item is string => typeof item === 'string' && item.trim().length > 0);
+}
+
 function valueToString(value: unknown): string {
   if (value === null || value === undefined) return '';
   return String(value);
@@ -255,6 +363,10 @@ function toFormState(initialValues?: Partial<StoreProfileFormValues> | null): St
 
     id: initialValues.id,
     owner_id: valueToString(initialValues.owner_id),
+    allowed_user_count: valueToString(initialValues.allowed_user_count || 1),
+    primary_owner_email: valueToString(initialValues.primary_owner_email),
+    primary_contacts: normalizePrimaryContacts(initialValues.primary_contacts),
+    custom_fields: normalizeCustomFields(initialValues.custom_fields),
 
     store_name: valueToString(initialValues.store_name),
     store_code: valueToString(initialValues.store_code),
@@ -293,6 +405,7 @@ function toFormState(initialValues?: Partial<StoreProfileFormValues> | null): St
     ebt_accepted: valueToBoolean(initialValues.ebt_accepted),
 
     operating_hours: normalizeOperatingHours(initialValues.operating_hours),
+    store_users: normalizeStoreUsers(initialValues.store_users),
 
     plan: valueToString(initialValues.plan || DEFAULT_FORM_VALUES.plan),
     subscription_status: valueToString(
@@ -307,7 +420,11 @@ function toFormState(initialValues?: Partial<StoreProfileFormValues> | null): St
     trial_ends_at: dateInputValue(initialValues.trial_ends_at),
     cancel_at: dateInputValue(initialValues.cancel_at),
     subscription_notes: valueToString(initialValues.subscription_notes),
+    billing_custom_fields: normalizeCustomFields(initialValues.billing_custom_fields),
 
+    compliance_fields: normalizeCustomFields(initialValues.compliance_fields),
+    compliance_notes: valueToString(initialValues.compliance_notes),
+    compliance_file_urls: normalizeStringArray(initialValues.compliance_file_urls),
     notes: valueToString(initialValues.notes),
   };
 }
@@ -331,7 +448,6 @@ function dateOrNull(value: string | null | undefined): string | null {
 
 export function StoreProfileForm({
   initialValues,
-  loginAccounts = [],
   posTypes = [],
   isSubmitting = false,
   submitLabel = 'Save Store',
@@ -340,6 +456,10 @@ export function StoreProfileForm({
   onAddPosType,
 }: StoreProfileFormProps) {
   const [values, setValues] = useState<StoreProfileFormState>(() => toFormState(initialValues));
+  const [logoUploadError, setLogoUploadError] = useState<string | null>(null);
+  const [logoUploading, setLogoUploading] = useState(false);
+  const [complianceUploadError, setComplianceUploadError] = useState<string | null>(null);
+  const [complianceUploading, setComplianceUploading] = useState(false);
 
   useEffect(() => {
     setValues(toFormState(initialValues));
@@ -348,6 +468,8 @@ export function StoreProfileForm({
   const sortedPosTypes = useMemo(() => {
     return [...posTypes].sort((a, b) => a.name.localeCompare(b.name));
   }, [posTypes]);
+  const allowedUserCount = Number(values.allowed_user_count || 1);
+  const userLimitReached = values.store_users.length >= allowedUserCount;
 
   function setField<K extends keyof StoreProfileFormState>(
     field: K,
@@ -372,13 +494,214 @@ export function StoreProfileForm({
     }));
   }
 
+  function safeFileName(name: string) {
+    return name.trim().toLowerCase().replace(/[^a-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '') || 'upload';
+  }
+
+  async function uploadStorageFile(
+    bucket: string,
+    file: File,
+    pathPrefix: 'stores' | 'temp' | 'compliance'
+  ) {
+    if (!file) {
+      throw new Error('Choose a file to upload.');
+    }
+
+    if (!file.type.startsWith('image/') && bucket === 'store-logos') {
+      throw new Error('Store logo upload must be an image file.');
+    }
+
+    const storePath = values.id ? `${pathPrefix}/${values.id}` : 'temp';
+    const path = `${storePath}/${Date.now()}-${safeFileName(file.name)}`;
+    const { error: uploadError } = await supabase.storage.from(bucket).upload(path, file);
+
+    if (uploadError) {
+      throw new Error(uploadError.message);
+    }
+
+    return path;
+  }
+
+  async function handleLogoUpload(file: File | null | undefined) {
+    setLogoUploadError(null);
+
+    try {
+      if (!file) throw new Error('Choose an image to upload.');
+
+      setLogoUploading(true);
+      const path = await uploadStorageFile('store-logos', file, 'stores');
+      const { data } = supabase.storage.from('store-logos').getPublicUrl(path);
+
+      if (!data.publicUrl) {
+        throw new Error('Upload completed, but no public URL was returned.');
+      }
+
+      setField('logo_url', data.publicUrl);
+    } catch (error) {
+      setLogoUploadError(error instanceof Error ? error.message : 'Unable to upload logo.');
+    } finally {
+      setLogoUploading(false);
+    }
+  }
+
+  async function handleComplianceUpload(file: File | null | undefined) {
+    setComplianceUploadError(null);
+
+    try {
+      if (!file) throw new Error('Choose a compliance document to upload.');
+
+      setComplianceUploading(true);
+      const path = await uploadStorageFile('store-compliance-files', file, 'compliance');
+      setField('compliance_file_urls', [...values.compliance_file_urls, path]);
+    } catch (error) {
+      setComplianceUploadError(
+        error instanceof Error ? error.message : 'Unable to upload compliance document.'
+      );
+    } finally {
+      setComplianceUploading(false);
+    }
+  }
+
+  function updateStoreUser(index: number, update: Partial<StoreUserProfile>) {
+    setField(
+      'store_users',
+      values.store_users.map((user, userIndex) =>
+        userIndex === index ? { ...user, ...update } : user
+      )
+    );
+  }
+
+  function addStoreUser() {
+    const allowedUserCount = Number(values.allowed_user_count || 1);
+
+    if (values.store_users.length >= allowedUserCount) {
+      return;
+    }
+
+    setField('store_users', [
+      ...values.store_users,
+      {
+        id: crypto.randomUUID(),
+        name: '',
+        email: '',
+        phone: '',
+        role: 'Employee',
+        customRole: '',
+        isActive: true,
+      },
+    ]);
+  }
+
+  function removeStoreUser(index: number) {
+    if (!window.confirm('Remove this store user?')) return;
+
+    setField(
+      'store_users',
+      values.store_users.filter((_, userIndex) => userIndex !== index)
+    );
+  }
+
+  function updatePrimaryContact(index: number, update: Partial<PrimaryContact>) {
+    setField(
+      'primary_contacts',
+      values.primary_contacts.map((contact, contactIndex) =>
+        contactIndex === index ? { ...contact, ...update } : contact
+      )
+    );
+  }
+
+  function addPrimaryContact() {
+    setField('primary_contacts', [
+      ...values.primary_contacts,
+      {
+        id: crypto.randomUUID(),
+        name: '',
+        email: '',
+        phone: '',
+        role: 'Owner',
+        customRole: '',
+      },
+    ]);
+  }
+
+  function removePrimaryContact(index: number) {
+    if (!window.confirm('Remove this primary contact?')) return;
+
+    setField(
+      'primary_contacts',
+      values.primary_contacts.filter((_, contactIndex) => contactIndex !== index)
+    );
+  }
+
+  function updateCustomField(
+    fieldName: 'custom_fields' | 'compliance_fields' | 'billing_custom_fields',
+    index: number,
+    update: Partial<CustomField>
+  ) {
+    setField(
+      fieldName,
+      values[fieldName].map((field, fieldIndex) =>
+        fieldIndex === index ? { ...field, ...update } : field
+      )
+    );
+  }
+
+  function addCustomField(fieldName: 'custom_fields' | 'compliance_fields' | 'billing_custom_fields') {
+    setField(fieldName, [
+      ...values[fieldName],
+      { id: crypto.randomUUID(), label: '', value: '' },
+    ]);
+  }
+
+  function removeCustomField(
+    fieldName: 'custom_fields' | 'compliance_fields' | 'billing_custom_fields',
+    index: number
+  ) {
+    if (!window.confirm('Delete this custom field?')) return;
+
+    setField(
+      fieldName,
+      values[fieldName].filter((_, fieldIndex) => fieldIndex !== index)
+    );
+  }
+
+  function cleanCustomFields(fields: CustomField[]) {
+    return fields
+      .map((field) => ({
+        ...field,
+        id: field.id || crypto.randomUUID(),
+        label: field.label.trim(),
+        value: field.value.trim(),
+      }))
+      .filter((field) => field.label || field.value);
+  }
+
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+
+    const firstOwnerContact = values.primary_contacts.find(
+      (contact) => (contact.role || '').toLowerCase() === 'owner' && contact.email
+    );
+    const primaryOwnerEmail = emptyToNull(values.primary_owner_email) || emptyToNull(firstOwnerContact?.email);
 
     const payload: StoreProfileFormValues = {
       id: values.id,
 
       owner_id: emptyToNull(values.owner_id),
+      allowed_user_count: numericOrNull(values.allowed_user_count),
+      primary_owner_email: primaryOwnerEmail,
+      primary_contacts: values.primary_contacts
+        .map((contact) => ({
+          ...contact,
+          id: contact.id || crypto.randomUUID(),
+          name: emptyToNull(contact.name),
+          email: emptyToNull(contact.email),
+          phone: emptyToNull(contact.phone),
+          role: emptyToNull(contact.role) || 'Owner',
+          customRole: emptyToNull(contact.customRole),
+        }))
+        .filter((contact) => contact.name || contact.email || contact.phone),
+      custom_fields: cleanCustomFields(values.custom_fields),
 
       store_name: values.store_name.trim(),
       store_code: emptyToNull(values.store_code),
@@ -417,6 +740,18 @@ export function StoreProfileForm({
       ebt_accepted: values.ebt_accepted,
 
       operating_hours: values.operating_hours,
+      store_users: values.store_users
+        .map((user) => ({
+          ...user,
+          id: user.id || crypto.randomUUID(),
+          name: emptyToNull(user.name),
+          email: emptyToNull(user.email),
+          phone: emptyToNull(user.phone),
+          role: emptyToNull(user.role) || 'Employee',
+          customRole: emptyToNull(user.customRole),
+          isActive: user.isActive !== false,
+        }))
+        .filter((user) => user.name || user.email || user.phone),
 
       plan: emptyToNull(values.plan),
       subscription_status: emptyToNull(values.subscription_status),
@@ -429,7 +764,11 @@ export function StoreProfileForm({
       trial_ends_at: dateOrNull(values.trial_ends_at),
       cancel_at: dateOrNull(values.cancel_at),
       subscription_notes: emptyToNull(values.subscription_notes),
+      billing_custom_fields: cleanCustomFields(values.billing_custom_fields),
 
+      compliance_fields: cleanCustomFields(values.compliance_fields),
+      compliance_notes: emptyToNull(values.compliance_notes),
+      compliance_file_urls: values.compliance_file_urls,
       notes: emptyToNull(values.notes),
     };
 
@@ -469,12 +808,33 @@ export function StoreProfileForm({
 
           <div className="md:col-span-2">
             <label className={labelClass}>Store Logo / Image URL</label>
-            <input
-              className={inputClass}
-              value={values.logo_url || ''}
-              onChange={(event) => setField('logo_url', event.target.value)}
-              placeholder="https://example.com/store-logo.png"
-            />
+            <div className="flex flex-col gap-3 sm:flex-row">
+              <input
+                className={inputClass}
+                value={values.logo_url || ''}
+                onChange={(event) => setField('logo_url', event.target.value)}
+                placeholder="https://example.com/store-logo.png"
+              />
+              <label className="inline-flex cursor-pointer items-center justify-center rounded-lg border border-slate-300 px-3 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50">
+                {logoUploading ? 'Uploading...' : '📷 Upload'}
+                <input
+                  type="file"
+                  accept="image/*"
+                  className="hidden"
+                  onChange={(event) => void handleLogoUpload(event.target.files?.[0])}
+                />
+              </label>
+            </div>
+            {logoUploadError ? (
+              <p className="mt-2 text-sm text-red-600">{logoUploadError}</p>
+            ) : null}
+            {values.logo_url ? (
+              <img
+                src={values.logo_url}
+                alt="Store logo preview"
+                className="mt-3 h-16 w-16 rounded-lg border border-slate-200 object-cover"
+              />
+            ) : null}
           </div>
 
           <div>
@@ -535,88 +895,172 @@ export function StoreProfileForm({
           </div>
 
           <div>
-            <label className={labelClass}>Fuel Brand</label>
+            <div className="mb-1 flex items-center justify-between gap-3">
+              <label className="block text-sm font-medium text-slate-700">Fuel Brand</label>
+              <label className="flex items-center gap-2 text-sm text-slate-700">
+                <input
+                  type="checkbox"
+                  checked={values.has_fuel || false}
+                  onChange={(event) => setField('has_fuel', event.target.checked)}
+                />
+                Has Fuel
+              </label>
+            </div>
             <input
-              className={inputClass}
+              className={`${inputClass} disabled:bg-slate-100 disabled:text-slate-400`}
               value={values.fuel_brand || ''}
               onChange={(event) => setField('fuel_brand', event.target.value)}
               placeholder="Shell, Chevron, Valero, etc."
               disabled={!values.has_fuel}
             />
           </div>
+        </div>
+      </section>
 
-          <label className="flex items-center gap-2 rounded-lg border border-slate-200 p-3 text-sm text-slate-700">
-            <input
-              type="checkbox"
-              checked={values.has_fuel || false}
-              onChange={(event) => setField('has_fuel', event.target.checked)}
-            />
-            Has Fuel
-          </label>
+      <section className={sectionClass}>
+        <div className="mb-5 flex items-center justify-between gap-3">
+          <div>
+            <h2 className="text-lg font-semibold text-slate-900">Primary Contacts</h2>
+            <p className="text-sm text-slate-500">
+              Owners, partners, managers, accountants, and emergency contacts.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={addPrimaryContact}
+            className="rounded-lg border border-slate-300 px-3 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50"
+          >
+            Add Primary Contact
+          </button>
+        </div>
+
+        {values.primary_contacts.length === 0 ? (
+          <p className="rounded-lg border border-dashed border-slate-300 p-4 text-sm text-slate-500">
+            No primary contacts added yet.
+          </p>
+        ) : (
+          <div className="space-y-2">
+            {values.primary_contacts.map((contact, index) => (
+              <div
+                key={contact.id || index}
+                className="grid gap-2 rounded-lg border border-slate-200 p-3 md:grid-cols-[1fr_1fr_1fr_150px_auto]"
+              >
+                <input
+                  className={inputClass}
+                  value={contact.name || ''}
+                  onChange={(event) => updatePrimaryContact(index, { name: event.target.value })}
+                  placeholder="Name"
+                />
+                <input
+                  className={inputClass}
+                  type="email"
+                  value={contact.email || ''}
+                  onChange={(event) => updatePrimaryContact(index, { email: event.target.value })}
+                  placeholder="Email"
+                />
+                <input
+                  className={inputClass}
+                  value={contact.phone || ''}
+                  onChange={(event) => updatePrimaryContact(index, { phone: event.target.value })}
+                  placeholder="Phone / Contact"
+                />
+                <div className="space-y-2">
+                  <select
+                    className={inputClass}
+                    value={contact.role || 'Owner'}
+                    onChange={(event) => updatePrimaryContact(index, { role: event.target.value })}
+                  >
+                    <option value="Owner">Owner</option>
+                    <option value="Partner">Partner</option>
+                    <option value="Manager">Manager</option>
+                    <option value="Accountant">Accountant</option>
+                    <option value="Emergency Contact">Emergency Contact</option>
+                    <option value="Custom">Custom</option>
+                  </select>
+                  {contact.role === 'Custom' ? (
+                    <input
+                      className={inputClass}
+                      value={contact.customRole || ''}
+                      onChange={(event) =>
+                        updatePrimaryContact(index, { customRole: event.target.value })
+                      }
+                      placeholder="Custom label"
+                    />
+                  ) : null}
+                </div>
+                <button
+                  type="button"
+                  onClick={() => removePrimaryContact(index)}
+                  className="rounded-lg border border-red-200 px-3 py-2 text-sm font-semibold text-red-600 hover:bg-red-50"
+                >
+                  Delete
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+
+        <div className="mt-3 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
+            <p className="font-semibold">Set New Password / Send Password Reset</p>
+            <p className="mt-1">
+              Password changes are handled through the secure server-side Users & Permissions
+              reset flow. Current passwords are never shown or stored here.
+            </p>
         </div>
       </section>
 
       <section className={sectionClass}>
         <div className="mb-5">
-          <h2 className="text-lg font-semibold text-slate-900">
-            Primary Contact: Owner / Manager
-          </h2>
+          <h2 className="text-lg font-semibold text-slate-900">Allowed User Accounts</h2>
           <p className="text-sm text-slate-500">
-            Real owner, manager, or payer contact for this store.
+            Set how many team members the primary owner can add for this store.
           </p>
         </div>
 
-        <div className="grid gap-4 md:grid-cols-3">
+        <div className="grid gap-4 md:grid-cols-[1fr_220px]">
           <div>
-            <label className={labelClass}>Contact Name</label>
-            <input
-              className={inputClass}
-              value={values.manager_name || ''}
-              onChange={(event) => setField('manager_name', event.target.value)}
-            />
-          </div>
-
-          <div>
-            <label className={labelClass}>Contact Phone</label>
-            <input
-              className={inputClass}
-              value={values.manager_phone || ''}
-              onChange={(event) => setField('manager_phone', event.target.value)}
-            />
-          </div>
-
-          <div>
-            <label className={labelClass}>Contact Email</label>
+            <label className={labelClass}>Primary Owner Email</label>
             <input
               className={inputClass}
               type="email"
-              value={values.manager_email || ''}
-              onChange={(event) => setField('manager_email', event.target.value)}
+              value={values.primary_owner_email || ''}
+              onChange={(event) => setField('primary_owner_email', event.target.value)}
+              placeholder="owner@example.com"
             />
+            <p className="mt-1 text-xs text-slate-500">
+              If blank, the first Owner contact email is used when saving.
+            </p>
+          </div>
+
+          <div>
+            <label className={labelClass}>Users Allowed to Create</label>
+            <select
+              className={inputClass}
+              value={['1', '3', '5', '10'].includes(values.allowed_user_count)
+                ? values.allowed_user_count
+                : 'custom'}
+              onChange={(event) => {
+                const nextValue = event.target.value;
+                setField('allowed_user_count', nextValue === 'custom' ? values.allowed_user_count : nextValue);
+              }}
+            >
+              <option value="1">1</option>
+              <option value="3">3</option>
+              <option value="5">5</option>
+              <option value="10">10</option>
+              <option value="custom">Custom</option>
+            </select>
+            {!['1', '3', '5', '10'].includes(values.allowed_user_count) ? (
+              <input
+                className={`${inputClass} mt-2`}
+                type="number"
+                min="1"
+                value={values.allowed_user_count}
+                onChange={(event) => setField('allowed_user_count', event.target.value)}
+              />
+            ) : null}
           </div>
         </div>
-      </section>
-
-      <section className={sectionClass}>
-        <div className="mb-5">
-          <h2 className="text-lg font-semibold text-slate-900">Assigned Login Account</h2>
-          <p className="text-sm text-slate-500">
-            Links this store to an existing StorePulse login account from Supabase/Auth.
-          </p>
-        </div>
-
-        <select
-          className={inputClass}
-          value={values.owner_id || ''}
-          onChange={(event) => setField('owner_id', event.target.value)}
-        >
-          <option value="">Unassigned</option>
-          {loginAccounts.map((account) => (
-            <option key={account.id} value={account.id}>
-              {account.email || account.full_name || account.name || account.id}
-            </option>
-          ))}
-        </select>
       </section>
 
       <section className={sectionClass}>
@@ -689,25 +1133,6 @@ export function StoreProfileForm({
             />
           </div>
 
-          <div className="grid grid-cols-2 gap-3">
-            <div>
-              <label className={labelClass}>Latitude</label>
-              <input
-                className={inputClass}
-                value={values.latitude}
-                onChange={(event) => setField('latitude', event.target.value)}
-              />
-            </div>
-
-            <div>
-              <label className={labelClass}>Longitude</label>
-              <input
-                className={inputClass}
-                value={values.longitude}
-                onChange={(event) => setField('longitude', event.target.value)}
-              />
-            </div>
-          </div>
         </div>
       </section>
 
@@ -719,58 +1144,252 @@ export function StoreProfileForm({
           </p>
         </div>
 
-        <div className="space-y-3">
-          {DAY_LABELS.map((day) => {
-            const row = values.operating_hours[day.key];
+        <div className="overflow-x-auto">
+          <table className="w-full min-w-[520px] text-left text-sm">
+            <thead>
+              <tr className="border-b text-xs uppercase text-slate-500">
+                <th className="px-2 py-2">Day</th>
+                <th className="px-2 py-2">Closed</th>
+                <th className="px-2 py-2">Open Time</th>
+                <th className="px-2 py-2">Close Time</th>
+              </tr>
+            </thead>
+            <tbody>
+              {DAY_LABELS.map((day) => {
+                const row = values.operating_hours[day.key];
 
-            return (
-              <div
-                key={day.key}
-                className="grid gap-3 rounded-xl border border-slate-200 p-3 md:grid-cols-[140px_120px_1fr_1fr]"
-              >
-                <div className="flex items-center font-medium text-slate-800">{day.label}</div>
-
-                <label className="flex items-center gap-2 text-sm text-slate-700">
-                  <input
-                    type="checkbox"
-                    checked={row.closed}
-                    onChange={(event) =>
-                      setOperatingHour(day.key, { closed: event.target.checked })
-                    }
-                  />
-                  Closed
-                </label>
-
-                <div>
-                  <label className={labelClass}>Open Time</label>
-                  <input
-                    className={inputClass}
-                    type="time"
-                    value={row.open}
-                    disabled={row.closed}
-                    onChange={(event) => setOperatingHour(day.key, { open: event.target.value })}
-                  />
-                </div>
-
-                <div>
-                  <label className={labelClass}>Close Time</label>
-                  <input
-                    className={inputClass}
-                    type="time"
-                    value={row.close}
-                    disabled={row.closed}
-                    onChange={(event) => setOperatingHour(day.key, { close: event.target.value })}
-                  />
-                </div>
-              </div>
-            );
-          })}
+                return (
+                  <tr key={day.key} className="border-b last:border-0">
+                    <td className="px-2 py-2 font-medium text-slate-800">{day.label}</td>
+                    <td className="px-2 py-2">
+                      <input
+                        type="checkbox"
+                        checked={row.closed}
+                        onChange={(event) =>
+                          setOperatingHour(day.key, { closed: event.target.checked })
+                        }
+                      />
+                    </td>
+                    <td className="px-2 py-2">
+                      <input
+                        className="rounded border border-slate-300 px-2 py-1 text-sm disabled:bg-slate-100"
+                        type="time"
+                        value={row.open}
+                        disabled={row.closed}
+                        onChange={(event) =>
+                          setOperatingHour(day.key, { open: event.target.value })
+                        }
+                      />
+                    </td>
+                    <td className="px-2 py-2">
+                      <input
+                        className="rounded border border-slate-300 px-2 py-1 text-sm disabled:bg-slate-100"
+                        type="time"
+                        value={row.close}
+                        disabled={row.closed}
+                        onChange={(event) =>
+                          setOperatingHour(day.key, { close: event.target.value })
+                        }
+                      />
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
         </div>
       </section>
 
       <section className={sectionClass}>
-        <div className="mb-5">
-          <h2 className="text-lg font-semibold text-slate-900">Business & Compliance</h2>
+        <div className="mb-5 flex items-center justify-between gap-3">
+          <div>
+            <h2 className="text-lg font-semibold text-slate-900">Additional Store Details</h2>
+            <p className="text-sm text-slate-500">
+              Add custom fields like franchise ID, regional manager, insurance provider, or POS support contact.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => addCustomField('custom_fields')}
+            className="rounded-lg border border-slate-300 px-3 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50"
+          >
+            + Add Field
+          </button>
+        </div>
+
+        {values.custom_fields.length === 0 ? (
+          <p className="rounded-lg border border-dashed border-slate-300 p-4 text-sm text-slate-500">
+            No custom store fields yet.
+          </p>
+        ) : (
+          <div className="space-y-2">
+            {values.custom_fields.map((field, index) => (
+              <div key={field.id || index} className="grid gap-2 md:grid-cols-[1fr_1fr_auto]">
+                <input
+                  className={inputClass}
+                  value={field.label}
+                  onChange={(event) =>
+                    updateCustomField('custom_fields', index, { label: event.target.value })
+                  }
+                  placeholder="Field Name"
+                />
+                <input
+                  className={inputClass}
+                  value={field.value}
+                  onChange={(event) =>
+                    updateCustomField('custom_fields', index, { value: event.target.value })
+                  }
+                  placeholder="Field Value"
+                />
+                <button
+                  type="button"
+                  onClick={() => removeCustomField('custom_fields', index)}
+                  className="rounded-lg border border-red-200 px-3 py-2 text-sm font-semibold text-red-600 hover:bg-red-50"
+                >
+                  Delete
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+      </section>
+
+      <section className={sectionClass}>
+        <div className="mb-5 flex items-center justify-between gap-3">
+          <div>
+            <h2 className="text-lg font-semibold text-slate-900">Store Users</h2>
+            <p className="text-sm text-slate-500">
+              {values.store_users.length} of {allowedUserCount} users added.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={addStoreUser}
+            disabled={userLimitReached}
+            className="rounded-lg border border-slate-300 px-3 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50"
+          >
+            Add Store User
+          </button>
+        </div>
+
+        {userLimitReached ? (
+          <p className="mb-3 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
+            User limit reached. Increase allowed users to add more.
+          </p>
+        ) : null}
+
+        {values.store_users.length === 0 ? (
+          <p className="rounded-lg border border-dashed border-slate-300 p-4 text-sm text-slate-500">
+            No store users added yet.
+          </p>
+        ) : (
+          <div className="overflow-x-auto rounded-lg border border-slate-200">
+            <table className="w-full min-w-[900px] text-left text-sm">
+              <thead className="bg-slate-50 text-xs uppercase text-slate-500">
+                <tr>
+                  <th className="px-3 py-2">Name</th>
+                  <th className="px-3 py-2">Email</th>
+                  <th className="px-3 py-2">Phone</th>
+                  <th className="px-3 py-2">Role</th>
+                  <th className="px-3 py-2">Status</th>
+                  <th className="px-3 py-2 text-right">Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {values.store_users.map((user, index) => (
+                  <tr key={user.id || index} className="border-t align-top">
+                    <td className="px-3 py-2">
+                      <input
+                        className={inputClass}
+                        value={user.name || ''}
+                        onChange={(event) => updateStoreUser(index, { name: event.target.value })}
+                        placeholder="Name"
+                      />
+                    </td>
+                    <td className="px-3 py-2">
+                      <input
+                        className={inputClass}
+                        type="email"
+                        value={user.email || ''}
+                        onChange={(event) => updateStoreUser(index, { email: event.target.value })}
+                        placeholder="Email"
+                      />
+                    </td>
+                    <td className="px-3 py-2">
+                      <input
+                        className={inputClass}
+                        value={user.phone || ''}
+                        onChange={(event) => updateStoreUser(index, { phone: event.target.value })}
+                        placeholder="Phone"
+                      />
+                    </td>
+                    <td className="px-3 py-2">
+                      <select
+                        className={inputClass}
+                        value={user.role || 'Employee'}
+                        onChange={(event) => updateStoreUser(index, { role: event.target.value })}
+                      >
+                        <option value="Partner">Partner</option>
+                        <option value="Cashier">Cashier</option>
+                        <option value="Employee">Employee</option>
+                        <option value="Manager">Manager</option>
+                        <option value="Custom">Custom</option>
+                      </select>
+                      {user.role === 'Custom' ? (
+                        <input
+                          className={`${inputClass} mt-2`}
+                          value={user.customRole || ''}
+                          onChange={(event) =>
+                            updateStoreUser(index, { customRole: event.target.value })
+                          }
+                          placeholder="Custom role"
+                        />
+                      ) : null}
+                    </td>
+                    <td className="px-3 py-2">
+                      <label className="flex items-center gap-2 text-sm text-slate-700">
+                        <input
+                          type="checkbox"
+                          checked={user.isActive !== false}
+                          onChange={(event) =>
+                            updateStoreUser(index, { isActive: event.target.checked })
+                          }
+                        />
+                        {user.isActive === false ? 'Inactive' : 'Active'}
+                      </label>
+                    </td>
+                    <td className="px-3 py-2 text-right">
+                      <button
+                        type="button"
+                        onClick={() => removeStoreUser(index)}
+                        className="rounded-lg border border-red-200 px-3 py-2 text-sm font-semibold text-red-600 hover:bg-red-50"
+                      >
+                        Delete
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </section>
+
+      <section className={sectionClass}>
+        <div className="mb-5 flex items-center justify-between gap-3">
+          <div>
+            <h2 className="text-lg font-semibold text-slate-900">Business & Compliance</h2>
+            <p className="text-sm text-slate-500">
+              Core compliance fields plus flexible fields for permits, licenses, and documents.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => addCustomField('compliance_fields')}
+            className="rounded-lg border border-slate-300 px-3 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50"
+          >
+            Add Compliance Field
+          </button>
         </div>
 
         <div className="grid gap-4 md:grid-cols-2">
@@ -854,17 +1473,118 @@ export function StoreProfileForm({
             </label>
           ))}
         </div>
+
+        {values.compliance_fields.length > 0 ? (
+          <div className="mt-4 space-y-2">
+            {values.compliance_fields.map((field, index) => (
+              <div key={field.id || index} className="grid gap-2 md:grid-cols-[1fr_1fr_auto]">
+                <input
+                  className={inputClass}
+                  value={field.label}
+                  onChange={(event) =>
+                    updateCustomField('compliance_fields', index, { label: event.target.value })
+                  }
+                  placeholder="Field Name"
+                />
+                <input
+                  className={inputClass}
+                  value={field.value}
+                  onChange={(event) =>
+                    updateCustomField('compliance_fields', index, { value: event.target.value })
+                  }
+                  placeholder="Field Value"
+                />
+                <button
+                  type="button"
+                  onClick={() => removeCustomField('compliance_fields', index)}
+                  className="rounded-lg border border-red-200 px-3 py-2 text-sm font-semibold text-red-600 hover:bg-red-50"
+                >
+                  Delete
+                </button>
+              </div>
+            ))}
+          </div>
+        ) : null}
+
+        <div className="mt-4">
+          <label className={labelClass}>Compliance Notes</label>
+          <textarea
+            className={inputClass}
+            rows={3}
+            value={values.compliance_notes || ''}
+            onChange={(event) => setField('compliance_notes', event.target.value)}
+            placeholder="Permits, licenses, certificates, tax documents, or compliance notes."
+          />
+        </div>
+
+        <div className="mt-4 rounded-lg border border-slate-200 p-3">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <p className="text-sm font-semibold text-slate-900">Compliance Documents</p>
+              <p className="text-xs text-slate-500">
+                Upload permits, licenses, certificates, or tax documents.
+              </p>
+            </div>
+            <label className="inline-flex cursor-pointer items-center justify-center rounded-lg border border-slate-300 px-3 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50">
+              {complianceUploading ? 'Uploading...' : 'Upload File'}
+              <input
+                type="file"
+                className="hidden"
+                onChange={(event) => void handleComplianceUpload(event.target.files?.[0])}
+              />
+            </label>
+          </div>
+          {complianceUploadError ? (
+            <p className="mt-2 text-sm text-red-600">{complianceUploadError}</p>
+          ) : null}
+          {values.compliance_file_urls.length > 0 ? (
+            <ul className="mt-3 space-y-2 text-sm">
+              {values.compliance_file_urls.map((url) => (
+                <li key={url} className="flex items-center justify-between gap-3 rounded border p-2">
+                  {url.startsWith('http') ? (
+                    <a className="truncate text-blue-700 hover:underline" href={url} target="_blank">
+                      {url}
+                    </a>
+                  ) : (
+                    <span className="truncate text-slate-600">{url}</span>
+                  )}
+                  <button
+                    type="button"
+                    className="text-xs font-semibold text-red-600"
+                    onClick={() =>
+                      setField(
+                        'compliance_file_urls',
+                        values.compliance_file_urls.filter((item) => item !== url)
+                      )
+                    }
+                  >
+                    Remove
+                  </button>
+                </li>
+              ))}
+            </ul>
+          ) : null}
+        </div>
       </section>
 
       <section className={sectionClass}>
-        <div className="mb-5">
-          <h2 className="text-lg font-semibold text-slate-900">Billing & Subscription</h2>
-          <p className="text-sm text-slate-500">
-            StorePulse billing metadata for superadmin support and account management.
-          </p>
+        <div className="mb-4 flex items-center justify-between gap-3">
+          <div>
+            <h2 className="text-lg font-semibold text-slate-900">Billing & Subscription</h2>
+            <p className="text-sm text-slate-500">
+              Compact superadmin-only billing metadata.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => addCustomField('billing_custom_fields')}
+            className="rounded-lg border border-slate-300 px-3 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50"
+          >
+            Add Billing Field
+          </button>
         </div>
 
-        <div className="grid gap-4 md:grid-cols-3">
+        <div className="grid gap-3 md:grid-cols-3">
           <div>
             <label className={labelClass}>Plan</label>
             <select
@@ -992,6 +1712,38 @@ export function StoreProfileForm({
             />
           </div>
         </div>
+
+        {values.billing_custom_fields.length > 0 ? (
+          <div className="mt-4 space-y-2">
+            {values.billing_custom_fields.map((field, index) => (
+              <div key={field.id || index} className="grid gap-2 md:grid-cols-[1fr_1fr_auto]">
+                <input
+                  className={inputClass}
+                  value={field.label}
+                  onChange={(event) =>
+                    updateCustomField('billing_custom_fields', index, { label: event.target.value })
+                  }
+                  placeholder="Field label"
+                />
+                <input
+                  className={inputClass}
+                  value={field.value}
+                  onChange={(event) =>
+                    updateCustomField('billing_custom_fields', index, { value: event.target.value })
+                  }
+                  placeholder="Value"
+                />
+                <button
+                  type="button"
+                  onClick={() => removeCustomField('billing_custom_fields', index)}
+                  className="rounded-lg border border-red-200 px-3 py-2 text-sm font-semibold text-red-600 hover:bg-red-50"
+                >
+                  Delete
+                </button>
+              </div>
+            ))}
+          </div>
+        ) : null}
       </section>
 
       <section className={sectionClass}>

@@ -1,242 +1,221 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Loader2, Plus, RefreshCcw, Store } from 'lucide-react';
-import { AdminPageHeader, AdminShell } from '@/components/layout/admin-shell';
-import { Button } from '@/components/ui/button';
-import { Card } from '@/components/ui/card';
+import { useEffect, useState } from 'react';
+import {
+  AlertCircle,
+  CheckCircle2,
+  Loader2,
+  Plus,
+  RefreshCcw,
+  Pencil,
+  Trash2,
+  Store,
+  X,
+  ToggleLeft,
+  ToggleRight,
+} from 'lucide-react';
 import { supabase } from '@/lib/supabase';
-import StoreProfileForm, {
-  LoginAccountOption,
-  PosTypeOption,
-  StoreProfileFormValues,
+import { AdminShell, AdminPageHeader } from '@/components/layout/admin-shell';
+import { Card } from '@/components/ui/card';
+import { Button } from '@/components/ui/button';
+import {
+  StoreProfileForm,
+  type StoreProfileFormValues,
 } from '@/components/stores/store-profile-form';
 
+const POS_TYPES = [
+  { name: 'Verifone', pos_key: 'verifone' },
+  { name: 'Gilbarco', pos_key: 'gilbarco' },
+  { name: 'Clover', pos_key: 'clover' },
+  { name: 'NCR', pos_key: 'ncr' },
+  { name: 'Square', pos_key: 'square' },
+  { name: 'Ruby', pos_key: 'ruby' },
+  { name: 'Other', pos_key: 'other' },
+];
+
 type StoreRow = StoreProfileFormValues & {
-  id: string;
   created_at?: string;
-  updated_at?: string;
+  is_active?: boolean;
 };
 
-async function getAuthHeaders() {
-  const {
-    data: { session },
-  } = await supabase.auth.getSession();
+async function adminFetch<T>(url: string, options?: RequestInit): Promise<T> {
+  const { data } = await supabase.auth.getSession();
+  const token = data.session?.access_token;
 
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-  };
-
-  if (session?.access_token) {
-    headers.Authorization = `Bearer ${session.access_token}`;
+  if (!token) {
+    throw new Error('Please log in again.');
   }
 
-  return headers;
-}
+  const response = await fetch(url, {
+    ...options,
+    headers: {
+      ...options?.headers,
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json',
+    },
+  });
 
-function normalizeStores(data: unknown): StoreRow[] {
-  if (Array.isArray(data)) return data as StoreRow[];
+  const json = await response.json().catch(() => ({}));
 
-  if (data && typeof data === 'object') {
-    const objectData = data as {
-      stores?: StoreRow[];
-      data?: StoreRow[];
-      results?: StoreRow[];
-    };
-
-    return objectData.stores || objectData.data || objectData.results || [];
+  if (!response.ok) {
+    throw new Error(json.error || 'Request failed.');
   }
 
-  return [];
-}
-
-function normalizeAccounts(data: unknown): LoginAccountOption[] {
-  if (!data || typeof data !== 'object') return [];
-
-  const objectData = data as {
-    users?: LoginAccountOption[];
-    accounts?: LoginAccountOption[];
-    loginAccounts?: LoginAccountOption[];
-    owners?: LoginAccountOption[];
-  };
-
-  return (
-    objectData.users ||
-    objectData.accounts ||
-    objectData.loginAccounts ||
-    objectData.owners ||
-    []
-  );
-}
-
-function normalizePosTypes(data: unknown): PosTypeOption[] {
-  if (Array.isArray(data)) return data as PosTypeOption[];
-
-  if (data && typeof data === 'object') {
-    const objectData = data as {
-      posTypes?: PosTypeOption[];
-      pos_types?: PosTypeOption[];
-      data?: PosTypeOption[];
-    };
-
-    return objectData.posTypes || objectData.pos_types || objectData.data || [];
-  }
-
-  return [];
+  return json as T;
 }
 
 export default function AdminStoresPage() {
   const [stores, setStores] = useState<StoreRow[]>([]);
-  const [loginAccounts, setLoginAccounts] = useState<LoginAccountOption[]>([]);
-  const [posTypes, setPosTypes] = useState<PosTypeOption[]>([]);
-  const [selectedStore, setSelectedStore] = useState<StoreRow | null>(null);
-  const [isFormOpen, setIsFormOpen] = useState(false);
-  const [isLoading, setIsLoading] = useState(true);
-  const [isSaving, setIsSaving] = useState(false);
-  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [success, setSuccess] = useState<string | null>(null);
+  const [drawerOpen, setDrawerOpen] = useState(false);
+  const [drawerMode, setDrawerMode] = useState<'create' | 'edit'>('create');
+  const [editingStore, setEditingStore] = useState<StoreRow | null>(null);
+  const [submitting, setSubmitting] = useState(false);
 
-  const sortedStores = useMemo(() => {
-    return [...stores].sort((a, b) => {
-      return (a.store_name || '').localeCompare(b.store_name || '');
-    });
-  }, [stores]);
-
-  const loadStores = useCallback(async () => {
-    const headers = await getAuthHeaders();
-
-    const response = await fetch('/api/admin/stores', {
-      method: 'GET',
-      headers,
-      cache: 'no-store',
-    });
-
-    const data = await response.json().catch(() => null);
-
-    if (!response.ok) {
-      throw new Error(data?.error || 'Unable to load stores.');
-    }
-
-    setStores(normalizeStores(data));
-    setLoginAccounts(normalizeAccounts(data));
-  }, []);
-
-  const loadPosTypes = useCallback(async () => {
-    const response = await fetch('/api/admin/pos-types', {
-      method: 'GET',
-      cache: 'no-store',
-    });
-
-    const data = await response.json().catch(() => null);
-
-    if (!response.ok) {
-      throw new Error(data?.error || 'Unable to load POS types.');
-    }
-
-    setPosTypes(normalizePosTypes(data));
-  }, []);
-
-  const loadPageData = useCallback(async () => {
-    setIsLoading(true);
-    setErrorMessage(null);
+  const load = async () => {
+    setLoading(true);
+    setError(null);
 
     try {
-      await Promise.all([loadStores(), loadPosTypes()]);
-    } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : 'Unable to load admin stores.');
+      const storesData = await adminFetch<{ stores: StoreRow[] }>('/api/admin/stores');
+
+      setStores(storesData.stores || []);
+    } catch (loadError) {
+      setError(loadError instanceof Error ? loadError.message : 'Failed to load stores.');
     } finally {
-      setIsLoading(false);
+      setLoading(false);
     }
-  }, [loadPosTypes, loadStores]);
+  };
 
   useEffect(() => {
-    void loadPageData();
-  }, [loadPageData]);
+    void load();
+  }, []);
 
-  function handleCreateStore() {
-    setSelectedStore(null);
-    setIsFormOpen(true);
-    setErrorMessage(null);
-  }
+  const showSuccess = (message: string) => {
+    setSuccess(message);
+    window.setTimeout(() => setSuccess(null), 3000);
+  };
 
-  function handleEditStore(store: StoreRow) {
-    setSelectedStore(store);
-    setIsFormOpen(true);
-    setErrorMessage(null);
-  }
+  const openCreate = () => {
+    setEditingStore(null);
+    setDrawerMode('create');
+    setDrawerOpen(true);
+    setError(null);
+  };
 
-  async function handleSaveStore(values: StoreProfileFormValues) {
-    setIsSaving(true);
-    setErrorMessage(null);
+  const openEdit = (store: StoreRow) => {
+    setEditingStore(store);
+    setDrawerMode('edit');
+    setDrawerOpen(true);
+    setError(null);
+  };
+
+  const closeDrawer = () => {
+    setDrawerOpen(false);
+    setEditingStore(null);
+    setError(null);
+  };
+
+  const handleCreate = async (values: StoreProfileFormValues) => {
+    setSubmitting(true);
+    setError(null);
 
     try {
-      const headers = await getAuthHeaders();
-      const method = values.id ? 'PATCH' : 'POST';
-
-      const response = await fetch('/api/admin/stores', {
-        method,
-        headers,
+      await adminFetch('/api/admin/stores', {
+        method: 'POST',
         body: JSON.stringify(values),
       });
-
-      const data = await response.json().catch(() => null);
-
-      if (!response.ok) {
-        throw new Error(data?.error || 'Unable to save store.');
-      }
-
-      await loadStores();
-      setSelectedStore(null);
-      setIsFormOpen(false);
-    } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : 'Unable to save store.');
+      showSuccess('Store created successfully.');
+      closeDrawer();
+      await load();
+    } catch (createError) {
+      setError(createError instanceof Error ? createError.message : 'Failed to create store.');
     } finally {
-      setIsSaving(false);
+      setSubmitting(false);
     }
-  }
+  };
 
-  async function handleAddPosType() {
-    const name = window.prompt('Enter POS type name, for example Verifone Commander:');
+  const handleUpdate = async (values: StoreProfileFormValues) => {
+    if (!editingStore?.id) return;
 
-    if (!name || !name.trim()) {
-      return;
-    }
-
-    const description = window.prompt('Optional description for this POS type:') || '';
-
-    setErrorMessage(null);
+    setSubmitting(true);
+    setError(null);
 
     try {
-      const headers = await getAuthHeaders();
-
-      const response = await fetch('/api/admin/pos-types', {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({
-          name: name.trim(),
-          description: description.trim() || null,
-        }),
+      await adminFetch(`/api/admin/stores/${editingStore.id}`, {
+        method: 'PATCH',
+        body: JSON.stringify(values),
       });
-
-      const data = await response.json().catch(() => null);
-
-      if (!response.ok) {
-        throw new Error(data?.error || 'Unable to create POS type.');
-      }
-
-      await loadPosTypes();
-    } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : 'Unable to create POS type.');
+      showSuccess('Store updated successfully.');
+      closeDrawer();
+      await load();
+    } catch (updateError) {
+      setError(updateError instanceof Error ? updateError.message : 'Failed to update store.');
+    } finally {
+      setSubmitting(false);
     }
-  }
+  };
+
+  const handleDelete = async (storeId: string, storeName: string) => {
+    const confirmed = window.confirm(`Delete "${storeName}"? This cannot be undone.`);
+
+    if (!confirmed) return;
+
+    setError(null);
+
+    try {
+      await adminFetch(`/api/admin/stores/${storeId}`, { method: 'DELETE' });
+      showSuccess('Store deleted.');
+      await load();
+    } catch (deleteError) {
+      setError(deleteError instanceof Error ? deleteError.message : 'Failed to delete store.');
+    }
+  };
+
+  const handleToggleActive = async (store: StoreRow) => {
+    if (!store.id) return;
+
+    const nextIsActive = store.is_active === false;
+    const confirmed = window.confirm(
+      nextIsActive
+        ? `Activate "${store.store_name}"?`
+        : `Deactivate "${store.store_name}"?`
+    );
+
+    if (!confirmed) return;
+
+    setError(null);
+
+    try {
+      await adminFetch(`/api/admin/stores/${store.id}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ is_active: nextIsActive }),
+      });
+      showSuccess(nextIsActive ? 'Store activated.' : 'Store deactivated.');
+      await load();
+    } catch (toggleError) {
+      setError(toggleError instanceof Error ? toggleError.message : 'Failed to update status.');
+    }
+  };
+
+  const getPrimaryOwnerEmail = (store: StoreRow) => {
+    const ownerContact = store.primary_contacts?.find(
+      (contact) => (contact.role || '').toLowerCase() === 'owner' && contact.email
+    );
+
+    return store.primary_owner_email || ownerContact?.email || null;
+  };
 
   return (
     <AdminShell>
       <AdminPageHeader
-        title="Admin Stores"
-        description="Manage store profiles, owner access, POS setup, billing, and support controls."
+        title="Stores"
+        description="All StorePulse stores. Create, edit, activate, and manage."
       >
-        <Button variant="outline" onClick={() => void loadPageData()} disabled={isLoading}>
-          {isLoading ? (
+        <Button variant="outline" onClick={() => void load()} disabled={loading}>
+          {loading ? (
             <Loader2 className="mr-2 h-4 w-4 animate-spin" />
           ) : (
             <RefreshCcw className="mr-2 h-4 w-4" />
@@ -244,88 +223,205 @@ export default function AdminStoresPage() {
           Refresh
         </Button>
 
-        <Button onClick={handleCreateStore}>
+        <Button onClick={openCreate}>
           <Plus className="mr-2 h-4 w-4" />
-          Add Store
+          New Store
         </Button>
       </AdminPageHeader>
 
-      <div className="space-y-6">
-        {errorMessage ? (
-          <Card className="border-destructive/30 bg-destructive/5 p-4 text-sm text-destructive">
-            {errorMessage}
+      <div className="space-y-5">
+        {error && (
+          <Card className="flex items-start gap-3 border-destructive/30 bg-destructive/5 p-4 text-destructive">
+            <AlertCircle className="mt-0.5 h-5 w-5 shrink-0" />
+            <p className="text-sm">{error}</p>
           </Card>
-        ) : null}
+        )}
 
-        {isFormOpen ? (
-          <Card className="p-4">
-            <StoreProfileForm
-              initialValues={selectedStore}
-              loginAccounts={loginAccounts}
-              posTypes={posTypes}
-              isSubmitting={isSaving}
-              submitLabel={selectedStore ? 'Update Store' : 'Create Store'}
-              onSubmit={handleSaveStore}
-              onCancel={() => {
-                setSelectedStore(null);
-                setIsFormOpen(false);
-              }}
-              onAddPosType={handleAddPosType}
-            />
+        {success && (
+          <Card className="flex items-start gap-3 border-emerald-500/30 bg-emerald-500/5 p-4 text-emerald-700">
+            <CheckCircle2 className="mt-0.5 h-5 w-5 shrink-0" />
+            <p className="text-sm font-medium">{success}</p>
           </Card>
-        ) : null}
+        )}
 
-        <Card className="overflow-hidden">
-          <div className="border-b px-5 py-4">
-            <h2 className="text-lg font-semibold text-foreground">Stores</h2>
-            <p className="text-sm text-muted-foreground">
-              Select a store to edit the full Store Profile form.
-            </p>
-          </div>
-
-          {isLoading ? (
-            <div className="flex items-center gap-2 p-5 text-sm text-muted-foreground">
+        <Card className="p-6">
+          {loading ? (
+            <div className="flex items-center gap-2 text-sm text-muted-foreground">
               <Loader2 className="h-4 w-4 animate-spin" />
               Loading stores...
             </div>
-          ) : sortedStores.length === 0 ? (
-            <div className="p-8 text-center">
-              <Store className="mx-auto h-10 w-10 text-muted-foreground" />
-              <h3 className="mt-3 text-base font-semibold text-foreground">No stores yet</h3>
-              <p className="mt-1 text-sm text-muted-foreground">
-                Create your first store profile from the superadmin panel.
-              </p>
+          ) : stores.length === 0 ? (
+            <div className="py-12 text-center">
+              <Store className="mx-auto mb-3 h-10 w-10 text-muted-foreground/40" />
+              <p className="font-medium text-muted-foreground">No stores yet</p>
+              <Button className="mt-4" onClick={openCreate}>
+                <Plus className="mr-2 h-4 w-4" />
+                Create First Store
+              </Button>
             </div>
           ) : (
-            <div className="divide-y">
-              {sortedStores.map((store) => (
-                <button
-                  key={store.id}
-                  type="button"
-                  onClick={() => handleEditStore(store)}
-                  className="flex w-full items-start justify-between gap-4 px-5 py-4 text-left hover:bg-secondary/50"
-                >
-                  <div>
-                    <div className="font-semibold text-foreground">{store.store_name}</div>
-                    <div className="mt-1 text-sm text-muted-foreground">
-                      {[store.address_line1, store.city, store.state, store.zip_code]
-                        .filter(Boolean)
-                        .join(', ') || 'No address saved'}
-                    </div>
-                    <div className="mt-1 text-xs text-muted-foreground">
-                      POS: {store.pos_type || 'Not selected'} - Plan: {store.plan || 'Not set'}
-                    </div>
-                  </div>
+            <div className="overflow-x-auto">
+              <table className="w-full min-w-[980px] text-left text-sm">
+                <thead>
+                  <tr className="border-b text-xs uppercase text-muted-foreground">
+                    <th className="px-3 py-2">Store</th>
+                    <th className="px-3 py-2">Location</th>
+                    <th className="px-3 py-2">Owner</th>
+                    <th className="px-3 py-2">Plan</th>
+                    <th className="px-3 py-2">Status</th>
+                    <th className="px-3 py-2 text-right">Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {stores.map((store) => {
+                    const active = store.is_active !== false;
+                    const primaryOwnerEmail = getPrimaryOwnerEmail(store);
 
-                  <span className="rounded-full border px-3 py-1 text-xs font-medium text-muted-foreground">
-                    Edit
-                  </span>
-                </button>
-              ))}
+                    return (
+                      <tr key={store.id} className="border-b last:border-0">
+                        <td className="px-3 py-3">
+                          <div className="flex items-center gap-3">
+                            {store.logo_url ? (
+                              <img
+                                src={store.logo_url}
+                                alt=""
+                                className="h-10 w-10 rounded-lg border object-cover"
+                              />
+                            ) : (
+                              <div className="flex h-10 w-10 items-center justify-center rounded-lg border bg-muted">
+                                <Store className="h-5 w-5 text-muted-foreground" />
+                              </div>
+                            )}
+                            <div>
+                              <p className="font-medium text-foreground">{store.store_name}</p>
+                              {store.store_code && (
+                                <p className="text-xs text-muted-foreground">{store.store_code}</p>
+                              )}
+                              <p className="text-xs text-muted-foreground">
+                                {store.store_type || 'Convenience Store'}
+                              </p>
+                            </div>
+                          </div>
+                        </td>
+                        <td className="px-3 py-3 text-muted-foreground">
+                          {[store.city, store.state, store.zip_code].filter(Boolean).join(', ') ||
+                            '-'}
+                        </td>
+                        <td className="px-3 py-3">
+                          {primaryOwnerEmail ? (
+                            <>
+                              <p className="text-sm text-foreground">
+                                {primaryOwnerEmail}
+                              </p>
+                              <p className="text-xs text-muted-foreground">Primary owner</p>
+                            </>
+                          ) : (
+                            <span className="rounded-full bg-amber-100 px-2 py-0.5 text-xs text-amber-700">
+                              Unassigned
+                            </span>
+                          )}
+                        </td>
+                        <td className="px-3 py-3 capitalize text-muted-foreground">
+                          {store.plan || 'starter'}
+                        </td>
+                        <td className="px-3 py-3">
+                          {active ? (
+                            <span className="rounded-full bg-emerald-500/10 px-2 py-0.5 text-xs font-medium text-emerald-700">
+                              Active
+                            </span>
+                          ) : (
+                            <span className="rounded-full bg-muted px-2 py-0.5 text-xs font-medium text-muted-foreground">
+                              Inactive
+                            </span>
+                          )}
+                        </td>
+                        <td className="px-3 py-3">
+                          <div className="flex items-center justify-end gap-2">
+                            <Button size="sm" variant="outline" onClick={() => openEdit(store)}>
+                              <Pencil className="mr-1 h-3.5 w-3.5" />
+                              Edit
+                            </Button>
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              onClick={() => void handleToggleActive(store)}
+                              title={active ? 'Deactivate store' : 'Activate store'}
+                            >
+                              {active ? (
+                                <ToggleLeft className="mr-1 h-3.5 w-3.5" />
+                              ) : (
+                                <ToggleRight className="mr-1 h-3.5 w-3.5" />
+                              )}
+                              {active ? 'Deactivate' : 'Activate'}
+                            </Button>
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              className="text-destructive hover:bg-destructive/10"
+                              onClick={() => void handleDelete(store.id!, store.store_name)}
+                            >
+                              <Trash2 className="h-3.5 w-3.5" />
+                            </Button>
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
             </div>
           )}
         </Card>
       </div>
+
+      {drawerOpen ? (
+        <div className="fixed inset-0 z-50 flex">
+          <button
+            type="button"
+            aria-label="Close store drawer"
+            className="flex-1 bg-black/50"
+            onClick={closeDrawer}
+          />
+
+          <aside className="flex h-full w-full max-w-2xl flex-col bg-background shadow-xl">
+            <div className="flex items-start justify-between gap-4 border-b p-5">
+              <div>
+                <h2 className="text-xl font-semibold text-foreground">
+                  {drawerMode === 'create'
+                    ? 'New Store'
+                    : `Edit: ${editingStore?.store_name || 'Store'}`}
+                </h2>
+                <p className="mt-1 text-sm text-muted-foreground">
+                  {drawerMode === 'create'
+                    ? 'Create a StorePulse profile and assign owner access.'
+                    : 'Update store details, users, compliance, and billing metadata.'}
+                </p>
+              </div>
+
+              <Button variant="ghost" size="icon" onClick={closeDrawer} aria-label="Close">
+                <X className="h-5 w-5" />
+              </Button>
+            </div>
+
+            <div className="flex-1 overflow-y-auto p-5">
+              {error ? (
+                <div className="mb-4 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+                  {error}
+                </div>
+              ) : null}
+
+              <StoreProfileForm
+                initialValues={drawerMode === 'edit' ? editingStore : null}
+                posTypes={POS_TYPES}
+                isSubmitting={submitting}
+                submitLabel={drawerMode === 'create' ? 'Create Store' : 'Save Changes'}
+                onSubmit={drawerMode === 'create' ? handleCreate : handleUpdate}
+                onCancel={closeDrawer}
+              />
+            </div>
+          </aside>
+        </div>
+      ) : null}
     </AdminShell>
   );
 }

@@ -14,6 +14,21 @@ type StoreRow = {
   store_name?: string | null;
 };
 
+type AuditLogRow = {
+  id: string;
+  action: string;
+  actor_user_id: string | null;
+  target_user_id: string | null;
+  target_store_id: string | null;
+  target_table: string | null;
+  target_record_id: string | null;
+  old_values: Record<string, unknown> | null;
+  new_values: Record<string, unknown> | null;
+  metadata: Record<string, unknown> | null;
+  reason: string | null;
+  created_at: string;
+};
+
 const EDITABLE_FIELDS = [
   'action',
   'reason',
@@ -71,7 +86,7 @@ async function profileIdsForActorSearch(search: string) {
   return (data || []).map((profile: Pick<UserProfile, 'user_id'>) => profile.user_id);
 }
 
-async function enrichLogs(rows: any[]) {
+async function enrichLogs(rows: AuditLogRow[]) {
   const supabaseAdmin = getSupabaseAdmin();
   const userIds = Array.from(
     new Set(

@@ -61,7 +61,7 @@ async function resolveUsernameToEmail(identifier: string) {
 export default function LoginPage() {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const redirectTo = searchParams.get('redirect') || '/dashboard';
+  const redirectTo = searchParams.get('redirect') || '/app/dashboard';
 
   const [loginId, setLoginId] = useState('');
   const [password, setPassword] = useState('');
@@ -139,14 +139,37 @@ export default function LoginPage() {
 
       if (isSuperadmin === true) {
         setLoading(false);
-        router.push('/admin');
+        router.push('/superadmin');
         router.refresh();
         return;
       }
 
+      const token = data.session?.access_token;
+      if (token) {
+        const supportResponse = await fetch('/api/admin/support/me/permissions', {
+          headers: {
+            Authorization: `Bearer ${token}`,
+          },
+        });
+
+        if (supportResponse.ok) {
+          const supportData = (await supportResponse.json()) as {
+            permissions?: string[];
+            is_superadmin?: boolean;
+          };
+
+          if (supportData.is_superadmin || (supportData.permissions?.length || 0) > 0) {
+            setLoading(false);
+            router.push('/admin');
+            router.refresh();
+            return;
+          }
+        }
+      }
+
       if (profileRow?.must_change_password) {
         setLoading(false);
-        router.push('/account?forcePassword=1');
+        router.push('/app/account?forcePassword=1');
         router.refresh();
         return;
       }
@@ -165,12 +188,12 @@ export default function LoginPage() {
       }
 
       if (!storeRow?.id) {
-        router.push('/setup');
+        router.push('/app/setup');
         router.refresh();
         return;
       }
 
-      const finalRedirect = redirectTo === '/setup' ? '/dashboard' : redirectTo;
+      const finalRedirect = redirectTo === '/setup' ? '/app/dashboard' : redirectTo;
 
       router.push(finalRedirect);
       router.refresh();

@@ -19,21 +19,25 @@ import {
   Loader2,
   Settings,
   Fuel,
+  LifeBuoy,
+  User,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
 import { useAuth } from '@/lib/auth';
 
 const navItems = [
-  { href: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
-  { href: '/transactions', label: 'Live Transactions', icon: Receipt },
-  { href: '/upload', label: 'Upload POS Data', icon: Upload },
-  { href: '/products', label: 'Products', icon: Package },
-  { href: '/fuel', label: 'Fuel', icon: Fuel },
-  { href: '/store-settings', label: 'Store Settings', icon: Settings },
-  { href: '/cashier-audit', label: 'Cashier Audit', icon: ShieldAlert },
-  { href: '/ai-assistant', label: 'AI Assistant', icon: Sparkles },
-  { href: '/reports', label: 'Reports', icon: FileBarChart },
+  { href: '/app/dashboard', label: 'Dashboard', icon: LayoutDashboard },
+  { href: '/app/transactions', label: 'Live Transactions', icon: Receipt },
+  { href: '/app/upload', label: 'Upload POS Data', icon: Upload },
+  { href: '/app/products', label: 'Products', icon: Package },
+  { href: '/app/fuel', label: 'Fuel', icon: Fuel },
+  { href: '/app/store-settings', label: 'Store Settings', icon: Settings },
+  { href: '/app/cashier-audit', label: 'Cashier Audit', icon: ShieldAlert },
+  { href: '/app/ai-assistant', label: 'AI Assistant', icon: Sparkles },
+  { href: '/app/reports', label: 'Reports', icon: FileBarChart },
+  { href: '/app/support', label: 'Support', icon: LifeBuoy },
+  { href: '/app/account', label: 'Account', icon: User },
 ];
 
 function StoreCard({ onNavigate }: { onNavigate?: () => void }) {
@@ -62,7 +66,7 @@ function StoreCard({ onNavigate }: { onNavigate?: () => void }) {
   return (
     <div className="space-y-2 border-t border-sidebar-accent p-4">
       <Link
-        href="/setup"
+        href="/app/setup"
         onClick={onNavigate}
         className="flex items-center gap-3 rounded-lg bg-sidebar-accent p-3 transition-colors hover:bg-sidebar-accent/80"
       >
@@ -97,12 +101,12 @@ export function Sidebar() {
   const pathname = usePathname();
   const [mobileOpen, setMobileOpen] = useState(false);
 
-  const isActive = (href: string) => pathname === href || (href === '/products' && pathname === '/pricebook');
+  const isActive = (href: string) => pathname === href || (href === '/app/products' && pathname === '/pricebook');
 
   return (
     <>
       <div className="sticky top-0 z-40 flex items-center justify-between border-b border-sidebar-accent bg-sidebar px-4 py-3 lg:hidden">
-        <Link href="/dashboard" className="flex items-center gap-2 text-white">
+        <Link href="/app/dashboard" className="flex items-center gap-2 text-white">
           <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary">
             <Zap className="h-5 w-5" />
           </div>
@@ -124,7 +128,7 @@ export function Sidebar() {
           <div className="absolute inset-0 bg-black/60 animate-fade-in" onClick={() => setMobileOpen(false)} />
           <aside className="absolute left-0 top-0 flex h-full w-72 flex-col bg-sidebar p-4 animate-slide-up">
             <div className="flex items-center justify-between">
-              <Link href="/dashboard" className="flex items-center gap-2 text-white" onClick={() => setMobileOpen(false)}>
+              <Link href="/app/dashboard" className="flex items-center gap-2 text-white" onClick={() => setMobileOpen(false)}>
                 <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-primary">
                   <Zap className="h-5 w-5" />
                 </div>
@@ -146,7 +150,7 @@ export function Sidebar() {
 
       <aside className="fixed inset-y-0 left-0 hidden w-64 flex-col bg-sidebar text-sidebar-foreground lg:flex">
         <div className="flex items-center gap-2.5 px-6 py-6">
-          <Link href="/dashboard" className="flex items-center gap-2.5">
+          <Link href="/app/dashboard" className="flex items-center gap-2.5">
             <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-primary shadow-lg shadow-primary/30">
               <Zap className="h-5 w-5" />
             </div>

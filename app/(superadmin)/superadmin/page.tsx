@@ -17,7 +17,7 @@ import {
   Wallet,
 } from 'lucide-react';
 import { adminFetch } from '@/lib/admin-client';
-import { AdminShell, AdminPageHeader } from '@/components/layout/admin-shell';
+import { SuperadminShell, SuperadminPageHeader } from '@/components/layout/superadmin-shell';
 import { Card } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 
@@ -108,65 +108,65 @@ export default function AdminOverviewPage() {
   const overviewCards = [
     {
       label: 'Users',
-      value: formatNumber((cards as any)?.users || cards?.userProfiles || 0),
+      value: formatNumber(cards?.userProfiles || 0),
       description: 'Total Supabase Auth users',
       icon: Users,
-      href: '/admin/users',
+      href: '/superadmin/users',
     },
     {
       label: 'Stores',
       value: formatNumber(cards?.stores || 0),
       description: 'Stores created in StorePulse',
       icon: Store,
-      href: '/admin/stores',
+      href: '/superadmin/stores',
     },
     {
       label: 'Products',
       value: formatNumber(cards?.products || 0),
       description: 'Products across all stores',
       icon: Package,
-      href: '/admin/products',
+      href: '/superadmin/products',
     },
     {
       label: 'Vendors',
       value: formatNumber(cards?.vendors || 0),
       description: 'Store vendor records',
       icon: Building2,
-      href: '/admin/vendors',
+      href: '/superadmin/vendors',
     },
     {
       label: 'Transactions',
       value: formatNumber(cards?.transactions || 0),
       description: 'Uploaded transaction rows',
       icon: BarChart3,
-      href: '/admin/products',
+      href: '/superadmin/products',
     },
     {
       label: 'Uploads',
       value: formatNumber(cards?.uploadBatches || 0),
       description: 'POS and inventory upload batches',
       icon: UploadCloud,
-      href: '/admin/stores',
+      href: '/superadmin/stores',
     },
     {
       label: 'Audit Logs',
       value: formatNumber(cards?.auditLogs || 0),
       description: 'Superadmin actions recorded',
       icon: FileClock,
-      href: '/admin/audit-logs',
+      href: '/superadmin/audit-logs',
     },
     {
       label: 'Revenue',
       value: formatCurrency(cards?.revenue || 0),
       description: 'Payment tracking placeholder',
       icon: Wallet,
-      href: '/admin/payments',
+      href: '/superadmin/payments',
     },
   ];
 
   return (
-    <AdminShell>
-      <AdminPageHeader
+    <SuperadminShell>
+      <SuperadminPageHeader
         title="Superadmin Overview"
         description="Owner control center for users, stores, uploads, products, support, and platform activity."
       >
@@ -178,7 +178,7 @@ export default function AdminOverviewPage() {
           )}
           Refresh
         </Button>
-      </AdminPageHeader>
+      </SuperadminPageHeader>
 
       {error && (
         <Card className="mb-6 flex items-start gap-3 border-destructive/30 bg-destructive/5 p-4 text-destructive">
@@ -233,7 +233,7 @@ export default function AdminOverviewPage() {
                 </div>
 
                 <Button asChild variant="outline" size="sm">
-                  <Link href="/admin/stores">View Stores</Link>
+                  <Link href="/superadmin/stores">View Stores</Link>
                 </Button>
               </div>
 
@@ -285,7 +285,7 @@ export default function AdminOverviewPage() {
                 </div>
 
                 <Button asChild variant="outline" size="sm">
-                  <Link href="/admin/audit-logs">Audit Logs</Link>
+                  <Link href="/superadmin/audit-logs">Audit Logs</Link>
                 </Button>
               </div>
 
@@ -316,6 +316,6 @@ export default function AdminOverviewPage() {
           </div>
         </div>
       )}
-    </AdminShell>
+    </SuperadminShell>
   );
 }

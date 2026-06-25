@@ -40,7 +40,7 @@ export default function SignupPage() {
     }
 
     // Email confirmation is OFF, so the session is created immediately.
-    router.push('/setup');
+    router.push('/app/setup');
     router.refresh();
   };
 

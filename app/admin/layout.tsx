@@ -76,7 +76,7 @@ export default function AdminLayout({ children }: { children: ReactNode }) {
 
           <div className="mt-6 flex flex-col gap-2 sm:flex-row sm:justify-center">
             <Button asChild variant="outline">
-              <Link href="/dashboard">Back to Dashboard</Link>
+              <Link href="/app/dashboard">Back to Dashboard</Link>
             </Button>
             <Button asChild>
               <Link href="/login">Go to Login</Link>

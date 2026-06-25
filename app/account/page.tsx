@@ -315,7 +315,7 @@ export default function AccountPage() {
                 Create your store profile to start using StorePulse.
               </p>
 
-              <Button className="mt-5" onClick={() => router.push('/setup')}>
+              <Button className="mt-5" onClick={() => router.push('/app/setup')}>
                 Set up store
               </Button>
             </div>

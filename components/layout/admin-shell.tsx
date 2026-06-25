@@ -4,20 +4,10 @@ import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import { useState, type ElementType, type ReactNode } from 'react';
 import {
-  BarChart3,
-  Building2,
-  CreditCard,
-  FileClock,
   LayoutDashboard,
   LogOut,
   Menu,
-  Package,
-  Settings,
-  ShieldCheck,
-  Store,
   Ticket,
-  Truck,
-  Users,
   X,
   Zap,
   Loader2,
@@ -27,16 +17,8 @@ import { Button } from '@/components/ui/button';
 import { useAuth } from '@/lib/auth';
 
 const superadminNavItems = [
-  { href: '/admin', label: 'Overview', icon: LayoutDashboard },
-  { href: '/admin/users', label: 'Users & Permissions', icon: Users },
-  { href: '/admin/stores', label: 'Stores', icon: Store },
-  { href: '/admin/products', label: 'Products', icon: Package },
-  { href: '/admin/vendors', label: 'Vendors', icon: Truck },
-  { href: '/admin/support', label: 'Support Desk', icon: Ticket },
-  { href: '/admin/payments', label: 'Payments & Revenue', icon: CreditCard },
-  { href: '/admin/marketing', label: 'Marketing Insights', icon: BarChart3 },
-  { href: '/admin/audit-logs', label: 'Audit Logs', icon: FileClock },
-  { href: '/admin/settings', label: 'Settings', icon: Settings },
+  { href: '/admin', label: 'Dashboard', icon: LayoutDashboard },
+  { href: '/admin/support-desk', label: 'Support Desk', icon: Ticket },
 ];
 
 function SuperadminCard({ onNavigate }: { onNavigate?: () => void }) {
@@ -55,11 +37,11 @@ function SuperadminCard({ onNavigate }: { onNavigate?: () => void }) {
       <div className="rounded-xl bg-sidebar-accent p-3">
         <div className="flex items-center gap-3">
           <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-primary/15 text-primary">
-            <ShieldCheck className="h-4 w-4" />
+            <Ticket className="h-4 w-4" />
           </div>
 
           <div className="min-w-0">
-            <p className="truncate text-sm font-medium text-white">Superadmin</p>
+            <p className="truncate text-sm font-medium text-white">Staff Console</p>
             <p className="truncate text-xs text-sidebar-foreground/60">
               {user?.email || 'Owner Control'}
             </p>
@@ -137,7 +119,7 @@ export function AdminSidebar() {
           <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary">
             <Zap className="h-5 w-5" />
           </div>
-          <span className="font-semibold tracking-tight">StorePulse Superadmin</span>
+          <span className="font-semibold tracking-tight">StorePulse Staff</span>
         </Link>
 
         <Button
@@ -168,7 +150,7 @@ export function AdminSidebar() {
                 <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-primary">
                   <Zap className="h-5 w-5" />
                 </div>
-                <span className="text-lg font-semibold tracking-tight">Superadmin</span>
+                <span className="text-lg font-semibold tracking-tight">Staff Console</span>
               </Link>
 
               <Button
@@ -201,12 +183,12 @@ export function AdminSidebar() {
         <div className="px-6 py-6">
           <Link href="/admin" className="flex items-center gap-2.5">
             <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-primary shadow-lg shadow-primary/30">
-              <Building2 className="h-5 w-5 text-primary-foreground" />
+              <Zap className="h-5 w-5 text-primary-foreground" />
             </div>
 
             <div>
               <p className="text-lg font-semibold tracking-tight text-white">StorePulse AI</p>
-              <p className="text-xs text-sidebar-foreground/60">Superadmin Control Center</p>
+              <p className="text-xs text-sidebar-foreground/60">Staff Support Center</p>
             </div>
           </Link>
         </div>

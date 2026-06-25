@@ -303,7 +303,7 @@ export default function LandingPage() {
                   className="mt-6 w-full"
                   variant={plan.highlight ? 'default' : 'outline'}
                 >
-                  <Link href="/dashboard">{plan.cta}</Link>
+                  <Link href="/app/dashboard">{plan.cta}</Link>
                 </Button>
                 <ul className="mt-8 space-y-3">
                   {plan.features.map((feat) => (
@@ -335,7 +335,7 @@ export default function LandingPage() {
               Join hundreds of independent c-store operators using StorePulse AI to catch fraud, boost margins, and save hours every week.
             </p>
             <Button size="lg" asChild className="mt-8 h-12 px-8 text-base shadow-lg">
-              <Link href="/dashboard">
+              <Link href="/app/dashboard">
                 Request a demo <ArrowRight className="ml-2 h-4 w-4" />
               </Link>
             </Button>

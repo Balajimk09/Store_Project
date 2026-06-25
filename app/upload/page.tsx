@@ -244,7 +244,7 @@ export default function UploadPage() {
               imported={tx.imported}
               importedCount={tx.importedCount}
               importLabel="Import Transactions"
-              successRedirect="/dashboard"
+              successRedirect="/app/dashboard"
               redirectLabel="Go to Dashboard"
               emptyStateTitle="No valid transactions found"
               emptyStateDescription="The file was read, but no valid transaction rows were found."

@@ -20,6 +20,7 @@ import {
   TicketCheck,
   Truck,
   Users,
+  UsersRound,
   X,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
@@ -33,6 +34,7 @@ const superadminNavItems = [
   { href: '/superadmin/products', label: 'Products', icon: Package },
   { href: '/superadmin/vendors', label: 'Vendors', icon: Truck },
   { href: '/superadmin/users', label: 'Users', icon: Users },
+  { href: '/superadmin/team', label: 'Team', icon: UsersRound },
   { href: '/superadmin/support-oversight', label: 'Support Oversight', icon: TicketCheck },
   { href: '/superadmin/audit-logs', label: 'Audit Logs', icon: FileClock },
   { href: '/superadmin/payments', label: 'Payments & Revenue', icon: CreditCard },

@@ -118,6 +118,8 @@ export default function LoginPage() {
         return;
       }
 
+      await supabase.auth.getSession();
+
       const userId = data.user?.id;
 
       if (!userId) {

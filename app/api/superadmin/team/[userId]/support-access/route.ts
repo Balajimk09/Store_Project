@@ -5,9 +5,9 @@ import {
   boolValue,
   jsonError,
   loadStaffMembers,
-  normalizeRoleCode,
   stringArray,
   syncSupportAccess,
+  textOrNull,
 } from '@/app/api/superadmin/team/_lib';
 
 type RouteContext = {
@@ -29,7 +29,7 @@ export async function POST(request: NextRequest, context: RouteContext) {
     if (!target) return jsonError('Staff member not found.', 404);
 
     const enabled = boolValue(body.enabled, false);
-    const roleCode = normalizeRoleCode(body.role_code);
+    const roleCode = textOrNull(body.role_code) || 'agent';
     const result = await syncSupportAccess({
       userId,
       email: target.email,

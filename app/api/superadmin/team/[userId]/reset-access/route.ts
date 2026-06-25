@@ -4,7 +4,6 @@ import {
   auditStaffAction,
   jsonError,
   loadStaffMembers,
-  sendResetEmail,
 } from '@/app/api/superadmin/team/_lib';
 
 type RouteContext = {
@@ -24,23 +23,25 @@ export async function POST(request: NextRequest, context: RouteContext) {
     const target = staff.find((member) => member.user_id === userId);
     if (!target) return jsonError('Staff member not found.', 404);
 
-    await sendResetEmail(target.email);
-
     await auditStaffAction({
       actorUserId: auth.user.id,
-      action: 'staff.reset_access_sent',
+      action: 'staff.reset_access_disabled',
       targetUserId: userId,
       targetEmail: target.email,
       metadata: {
         target_user_id: userId,
         target_email: target.email,
+        replacement_action: 'staff.password_overridden',
       },
-      reason: 'Reset access email sent from Company Team.',
+      reason: 'Reset access email is disabled for Company Team MVP.',
     });
 
-    return NextResponse.json({ message: 'Reset access email sent.' });
+    return NextResponse.json(
+      { error: 'Reset access emails are disabled. Use Set Password instead.' },
+      { status: 400 }
+    );
   } catch (error) {
-    const message = error instanceof Error ? error.message : 'Unable to send reset access email.';
-    return jsonError(message, message.includes('email settings') ? 502 : 500);
+    const message = error instanceof Error ? error.message : 'Unable to process reset access request.';
+    return jsonError(message, 500);
   }
 }

@@ -24,6 +24,9 @@ export async function POST(request: NextRequest, context: RouteContext) {
     const staff = await loadStaffMembers();
     const target = staff.find((member) => member.user_id === userId);
     if (!target) return jsonError('Staff member not found.', 404);
+    if (userId === auth.user.id && target.permission_keys.includes('platform.superadmin')) {
+      return jsonError('You cannot deactivate your own platform superadmin account.', 400);
+    }
 
     const { error: profileError } = await supabaseAdmin
       .from('user_profiles')

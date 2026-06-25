@@ -4,7 +4,7 @@ import {
   auditStaffAction,
   jsonError,
   loadStaffMembers,
-  replaceUserPermissions,
+  replaceCatalogUserPermissions,
   stringArray,
 } from '@/app/api/superadmin/team/_lib';
 
@@ -27,7 +27,12 @@ export async function POST(request: NextRequest, context: RouteContext) {
     const target = staff.find((member) => member.user_id === userId);
     if (!target) return jsonError('Staff member not found.', 404);
 
-    const result = await replaceUserPermissions(userId, permissionKeys, auth.user.id);
+    const result = await replaceCatalogUserPermissions({
+      userId,
+      selectedCatalogPermissionKeys: permissionKeys,
+      actorUserId: auth.user.id,
+      currentUserId: auth.user.id,
+    });
 
     await auditStaffAction({
       actorUserId: auth.user.id,
@@ -35,9 +40,14 @@ export async function POST(request: NextRequest, context: RouteContext) {
       targetUserId: userId,
       targetEmail: target.email,
       oldValues: { permissions: result.oldPermissions },
-      newValues: { permissions: result.newPermissions },
+      newValues: {
+        catalog_permissions: result.catalogPermissions,
+        legacy_permissions: result.legacyPermissions,
+        final_permissions: result.finalPermissions,
+      },
       metadata: {
-        permission_count: permissionKeys.length,
+        permission_count: result.finalPermissions.length,
+        legacy_permission_count: result.legacyPermissions.length,
       },
     });
 

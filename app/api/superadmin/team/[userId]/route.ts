@@ -5,7 +5,6 @@ import {
   getAuthUserById,
   jsonError,
   loadStaffMembers,
-  textOrNull,
   upsertStaffProfile,
   type StaffMutationBody,
 } from '@/app/api/superadmin/team/_lib';
@@ -35,10 +34,8 @@ export async function PATCH(request: NextRequest, context: RouteContext) {
     const email = existing?.email || authUser?.email || '';
 
     if (!email) return jsonError('Staff member not found.', 404);
-    if (!textOrNull(body.full_name)) return jsonError('Full name is required.');
-    if (!textOrNull(body.department)) return jsonError('Department is required.');
 
-    const profile = await upsertStaffProfile(userId, email, body, auth.user.id, existing?.status || 'active');
+    const profile = await upsertStaffProfile(userId, email, body, existing?.status || 'active');
 
     await auditStaffAction({
       actorUserId: auth.user.id,
@@ -49,8 +46,9 @@ export async function PATCH(request: NextRequest, context: RouteContext) {
       newValues: profile,
       metadata: {
         changed_fields: Object.keys(body),
-        department: textOrNull(body.department),
-        role_job_title: textOrNull(body.job_title) || textOrNull(body.role_label),
+        platform_department_id: profile.platform_department_id,
+        platform_role_id: profile.platform_role_id,
+        role_job_title: profile.job_title || profile.role_label,
       },
     });
 

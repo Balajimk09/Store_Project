@@ -33,7 +33,7 @@ export default function AdminLayout({ children }: { children: ReactNode }) {
 
       const me = await fetchAdminMe();
 
-      if (!me.isSuperadmin) {
+      if (!me.isSuperadmin && !me.isCompanyStaff && !me.supportAccess.isActive) {
         setState('denied');
         return;
       }
@@ -54,7 +54,7 @@ export default function AdminLayout({ children }: { children: ReactNode }) {
       <div className="flex min-h-screen items-center justify-center bg-background px-4">
         <Card className="flex items-center gap-3 p-6 text-sm text-muted-foreground">
           <Loader2 className="h-4 w-4 animate-spin" />
-          Checking Superadmin access...
+          Checking staff access...
         </Card>
       </div>
     );
@@ -68,9 +68,9 @@ export default function AdminLayout({ children }: { children: ReactNode }) {
             <ShieldCheck className="h-6 w-6" />
           </div>
 
-          <h1 className="mt-4 text-lg font-semibold">Superadmin access required</h1>
+          <h1 className="mt-4 text-lg font-semibold">Staff access required</h1>
           <p className="mt-2 text-sm text-muted-foreground">
-            This area is only for StorePulse platform owners. Your account does not have Superadmin
+            This area is only for StorePulse internal staff. Your account does not have admin
             access.
           </p>
 

@@ -716,6 +716,30 @@ export default function SuperadminTeamPage() {
     }
   };
 
+  const deleteStaff = async (member: StaffMember) => {
+    if (member.user_id === currentUserId) {
+      setError('You cannot delete your own platform superadmin account.');
+      return;
+    }
+    const name = member.full_name || member.email;
+    if (!window.confirm(`Permanently delete ${name}? This cannot be undone. All staff access and profile data will be removed.`)) return;
+    const typed = window.prompt('Type DELETE to permanently delete this staff member.');
+    if (typed !== 'DELETE') return;
+
+    setSubmitting(true);
+    setError(null);
+    try {
+      const response = await adminFetch<{ message: string }>(`/api/superadmin/team/${member.user_id}`, { method: 'DELETE' });
+      showSuccess(response.message);
+      await refreshAll();
+    } catch (deleteError) {
+      setError(deleteError instanceof Error ? deleteError.message : 'Unable to delete staff member.');
+      await refreshAll();
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
   const selectAllCatalogPermissions = () => setStaffForm((current) => ({ ...current, permission_keys: activePermissions.map((permission) => permission.permission_key) }));
   const clearAllCatalogPermissions = () => setStaffForm((current) => ({ ...current, permission_keys: [] }));
 
@@ -817,6 +841,7 @@ export default function SuperadminTeamPage() {
             openSupportAccess={openSupportAccess}
             openSetPassword={openSetPassword}
             runStaffAction={runStaffAction}
+            deleteStaff={deleteStaff}
             submitting={submitting}
           />
         )}
@@ -1017,6 +1042,7 @@ function StaffTab(props: {
   openSupportAccess: (member: StaffMember) => void;
   openSetPassword: (member: StaffMember) => void;
   runStaffAction: (member: StaffMember, action: 'deactivate' | 'reactivate') => Promise<void>;
+  deleteStaff: (member: StaffMember) => Promise<void>;
   submitting: boolean;
 }) {
   return (
@@ -1153,8 +1179,9 @@ function StaffTab(props: {
                           {member.status === 'inactive' ? (
                             <Button variant="outline" size="sm" onClick={() => void props.runStaffAction(member, 'reactivate')} disabled={props.submitting}><UserRoundCheck className="mr-1 h-3.5 w-3.5" />Reactivate</Button>
                           ) : (
-                            <Button variant="outline" size="sm" onClick={() => void props.runStaffAction(member, 'deactivate')} disabled={props.submitting}><UserRoundX className="mr-1 h-3.5 w-3.5" />Deactivate</Button>
+                            <Button variant="outline" size="sm" className="border-amber-300 text-amber-700 hover:bg-amber-50" onClick={() => void props.runStaffAction(member, 'deactivate')} disabled={props.submitting}><UserRoundX className="mr-1 h-3.5 w-3.5" />Deactivate</Button>
                           )}
+                          <Button variant="outline" size="sm" className="border-red-300 text-red-700 hover:bg-red-50" onClick={() => void props.deleteStaff(member)} disabled={props.submitting}><Trash2 className="mr-1 h-3.5 w-3.5" />Delete</Button>
                         </div>
                       </td>
                     </tr>

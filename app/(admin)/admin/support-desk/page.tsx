@@ -42,6 +42,7 @@ type PermissionResponse = {
   permissions: string[];
   role_code: string | null;
   is_superadmin: boolean;
+  support_access?: boolean;
 };
 
 type TicketRow = {
@@ -209,6 +210,7 @@ function formatMoney(value: number | null | undefined) {
 function hasPermission(permissionState: PermissionResponse | null, permission?: string) {
   if (!permission) return true;
   if (!permissionState) return false;
+  if (permission === 'tickets.view' && permissionState.support_access) return true;
   return permissionState.is_superadmin || permissionState.permissions.includes('ALL') || permissionState.permissions.includes(permission);
 }
 
@@ -329,7 +331,7 @@ export default function SupportDeskPage() {
       setError(null);
       try {
         const currentPermissions = await loadPermissions();
-        if (currentPermissions.permissions.length > 0 || currentPermissions.is_superadmin) {
+        if (currentPermissions.permissions.length > 0 || currentPermissions.is_superadmin || currentPermissions.support_access) {
           await loadTickets();
         }
       } catch (loadError) {
@@ -530,7 +532,7 @@ export default function SupportDeskPage() {
           <Loader2 className="mr-2 h-4 w-4 animate-spin" />
           Loading support permissions...
         </Card>
-      ) : permissions && permissions.permissions.length === 0 && !permissions.is_superadmin ? (
+      ) : permissions && permissions.permissions.length === 0 && !permissions.is_superadmin && !permissions.support_access ? (
         <Card className="p-8 text-center">
           <Lock className="mx-auto mb-3 h-8 w-8 text-muted-foreground" />
           <h2 className="font-semibold text-foreground">Access Limited</h2>

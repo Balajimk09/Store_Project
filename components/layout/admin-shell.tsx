@@ -2,12 +2,18 @@
 
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
-import { useState, type ElementType, type ReactNode } from 'react';
+import { useEffect, useMemo, useState, type ElementType, type ReactNode } from 'react';
 import {
+  BadgeDollarSign,
+  BookOpen,
+  Boxes,
+  CheckSquare,
   LayoutDashboard,
   LogOut,
   Menu,
+  Store,
   Ticket,
+  UserPlus,
   X,
   Zap,
   Loader2,
@@ -15,11 +21,26 @@ import {
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
 import { useAuth } from '@/lib/auth';
+import { adminFetch, type AdminMeResponse } from '@/lib/admin-client';
 
 const superadminNavItems = [
-  { href: '/admin', label: 'Dashboard', icon: LayoutDashboard },
-  { href: '/admin/support-desk', label: 'Support Desk', icon: Ticket },
+  { href: '/admin', label: 'Dashboard', icon: LayoutDashboard, permissions: [] },
+  { href: '/admin/signups', label: 'New Signups', icon: UserPlus, permissions: ['demo_requests.view', 'signups.view'] },
+  { href: '/admin/stores', label: 'Stores', icon: Store, permissions: ['stores.view', 'stores.search'] },
+  { href: '/admin/products', label: 'Products', icon: Boxes, permissions: ['products.view'] },
+  { href: '/admin/billing', label: 'Billing', icon: BadgeDollarSign, permissions: ['renewals.view', 'billing.view'] },
+  { href: '/admin/support-desk', label: 'Support Desk', icon: Ticket, permissions: ['tickets.view'], supportAccess: true },
+  { href: '/admin/approvals', label: 'Approvals', icon: CheckSquare, permissions: ['approvals.view', 'approval.request_action', 'approval.approve_action', 'approvals.manage'] },
+  { href: '/admin/knowledge-base', label: 'Knowledge Base', icon: BookOpen, permissions: ['knowledge_base.view'] },
 ];
+
+function canSeeNavItem(item: (typeof superadminNavItems)[number], me: AdminMeResponse | null) {
+  if (item.href === '/admin') return true;
+  if (!me) return false;
+  if (me.isSuperadmin || me.permissionKeys.includes('platform.superadmin')) return true;
+  if (item.supportAccess && (me.profile.supportAccess || me.supportAccess.isActive)) return true;
+  return item.permissions.some((permission) => me.permissionKeys.includes(permission));
+}
 
 function SuperadminCard({ onNavigate }: { onNavigate?: () => void }) {
   const { user, signOut } = useAuth();
@@ -103,6 +124,26 @@ function AdminNavLink({
 export function AdminSidebar() {
   const pathname = usePathname();
   const [mobileOpen, setMobileOpen] = useState(false);
+  const [me, setMe] = useState<AdminMeResponse | null>(null);
+
+  useEffect(() => {
+    let mounted = true;
+    adminFetch<AdminMeResponse>('/api/admin/me')
+      .then((response) => {
+        if (mounted) setMe(response);
+      })
+      .catch(() => {
+        if (mounted) setMe(null);
+      });
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
+  const navItems = useMemo(
+    () => superadminNavItems.filter((item) => canSeeNavItem(item, me)),
+    [me]
+  );
 
   const isActive = (href: string) => {
     if (href === '/admin') {
@@ -164,7 +205,7 @@ export function AdminSidebar() {
             </div>
 
             <nav className="mt-8 flex-1 space-y-1">
-              {superadminNavItems.map((item) => (
+              {navItems.map((item) => (
                 <AdminNavLink
                   key={item.href}
                   item={item}
@@ -194,7 +235,7 @@ export function AdminSidebar() {
         </div>
 
         <nav className="flex-1 space-y-1 px-3 py-2">
-          {superadminNavItems.map((item) => (
+          {navItems.map((item) => (
             <AdminNavLink key={item.href} item={item} active={isActive(item.href)} />
           ))}
         </nav>

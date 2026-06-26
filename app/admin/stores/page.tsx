@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
+import Link from 'next/link';
 import {
   AlertCircle,
   CheckCircle2,
@@ -13,11 +14,13 @@ import {
   X,
   ToggleLeft,
   ToggleRight,
+  Search,
 } from 'lucide-react';
 import { supabase } from '@/lib/supabase';
 import { AdminShell, AdminPageHeader } from '@/components/layout/admin-shell';
 import { Card } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
 import {
   StoreProfileForm,
   type StoreProfileFormValues,
@@ -36,6 +39,12 @@ const POS_TYPES = [
 type StoreRow = StoreProfileFormValues & {
   created_at?: string;
   is_active?: boolean;
+  phone_number?: string | null;
+};
+
+type AdminMe = {
+  isSuperadmin: boolean;
+  permissionKeys: string[];
 };
 
 async function adminFetch<T>(url: string, options?: RequestInit): Promise<T> {
@@ -73,12 +82,33 @@ export default function AdminStoresPage() {
   const [drawerMode, setDrawerMode] = useState<'create' | 'edit'>('create');
   const [editingStore, setEditingStore] = useState<StoreRow | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const [canViewStores, setCanViewStores] = useState(true);
+  const [canEditStores, setCanEditStores] = useState(false);
+  const [canView360, setCanView360] = useState(false);
+  const [canDeactivateStores, setCanDeactivateStores] = useState(false);
+  const [canViewAudit, setCanViewAudit] = useState(false);
+  const [canDeleteStores, setCanDeleteStores] = useState(false);
+  const [search, setSearch] = useState('');
 
   const load = async () => {
     setLoading(true);
     setError(null);
 
     try {
+      const me = await adminFetch<AdminMe>('/api/admin/me');
+      const canView = me.isSuperadmin || me.permissionKeys.includes('stores.view') || me.permissionKeys.includes('stores.search');
+      setCanViewStores(canView);
+      setCanEditStores(me.isSuperadmin || me.permissionKeys.includes('stores.edit'));
+      setCanView360(me.isSuperadmin || me.permissionKeys.includes('stores.view_360') || canView);
+      setCanDeactivateStores(me.isSuperadmin || me.permissionKeys.includes('stores.deactivate'));
+      setCanViewAudit(me.isSuperadmin || me.permissionKeys.includes('stores.audit_logs.view') || me.permissionKeys.includes('store_activity.view'));
+      setCanDeleteStores(me.isSuperadmin);
+
+      if (!canView) {
+        setStores([]);
+        return;
+      }
+
       const storesData = await adminFetch<{ stores: StoreRow[] }>('/api/admin/stores');
 
       setStores(storesData.stores || []);
@@ -208,6 +238,29 @@ export default function AdminStoresPage() {
     return store.primary_owner_email || ownerContact?.email || null;
   };
 
+  const filteredStores = stores.filter((store) => {
+    const normalized = search.trim().toLowerCase();
+    if (!normalized) return true;
+    const primaryOwnerEmail = getPrimaryOwnerEmail(store);
+    return [
+      store.store_name,
+      primaryOwnerEmail,
+      store.id,
+      store.address_line1,
+      store.city,
+      store.state,
+      store.zip_code,
+      store.phone_number,
+      store.pos_type,
+      store.plan,
+      store.store_code,
+    ]
+      .filter(Boolean)
+      .join(' ')
+      .toLowerCase()
+      .includes(normalized);
+  });
+
   return (
     <AdminShell>
       <AdminPageHeader
@@ -223,10 +276,12 @@ export default function AdminStoresPage() {
           Refresh
         </Button>
 
-        <Button onClick={openCreate}>
-          <Plus className="mr-2 h-4 w-4" />
-          New Store
-        </Button>
+        {canEditStores && (
+          <Button onClick={openCreate}>
+            <Plus className="mr-2 h-4 w-4" />
+            New Store
+          </Button>
+        )}
       </AdminPageHeader>
 
       <div className="space-y-5">
@@ -244,20 +299,56 @@ export default function AdminStoresPage() {
           </Card>
         )}
 
+        {canViewStores && (
+          <Card className="p-4">
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+              <div className="relative w-full sm:max-w-md">
+                <Search className="pointer-events-none absolute left-3 top-2.5 h-4 w-4 text-muted-foreground" />
+                <Input
+                  className="pl-9"
+                  placeholder="Search stores, owners, address, POS, plan..."
+                  value={search}
+                  onChange={(event) => setSearch(event.target.value)}
+                />
+              </div>
+              {search ? (
+                <Button variant="outline" onClick={() => setSearch('')}>
+                  Clear
+                </Button>
+              ) : null}
+            </div>
+          </Card>
+        )}
+
         <Card className="p-6">
           {loading ? (
             <div className="flex items-center gap-2 text-sm text-muted-foreground">
               <Loader2 className="h-4 w-4 animate-spin" />
               Loading stores...
             </div>
+          ) : !canViewStores ? (
+            <div className="py-12 text-center">
+              <AlertCircle className="mx-auto mb-3 h-10 w-10 text-muted-foreground/40" />
+              <p className="font-medium text-foreground">Access Limited</p>
+              <p className="mt-1 text-sm text-muted-foreground">
+                You don&apos;t have permission to view this section. Contact your superadmin to request access.
+              </p>
+            </div>
           ) : stores.length === 0 ? (
             <div className="py-12 text-center">
               <Store className="mx-auto mb-3 h-10 w-10 text-muted-foreground/40" />
               <p className="font-medium text-muted-foreground">No stores yet</p>
-              <Button className="mt-4" onClick={openCreate}>
-                <Plus className="mr-2 h-4 w-4" />
-                Create First Store
-              </Button>
+              {canEditStores && (
+                <Button className="mt-4" onClick={openCreate}>
+                  <Plus className="mr-2 h-4 w-4" />
+                  Create First Store
+                </Button>
+              )}
+            </div>
+          ) : filteredStores.length === 0 ? (
+            <div className="py-12 text-center">
+              <Store className="mx-auto mb-3 h-10 w-10 text-muted-foreground/40" />
+              <p className="font-medium text-muted-foreground">No stores match your search.</p>
             </div>
           ) : (
             <div className="overflow-x-auto">
@@ -273,7 +364,7 @@ export default function AdminStoresPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {stores.map((store) => {
+                  {filteredStores.map((store) => {
                     const active = store.is_active !== false;
                     const primaryOwnerEmail = getPrimaryOwnerEmail(store);
 
@@ -337,31 +428,47 @@ export default function AdminStoresPage() {
                         </td>
                         <td className="px-3 py-3">
                           <div className="flex items-center justify-end gap-2">
-                            <Button size="sm" variant="outline" onClick={() => openEdit(store)}>
-                              <Pencil className="mr-1 h-3.5 w-3.5" />
-                              Edit
-                            </Button>
-                            <Button
-                              size="sm"
-                              variant="outline"
-                              onClick={() => void handleToggleActive(store)}
-                              title={active ? 'Deactivate store' : 'Activate store'}
-                            >
-                              {active ? (
-                                <ToggleLeft className="mr-1 h-3.5 w-3.5" />
-                              ) : (
-                                <ToggleRight className="mr-1 h-3.5 w-3.5" />
-                              )}
-                              {active ? 'Deactivate' : 'Activate'}
-                            </Button>
-                            <Button
-                              size="sm"
-                              variant="outline"
-                              className="text-destructive hover:bg-destructive/10"
-                              onClick={() => void handleDelete(store.id!, store.store_name)}
-                            >
-                              <Trash2 className="h-3.5 w-3.5" />
-                            </Button>
+                            {canView360 && store.id ? (
+                              <Button size="sm" variant="outline" asChild>
+                                <Link href={`/admin/stores/${store.id}`}>View / Manage</Link>
+                              </Button>
+                            ) : null}
+                            {canEditStores && (
+                              <Button size="sm" variant="outline" onClick={() => openEdit(store)}>
+                                <Pencil className="mr-1 h-3.5 w-3.5" />
+                                Edit
+                              </Button>
+                            )}
+                            {canDeactivateStores && (
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                onClick={() => void handleToggleActive(store)}
+                                title={active ? 'Deactivate store' : 'Activate store'}
+                              >
+                                {active ? (
+                                  <ToggleLeft className="mr-1 h-3.5 w-3.5" />
+                                ) : (
+                                  <ToggleRight className="mr-1 h-3.5 w-3.5" />
+                                )}
+                                {active ? 'Deactivate' : 'Activate'}
+                              </Button>
+                            )}
+                            {canViewAudit && store.id ? (
+                              <Button size="sm" variant="outline" asChild>
+                                <Link href={`/admin/stores/${store.id}?tab=audit`}>Audit</Link>
+                              </Button>
+                            ) : null}
+                            {canDeleteStores && (
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                className="text-destructive hover:bg-destructive/10"
+                                onClick={() => void handleDelete(store.id!, store.store_name)}
+                              >
+                                <Trash2 className="h-3.5 w-3.5" />
+                              </Button>
+                            )}
                           </div>
                         </td>
                       </tr>

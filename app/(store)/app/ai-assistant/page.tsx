@@ -9,7 +9,6 @@ import { Sparkles, Send, Bot, User, TrendingUp, ShieldAlert, AlertTriangle, Refr
 import { cn } from '@/lib/utils';
 import { useStoreData } from '@/lib/store';
 import { generateInsights, explainCashierFlag, type Insight } from '@/lib/insights';
-import { salesByCategory } from '@/lib/mock-data';
 import { formatCurrency, formatNumber } from '@/lib/format';
 
 interface Message {
@@ -19,6 +18,7 @@ interface Message {
 }
 
 type Store = ReturnType<typeof useStoreData>;
+type Transaction = Store['transactions'][number];
 
 const suggestedPrompts = [
   { icon: AlertTriangle, text: "Show today's biggest issue" },
@@ -27,6 +27,20 @@ const suggestedPrompts = [
   { icon: Percent, text: 'Which products have low margin?' },
   { icon: Activity, text: 'Summarize store performance' },
 ];
+
+function salesByCategory(txns: Transaction[]) {
+  const totals = new Map<string, number>();
+  txns.forEach((txn) => {
+    if (txn.type !== 'Sale') return;
+    totals.set(txn.category, (totals.get(txn.category) || 0) + txn.amount);
+  });
+  const total = Array.from(totals.values()).reduce((sum, value) => sum + value, 0);
+  return Array.from(totals.entries()).map(([category, sales]) => ({
+    category,
+    sales,
+    pct: total > 0 ? sales / total : 0,
+  }));
+}
 
 function generateAnswer(question: string, store: Store): Message {
   const { transactions, cashiers: cashierData, lowStockProducts } = store;
@@ -37,7 +51,7 @@ function generateAnswer(question: string, store: Store): Message {
   if (q.includes('top') && q.includes('product')) {
     const top = store.productData.slice(0, 5);
     if (top.length === 0) {
-      return { role: 'assistant', content: 'No sales data available to rank products yet. Upload POS data or reset to demo data.' };
+      return { role: 'assistant', content: 'No sales data available to rank products yet. Upload POS data to see a real ranking.' };
     }
     return {
       role: 'assistant',
@@ -51,6 +65,9 @@ function generateAnswer(question: string, store: Store): Message {
   if (q.includes('refund') && q.includes('cashier')) {
     const sorted = [...cashierData].sort((a, b) => b.refundCount - a.refundCount);
     const top = sorted[0];
+    if (!top) {
+      return { role: 'assistant', content: 'No cashier transaction data is available yet. Upload POS transactions to review refund patterns.' };
+    }
     return {
       role: 'assistant',
       content: `**${top.name}** (${top.id}) processed the most refunds with ${top.refundCount} refund transactions — about ${(
@@ -74,6 +91,9 @@ function generateAnswer(question: string, store: Store): Message {
   }
 
   if (q.includes('sales drop') || q.includes('why') || q.includes('drop')) {
+    if (transactions.length === 0) {
+      return { role: 'assistant', content: 'No transaction history is available yet, so I cannot analyze a sales drop. Upload POS transactions first.' };
+    }
     const cat = salesByCategory(transactions);
     const beer = cat.find((c) => c.category === 'Beer');
     const fuel = cat.find((c) => c.category === 'Fuel');
@@ -83,7 +103,7 @@ function generateAnswer(question: string, store: Store): Message {
       data: [
         { label: 'Fuel revenue', value: fuel ? formatCurrency(fuel.sales) : '—' },
         { label: 'Beer revenue', value: beer ? formatCurrency(beer.sales) : '—' },
-        { label: 'Avg. ticket', value: formatCurrency(allSales.reduce((s, t) => s + t.amount, 0) / allSales.length) },
+        { label: 'Avg. ticket', value: formatCurrency(allSales.reduce((s, t) => s + t.amount, 0) / Math.max(allSales.length, 1)) },
       ],
     };
   }
@@ -103,6 +123,9 @@ function generateAnswer(question: string, store: Store): Message {
   }
 
   if (q.includes('sale') && (q.includes('today') || q.includes('total'))) {
+    if (transactions.length === 0) {
+      return { role: 'assistant', content: 'No transactions have been uploaded yet. Sales totals will appear after your first POS upload.' };
+    }
     const todayTxns = transactions.filter((t) => t.date === today);
     const todaySales = todayTxns.filter((t) => t.type === 'Sale').reduce((s, t) => s + t.amount, 0);
     return {
@@ -148,6 +171,9 @@ function generateAnswer(question: string, store: Store): Message {
   }
 
   if (q.includes('summarize') && (q.includes('store') || q.includes('performance'))) {
+    if (transactions.length === 0 && store.products.length === 0) {
+      return { role: 'assistant', content: 'There is no store data to summarize yet. Upload POS transactions or a product file to get a real performance summary.' };
+    }
     const insights = generateInsights(store);
     const high = insights.filter((i) => i.severity === 'high');
     const medium = insights.filter((i) => i.severity === 'medium');

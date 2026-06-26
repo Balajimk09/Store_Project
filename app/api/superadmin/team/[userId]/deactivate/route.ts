@@ -28,6 +28,10 @@ export async function POST(request: NextRequest, context: RouteContext) {
       return jsonError('You cannot deactivate your own platform superadmin account.', 400);
     }
 
+    await supabaseAdmin.auth.admin.updateUserById(userId, {
+      ban_duration: '876000h',
+    });
+
     const { error: profileError } = await supabaseAdmin
       .from('user_profiles')
       .update({ status: 'inactive', is_company_staff: true, updated_at: new Date().toISOString() })

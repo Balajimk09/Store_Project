@@ -1,17 +1,32 @@
 import { supabase } from '@/lib/supabase';
 
 export type AdminMeResponse = {
+  profile: {
+    userId: string;
+    email: string | null;
+    fullName: string | null;
+    status: string | null;
+    isCompanyStaff: boolean;
+    isSupportAgent: boolean;
+    departmentName: string | null;
+    roleName: string | null;
+    roleCode: string | null;
+    supportAccess: boolean;
+  };
   user: {
     id: string;
     email?: string;
   };
-  profile: Record<string, unknown> | null;
-  permissions: Array<{
-    permission_key: string;
-    can_delegate: boolean;
-  }>;
+  permissions: string[];
   permissionKeys: string[];
   isSuperadmin: boolean;
+  isCompanyStaff: boolean;
+  supportAccess: {
+    isActive: boolean;
+    roleCode: string | null;
+    permissions: string[];
+  };
+  roleCode: string | null;
 };
 
 export async function adminFetch<T>(url: string, options?: RequestInit): Promise<T> {

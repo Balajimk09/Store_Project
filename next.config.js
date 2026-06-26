@@ -18,12 +18,6 @@ const nextConfig = {
       { source: '/support', destination: '/app/support', permanent: false },
       { source: '/setup', destination: '/app/setup', permanent: false },
       { source: '/account', destination: '/app/account', permanent: false },
-      { source: '/admin/stores', destination: '/superadmin/stores', permanent: false },
-      { source: '/admin/products', destination: '/superadmin/products', permanent: false },
-      { source: '/admin/vendors', destination: '/superadmin/vendors', permanent: false },
-      { source: '/admin/audit-logs', destination: '/superadmin/audit-logs', permanent: false },
-      { source: '/admin/settings', destination: '/superadmin/settings', permanent: false },
-      { source: '/admin/users', destination: '/superadmin/users', permanent: false },
     ];
   },
 };

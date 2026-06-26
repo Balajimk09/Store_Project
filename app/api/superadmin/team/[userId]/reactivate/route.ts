@@ -25,6 +25,10 @@ export async function POST(request: NextRequest, context: RouteContext) {
     const target = staff.find((member) => member.user_id === userId);
     if (!target) return jsonError('Staff member not found.', 404);
 
+    await supabaseAdmin.auth.admin.updateUserById(userId, {
+      ban_duration: 'none',
+    });
+
     const { error } = await supabaseAdmin
       .from('user_profiles')
       .update({ status: 'active', is_company_staff: true, updated_at: new Date().toISOString() })

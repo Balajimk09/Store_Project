@@ -9,5 +9,6 @@ export async function GET(request: NextRequest) {
     permissions: auth.permissions,
     role_code: auth.roleCode,
     is_superadmin: auth.isSuperadmin,
+    support_access: auth.isSuperadmin || Boolean(auth.roleCode),
   });
 }

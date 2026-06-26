@@ -1,4 +1,4 @@
-'use client';
+﻿'use client';
 
 import { DashboardShell, PageHeader, PageLoading } from '@/components/layout/sidebar';
 import { Card } from '@/components/ui/card';
@@ -29,6 +29,8 @@ import {
 type Stats = ReturnType<typeof useStoreData>['stats'];
 
 function buildCards(stats: Stats) {
+  const hasTransactions = stats.totalTransactions > 0;
+  const neutralDelta = hasTransactions ? null : '0%';
   return [
     {
       label: 'Total Sales',
@@ -36,8 +38,8 @@ function buildCards(stats: Stats) {
       sub: formatCurrency(stats.totalSales),
       icon: DollarSign,
       tint: 'bg-chart-4/10 text-chart-4',
-      delta: '+12.4%',
-      up: true,
+      delta: neutralDelta || '+12.4%',
+      up: hasTransactions,
     },
     {
       label: 'Total Transactions',
@@ -45,8 +47,8 @@ function buildCards(stats: Stats) {
       sub: 'across all registers',
       icon: Receipt,
       tint: 'bg-chart-2/10 text-chart-2',
-      delta: '+8.1%',
-      up: true,
+      delta: neutralDelta || '+8.1%',
+      up: hasTransactions,
     },
     {
       label: 'Refund Count',
@@ -54,7 +56,7 @@ function buildCards(stats: Stats) {
       sub: formatCurrency(-Math.abs(stats.totalSales * 0.018)),
       icon: RotateCcw,
       tint: 'bg-chart-3/10 text-chart-3',
-      delta: '+2.3%',
+      delta: neutralDelta || '+2.3%',
       up: false,
     },
     {
@@ -63,7 +65,7 @@ function buildCards(stats: Stats) {
       sub: 'requires review',
       icon: Ban,
       tint: 'bg-chart-6/10 text-chart-6',
-      delta: '+0.8%',
+      delta: neutralDelta || '+0.8%',
       up: false,
     },
     {
@@ -72,7 +74,7 @@ function buildCards(stats: Stats) {
       sub: 'drawer opens',
       icon: CircleSlash,
       tint: 'bg-destructive/10 text-destructive',
-      delta: '+5.6%',
+      delta: neutralDelta || '+5.6%',
       up: false,
     },
     {
@@ -81,8 +83,8 @@ function buildCards(stats: Stats) {
       sub: 'per sale',
       icon: Sigma,
       tint: 'bg-primary/10 text-primary',
-      delta: '+3.2%',
-      up: true,
+      delta: neutralDelta || '+3.2%',
+      up: hasTransactions,
     },
   ];
 }
@@ -94,13 +96,13 @@ export default function DashboardPage() {
   return (
     <DashboardShell>
       {!loaded ? <PageLoading /> : (<>
-      <PageHeader title="Dashboard" description={`QuickStop #4127 · ${isDemo ? 'Demo data' : meta.fileName} · ${meta.rowCount.toLocaleString()} transactions`}>
+      <PageHeader title="Dashboard" description={`· ${isDemo ? 'Demo data' : meta.fileName} Â· ${meta.rowCount.toLocaleString()} transactions`}>
         <div className="flex items-center gap-2 rounded-lg border border-border bg-card px-3 py-2 text-sm">
           <span className="relative flex h-2 w-2">
             <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-success opacity-75" />
             <span className="relative inline-flex h-2 w-2 rounded-full bg-success" />
           </span>
-          <span className="text-muted-foreground">{isDemo ? 'Demo mode' : 'Live upload'} · {meta.rowCount.toLocaleString()} txns</span>
+          <span className="text-muted-foreground">{isDemo ? 'Demo mode' : 'Live upload'} Â· {meta.rowCount.toLocaleString()} txns</span>
         </div>
       </PageHeader>
 
@@ -140,7 +142,7 @@ export default function DashboardPage() {
                 <p className="text-sm font-semibold text-foreground">{lowStockProducts.length} products need reordering</p>
                 <p className="mt-0.5 text-sm text-muted-foreground">
                   Most urgent: <span className="font-medium text-foreground">{lowStockProducts[0].name}</span> with only {lowStockProducts[0].stock} units left (reorder at {lowStockProducts[0].reorderLevel}).
-                  {!isDemoProducts ? ` From uploaded pricebook “${productsMeta.fileName}”.` : ''}
+                  {!isDemoProducts ? ` From uploaded pricebook â€œ${productsMeta.fileName}â€.` : ''}
                 </p>
               </div>
             </div>
@@ -377,7 +379,7 @@ function AIInsightsCard() {
         </div>
       </div>
       {top.length === 0 ? (
-        <p className="text-sm text-muted-foreground">No insights available yet — upload POS data to unlock analysis.</p>
+        <p className="text-sm text-muted-foreground">No insights available yet â€” upload POS data to unlock analysis.</p>
       ) : (
         <div className="grid gap-4 lg:grid-cols-3">
           {top.map((insight) => {

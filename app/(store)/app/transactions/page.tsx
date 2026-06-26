@@ -3,7 +3,7 @@
 import { useMemo, useState } from 'react';
 import { DashboardShell, PageHeader, PageLoading } from '@/components/layout/sidebar';
 import { Card } from '@/components/ui/card';
-import { transactions as mockTransactions, type TransactionType, type PaymentType } from '@/lib/mock-data';
+import type { TransactionType, PaymentType } from '@/lib/mock-data';
 import { useStoreData } from '@/lib/store';
 import { formatCurrency, formatDateTime, exportToCsv } from '@/lib/format';
 import { Button } from '@/components/ui/button';

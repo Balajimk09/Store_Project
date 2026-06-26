@@ -1,6 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getSupabaseAdmin } from '@/lib/supabase-admin';
-import { getAuthenticatedUser } from '@/lib/admin-auth';
+import { getAuthenticatedUser, getEffectiveStaffAccess } from '@/lib/admin-auth';
 
 export async function GET(request: NextRequest) {
   const auth = await getAuthenticatedUser(request);
@@ -9,38 +8,50 @@ export async function GET(request: NextRequest) {
     return auth.response;
   }
 
-  const supabaseAdmin = getSupabaseAdmin();
+  let access;
+  try {
+    access = await getEffectiveStaffAccess(auth.user.id);
+  } catch {
+    return NextResponse.json({ error: 'Unable to verify admin access.' }, { status: 403 });
+  }
 
-  const { data: profile } = await supabaseAdmin
-    .from('user_profiles')
-    .select('*')
-    .eq('user_id', auth.user.id)
-    .maybeSingle();
-
-  const { data: permissions, error: permissionsError } = await supabaseAdmin
-    .from('user_permissions')
-    .select('permission_key, can_delegate')
-    .eq('user_id', auth.user.id);
-
-  if (permissionsError) {
+  if (access.disabledReason) {
     return NextResponse.json(
-      { error: permissionsError.message },
-      { status: 500 }
+      { error: 'Your account has been deactivated.', reason: 'disabled' },
+      { status: 403 }
     );
   }
 
-  const { data: isSuperadmin } = await supabaseAdmin.rpc('is_superadmin', {
-    check_user_id: auth.user.id,
-  });
+  if (!access.isSuperadmin && !access.isCompanyStaff && !access.isSupportAgent) {
+    return NextResponse.json({ error: 'You do not have admin access.' }, { status: 403 });
+  }
 
   return NextResponse.json({
-    user: {
-      id: auth.user.id,
-      email: auth.user.email,
+    profile: {
+      userId: access.userId,
+      email: access.email,
+      fullName: access.fullName,
+      status: access.status,
+      isCompanyStaff: access.isCompanyStaff,
+      isSupportAgent: access.isSupportAgent,
+      departmentName: access.departmentName,
+      roleName: access.roleName,
+      roleCode: access.roleCode,
+      supportAccess: access.isSupportAgent,
     },
-    profile: profile || null,
-    permissions: permissions || [],
-    permissionKeys: (permissions || []).map((permission) => permission.permission_key),
-    isSuperadmin: isSuperadmin === true,
+    permissions: access.permissions,
+    user: {
+      id: access.userId,
+      email: access.email || undefined,
+    },
+    permissionKeys: access.permissions,
+    isSuperadmin: access.isSuperadmin,
+    isCompanyStaff: access.isCompanyStaff,
+    supportAccess: {
+      isActive: access.isSupportAgent,
+      roleCode: access.roleCode,
+      permissions: access.permissions,
+    },
+    roleCode: access.roleCode,
   });
 }

@@ -42,6 +42,23 @@ function normalizePhone(value: string) {
   return `+${digits}`;
 }
 
+type AdminMeLoginResponse = {
+  isSuperadmin?: boolean;
+  isCompanyStaff?: boolean;
+  profile?: {
+    supportAccess?: boolean;
+    isSupportAgent?: boolean;
+  };
+  supportAccess?: {
+    isActive?: boolean;
+  };
+};
+
+type ErrorResponse = {
+  reason?: string;
+  error?: string;
+};
+
 async function resolveUsernameToEmail(identifier: string) {
   const response = await fetch(`/api/auth/resolve-login?identifier=${encodeURIComponent(identifier)}`);
 
@@ -66,7 +83,18 @@ export default function LoginPage() {
   const [loginId, setLoginId] = useState('');
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(
+    searchParams.get('reason') === 'disabled'
+      ? 'Your account has been deactivated. Contact your administrator.'
+      : null
+  );
+
+  const blockDisabledAccount = async () => {
+    await supabase.auth.signOut();
+    setLoading(false);
+    setError('Your account has been deactivated. Contact your administrator.');
+    router.replace('/login?reason=disabled');
+  };
 
   const handleSubmit = async (event: FormEvent) => {
     event.preventDefault();
@@ -128,52 +156,127 @@ export default function LoginPage() {
         return;
       }
 
+      const token = data.session?.access_token;
+      if (token) {
+        try {
+          const adminResponse = await fetch('/api/admin/me', {
+            headers: {
+              Authorization: `Bearer ${token}`,
+            },
+          });
+
+          if (adminResponse.status === 403) {
+            const errorData = (await adminResponse.json().catch(() => ({}))) as ErrorResponse;
+            if (errorData.reason === 'disabled') {
+              await blockDisabledAccount();
+              return;
+            }
+          }
+
+          if (adminResponse.ok) {
+            const adminData = (await adminResponse.json()) as AdminMeLoginResponse;
+            setLoading(false);
+
+            if (adminData.isSuperadmin) {
+              router.push('/superadmin');
+              router.refresh();
+              return;
+            }
+
+            if (adminData.supportAccess?.isActive || adminData.profile?.supportAccess || adminData.profile?.isSupportAgent || adminData.isCompanyStaff) {
+              router.push('/admin');
+              router.refresh();
+              return;
+            }
+          }
+        } catch {
+          // Login routing continues to store checks if admin lookup is unavailable.
+        }
+      }
+
+      try {
+        const { data: companyProfile } = await supabase
+          .from('user_profiles')
+          .select('is_company_staff, status')
+          .eq('user_id', userId)
+          .maybeSingle();
+
+        const status = typeof companyProfile?.status === 'string' ? companyProfile.status.toLowerCase() : '';
+        if (companyProfile?.is_company_staff === true && ['inactive', 'suspended', 'disabled', 'removed'].includes(status)) {
+          await blockDisabledAccount();
+          return;
+        }
+
+        if (companyProfile?.is_company_staff === true) {
+          setLoading(false);
+          router.push('/admin');
+          router.refresh();
+          return;
+        }
+      } catch {
+        // Continue to store checks if the profile fallback cannot be read.
+      }
+
       const { data: profileRow } = await supabase
         .from('user_profiles')
         .select('must_change_password')
         .eq('user_id', userId)
         .maybeSingle();
 
-      const { data: isSuperadmin } = await supabase.rpc('has_permission', {
-        check_user_id: userId,
-        required_permission: 'platform.superadmin',
-      });
-
-      if (isSuperadmin === true) {
-        setLoading(false);
-        router.push('/superadmin');
-        router.refresh();
-        return;
-      }
-
-      const token = data.session?.access_token;
-      if (token) {
-        const supportResponse = await fetch('/api/admin/support/me/permissions', {
-          headers: {
-            Authorization: `Bearer ${token}`,
-          },
-        });
-
-        if (supportResponse.ok) {
-          const supportData = (await supportResponse.json()) as {
-            permissions?: string[];
-            is_superadmin?: boolean;
-          };
-
-          if (supportData.is_superadmin || (supportData.permissions?.length || 0) > 0) {
-            setLoading(false);
-            router.push('/admin');
-            router.refresh();
-            return;
-          }
-        }
-      }
-
       if (profileRow?.must_change_password) {
         setLoading(false);
         router.push('/app/account?forcePassword=1');
         router.refresh();
         return;
+      }
+
+      if (token) {
+        try {
+          const supportResponse = await fetch('/api/admin/support/me/permissions', {
+            headers: {
+              Authorization: `Bearer ${token}`,
+            },
+          });
+
+          if (supportResponse.ok) {
+            const supportData = (await supportResponse.json()) as {
+              permissions?: string[];
+              is_superadmin?: boolean;
+            };
+
+            if (supportData.is_superadmin) {
+              setLoading(false);
+              router.push('/superadmin');
+              router.refresh();
+              return;
+            }
+
+            if ((supportData.permissions?.length || 0) > 0) {
+              setLoading(false);
+              router.push('/admin');
+              router.refresh();
+              return;
+            }
+          }
+        } catch {
+          // Continue to store checks if support lookup is unavailable.
+        }
+      }
+
+      try {
+        const { data: isSuperadmin } = await supabase.rpc('has_permission', {
+          check_user_id: userId,
+          required_permission: 'platform.superadmin',
+        });
+
+        if (isSuperadmin === true) {
+          setLoading(false);
+          router.push('/superadmin');
+          router.refresh();
+          return;
+        }
+      } catch {
+        // Continue to store checks if permission lookup is unavailable.
       }
 
       const { data: storeRow, error: storeError } = await supabase
@@ -197,7 +300,11 @@ export default function LoginPage() {
 
       const finalRedirect = redirectTo === '/setup' ? '/app/dashboard' : redirectTo;
 
-      router.push(finalRedirect);
+      if (finalRedirect.startsWith('/app/')) {
+        router.push(finalRedirect);
+      } else {
+        router.push('/app/dashboard');
+      }
       router.refresh();
     } catch (error) {
       setLoading(false);

@@ -145,6 +145,20 @@ const DEMO_PRODUCTS_META: ProductMeta = {
   rowCount: mockProducts.length,
 };
 
+const EMPTY_META: UploadMeta = {
+  source: 'upload',
+  fileName: 'No transactions yet',
+  importedAt: '',
+  rowCount: 0,
+};
+
+const EMPTY_PRODUCTS_META: ProductMeta = {
+  source: 'upload',
+  fileName: 'No products yet',
+  importedAt: '',
+  rowCount: 0,
+};
+
 function aggregations(txns: Transaction[]) {
   return {
     transactions: txns,
@@ -272,6 +286,26 @@ function buildDemo(): StoreData {
   };
 }
 
+function buildEmpty(dataMode: 'demo' | 'cloud' = 'cloud'): StoreData {
+  return {
+    ...aggregations([]),
+    meta: EMPTY_META,
+    isDemo: false,
+    loaded: true,
+    products: [],
+    productsMeta: EMPTY_PRODUCTS_META,
+    isDemoProducts: false,
+    lowStockProducts: [],
+    dataMode,
+    cloudError: null,
+  };
+}
+
+function explicitDemoModeEnabled() {
+  if (typeof window === 'undefined') return false;
+  return localStorage.getItem('storepulse_demo_mode') === 'true';
+}
+
 export function useStoreData(): StoreData & {
   resetToDemo: () => void;
   refresh: () => void;
@@ -281,7 +315,7 @@ export function useStoreData(): StoreData & {
   createProduct: (product: Product) => Promise<SaveResult>;
 } {
   const { user, store: authStore, loading: authLoading } = useAuth();
-  const [data, setData] = useState<StoreData>(() => ({ ...buildDemo(), loaded: false }));
+  const [data, setData] = useState<StoreData>(() => ({ ...buildEmpty(), loaded: false }));
   const [refreshCounter, setRefreshCounter] = useState(0);
 
   useEffect(() => {
@@ -349,9 +383,15 @@ export function useStoreData(): StoreData & {
       return;
     }
 
-    let txns = mockTransactions;
-    let meta = DEMO_META;
-    let isDemo = true;
+    if (user && !authStore) {
+      setData(buildEmpty('cloud'));
+      return;
+    }
+
+    const demoMode = explicitDemoModeEnabled();
+    let txns: Transaction[] = demoMode ? mockTransactions : [];
+    let meta = demoMode ? DEMO_META : EMPTY_META;
+    let isDemo = demoMode;
 
     try {
       const raw = localStorage.getItem(STORAGE_KEY);
@@ -363,12 +403,12 @@ export function useStoreData(): StoreData & {
         isDemo = false;
       }
     } catch {
-      // keep demo data
+      // keep empty or explicit demo data
     }
 
-    let products = mockProducts;
-    let productsMeta = DEMO_PRODUCTS_META;
-    let isDemoProducts = true;
+    let products: Product[] = demoMode ? mockProducts : [];
+    let productsMeta = demoMode ? DEMO_PRODUCTS_META : EMPTY_PRODUCTS_META;
+    let isDemoProducts = demoMode;
 
     try {
       const productsRaw = localStorage.getItem(PRODUCTS_KEY);
@@ -380,7 +420,7 @@ export function useStoreData(): StoreData & {
         isDemoProducts = false;
       }
     } catch {
-      // keep demo products
+      // keep empty or explicit demo products
     }
 
     setData({
@@ -777,7 +817,7 @@ export async function saveUploadedProducts(products: Product[], fileName: string
 }
 
 export function getActiveTransactions(): Transaction[] {
-  if (typeof window === 'undefined') return mockTransactions;
+  if (typeof window === 'undefined') return [];
 
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
@@ -787,11 +827,11 @@ export function getActiveTransactions(): Transaction[] {
     // ignore
   }
 
-  return mockTransactions;
+  return explicitDemoModeEnabled() ? mockTransactions : [];
 }
 
 export function getActiveProducts(): Product[] {
-  if (typeof window === 'undefined') return mockProducts;
+  if (typeof window === 'undefined') return [];
 
   try {
     const raw = localStorage.getItem(PRODUCTS_KEY);
@@ -801,5 +841,5 @@ export function getActiveProducts(): Product[] {
     // ignore
   }
 
-  return mockProducts;
+  return explicitDemoModeEnabled() ? mockProducts : [];
 }

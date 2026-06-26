@@ -763,6 +763,7 @@ export async function syncSupportAccess(input: {
 }) {
   const supabaseAdmin = getSupabaseAdmin();
   const permissions = stringArray(input.supportPermissionKeys);
+  const updatedAt = new Date().toISOString();
 
   const { data: oldRow } = await supabaseAdmin
     .from('support_agent_permissions')
@@ -770,7 +771,7 @@ export async function syncSupportAccess(input: {
     .eq('user_id', input.userId)
     .maybeSingle();
 
-  const { data, error } = await supabaseAdmin
+  let result = await supabaseAdmin
     .from('support_agent_permissions')
     .upsert(
       {
@@ -780,18 +781,45 @@ export async function syncSupportAccess(input: {
         permissions,
         is_active: input.enabled,
         updated_by: input.actorUserId,
-        updated_at: new Date().toISOString(),
+        updated_at: updatedAt,
       },
       { onConflict: 'user_id' }
     )
     .select('*')
     .single();
 
-  if (error) throw new Error(error.message);
+  if (result.error && (result.error.message.includes('schema cache') || result.error.message.includes('column'))) {
+    result = await supabaseAdmin
+      .from('support_agent_permissions')
+      .upsert(
+        {
+          user_id: input.userId,
+          role_code: input.roleCode || 'agent',
+          permissions,
+          is_active: input.enabled,
+          updated_at: updatedAt,
+        },
+        { onConflict: 'user_id' }
+      )
+      .select('*')
+      .single();
+  }
+
+  if (result.error) throw new Error(result.error.message);
+
+  const { error: profileError } = await supabaseAdmin
+    .from('user_profiles')
+    .update({
+      is_company_staff: true,
+      updated_at: updatedAt,
+    })
+    .eq('user_id', input.userId);
+
+  if (profileError) throw new Error(profileError.message);
 
   return {
     oldRow: (oldRow || null) as JsonRecord | null,
-    newRow: (data || null) as JsonRecord | null,
+    newRow: (result.data || null) as JsonRecord | null,
   };
 }
 

@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
+import Link from 'next/link';
 import {
   AlertCircle,
   CheckCircle2,
@@ -337,6 +338,11 @@ export default function AdminStoresPage() {
                         </td>
                         <td className="px-3 py-3">
                           <div className="flex items-center justify-end gap-2">
+                            {store.id ? (
+                              <Button size="sm" variant="outline" asChild>
+                                <Link href={`/superadmin/stores/${store.id}`}>View Store 360</Link>
+                              </Button>
+                            ) : null}
                             <Button size="sm" variant="outline" onClick={() => openEdit(store)}>
                               <Pencil className="mr-1 h-3.5 w-3.5" />
                               Edit

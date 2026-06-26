@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getSupabaseAdmin } from '@/lib/supabase-admin';
 import { requirePermission } from '@/lib/admin-auth';
 import { createAdminAuditLog } from '@/lib/audit-log';
+import { requireAnyAdminPermission } from '@/app/api/admin/_lib';
 
 function textOrNull(value: unknown) {
   return typeof value === 'string' && value.trim() ? value.trim() : null;
@@ -76,7 +77,7 @@ function cleanCreatePayload(body: Record<string, unknown>) {
 }
 
 export async function GET(request: NextRequest) {
-  const auth = await requirePermission(request, 'platform.superadmin');
+  const auth = await requireAnyAdminPermission(request, ['stores.view']);
   if (!auth.ok) return auth.response;
 
   const supabaseAdmin = getSupabaseAdmin();

@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getAuthenticatedUser, requirePermission } from '@/lib/admin-auth';
+import { getAuthenticatedUser, getEffectiveStaffAccess } from '@/lib/admin-auth';
 import { getSupabaseAdmin } from '@/lib/supabase-admin';
 
 export type SupportPermission =
@@ -98,8 +98,24 @@ export async function checkSupportPermission(
     return authResult;
   }
 
-  const superadmin = await requirePermission(request, 'platform.superadmin');
-  if (superadmin.ok) {
+  let access;
+  try {
+    access = await getEffectiveStaffAccess(authResult.user.id);
+  } catch {
+    return {
+      ok: false,
+      response: NextResponse.json({ error: 'Unable to verify support permission.' }, { status: 403 }),
+    };
+  }
+
+  if (access.disabledReason) {
+    return {
+      ok: false,
+      response: NextResponse.json({ error: 'Your account has been deactivated.', reason: 'disabled' }, { status: 403 }),
+    };
+  }
+
+  if (access.isSuperadmin) {
     return {
       ok: true,
       user: authResult.user,
@@ -109,9 +125,7 @@ export async function checkSupportPermission(
     };
   }
 
-  const support = await loadSupportPermissions(authResult.user.id);
-
-  if (!support.permissions.includes(permission)) {
+  if (!access.isSupportAgent && !access.permissions.includes(permission)) {
     return {
       ok: false,
       response: NextResponse.json(
@@ -124,8 +138,8 @@ export async function checkSupportPermission(
   return {
     ok: true,
     user: authResult.user,
-    permissions: support.permissions,
-    roleCode: support.roleCode,
+    permissions: access.permissions,
+    roleCode: access.roleCode,
     isSuperadmin: false,
   };
 }
@@ -144,8 +158,24 @@ export async function getCurrentSupportPermissions(request: NextRequest): Promis
     return authResult;
   }
 
-  const superadmin = await requirePermission(request, 'platform.superadmin');
-  if (superadmin.ok) {
+  let access;
+  try {
+    access = await getEffectiveStaffAccess(authResult.user.id);
+  } catch {
+    return {
+      ok: false,
+      response: NextResponse.json({ error: 'Unable to verify support permissions.' }, { status: 403 }),
+    };
+  }
+
+  if (access.disabledReason) {
+    return {
+      ok: false,
+      response: NextResponse.json({ error: 'Your account has been deactivated.', reason: 'disabled' }, { status: 403 }),
+    };
+  }
+
+  if (access.isSuperadmin) {
     return {
       ok: true,
       user: authResult.user,
@@ -155,12 +185,11 @@ export async function getCurrentSupportPermissions(request: NextRequest): Promis
     };
   }
 
-  const support = await loadSupportPermissions(authResult.user.id);
   return {
     ok: true,
     user: authResult.user,
-    permissions: support.permissions,
-    roleCode: support.roleCode,
+    permissions: access.permissions,
+    roleCode: access.roleCode,
     isSuperadmin: false,
   };
 }

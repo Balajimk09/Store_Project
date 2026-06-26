@@ -21,6 +21,8 @@ import {
   Fuel,
   LifeBuoy,
   User,
+  ChevronDown,
+  Plus,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
@@ -41,9 +43,10 @@ const navItems = [
 ];
 
 function StoreCard({ onNavigate }: { onNavigate?: () => void }) {
-  const { user, store, signOut } = useAuth();
+  const { user, store, stores, storeScope, activeStoreId, setActiveStoreId, signOut } = useAuth();
   const router = useRouter();
   const [signingOut, setSigningOut] = useState(false);
+  const [open, setOpen] = useState(false);
 
   const handleLogout = async () => {
     setSigningOut(true);
@@ -53,7 +56,7 @@ function StoreCard({ onNavigate }: { onNavigate?: () => void }) {
 
   const setupComplete =
     !!store?.store_name?.trim() &&
-    !!store?.store_address?.trim() &&
+    !!(store.store_address || store.address_line1)?.trim() &&
     !!store?.city?.trim() &&
     !!store?.state?.trim() &&
     !!store?.zip_code?.trim() &&
@@ -61,23 +64,78 @@ function StoreCard({ onNavigate }: { onNavigate?: () => void }) {
     !!store?.pos_type?.trim() &&
     Number(store?.register_count) > 0;
 
-  const storeName = store?.store_name?.trim() || 'Setup required';
+  const storeName = storeScope === 'all' ? 'All Stores' : store?.store_name?.trim() || 'Setup required';
+
+  const chooseStore = (id: string | null) => {
+    setActiveStoreId(id);
+    setOpen(false);
+    onNavigate?.();
+  };
+
+  const handleAddStore = () => {
+    setOpen(false);
+    onNavigate?.();
+    router.push('/app/account?addStore=1');
+  };
 
   return (
     <div className="space-y-2 border-t border-sidebar-accent p-4">
-      <Link
-        href="/app/setup"
-        onClick={onNavigate}
+      <button
+        type="button"
+        onClick={() => setOpen((current) => !current)}
         className="flex items-center gap-3 rounded-lg bg-sidebar-accent p-3 transition-colors hover:bg-sidebar-accent/80"
       >
         <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-primary/15 text-primary">
           <Store className="h-4 w-4" />
         </div>
-        <div className="min-w-0">
+        <div className="min-w-0 flex-1 text-left">
           <p className="truncate text-sm font-medium text-white">{storeName}</p>
-          {!setupComplete && <p className="text-xs text-sidebar-foreground/60">Complete store setup</p>}
+          {storeScope === 'all' ? (
+            <p className="text-xs text-sidebar-foreground/60">{stores.length} stores selected</p>
+          ) : !setupComplete ? (
+            <p className="text-xs text-sidebar-foreground/60">Complete store setup</p>
+          ) : (
+            <p className="text-xs text-sidebar-foreground/60">Selected store</p>
+          )}
         </div>
-      </Link>
+        <ChevronDown className="h-4 w-4 text-sidebar-foreground/60" />
+      </button>
+
+      {open && (
+        <div className="rounded-lg border border-sidebar-accent bg-sidebar p-2 shadow-xl">
+          <button
+            type="button"
+            onClick={() => chooseStore(null)}
+            className={`flex w-full items-center gap-2 rounded-md px-3 py-2 text-left text-sm transition-colors ${
+              storeScope === 'all' ? 'bg-primary text-primary-foreground' : 'text-sidebar-foreground/75 hover:bg-sidebar-accent hover:text-white'
+            }`}
+          >
+            <Store className="h-4 w-4" />
+            All Stores
+          </button>
+          {stores.map((ownedStore) => (
+            <button
+              key={ownedStore.id}
+              type="button"
+              onClick={() => chooseStore(ownedStore.id)}
+              className={`mt-1 flex w-full items-center gap-2 rounded-md px-3 py-2 text-left text-sm transition-colors ${
+                activeStoreId === ownedStore.id ? 'bg-primary text-primary-foreground' : 'text-sidebar-foreground/75 hover:bg-sidebar-accent hover:text-white'
+              }`}
+            >
+              <Store className="h-4 w-4" />
+              <span className="truncate">{ownedStore.store_name || 'Unnamed store'}</span>
+            </button>
+          ))}
+          <button
+            type="button"
+            onClick={handleAddStore}
+            className="mt-2 flex w-full items-center gap-2 rounded-md border border-sidebar-accent px-3 py-2 text-left text-sm text-sidebar-foreground/75 transition-colors hover:bg-sidebar-accent hover:text-white"
+          >
+            <Plus className="h-4 w-4" />
+            Add New Store
+          </button>
+        </div>
+      )}
 
       {user && (
         <button

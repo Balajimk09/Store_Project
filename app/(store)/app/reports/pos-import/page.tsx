@@ -52,6 +52,40 @@ type PosImportApiResponse = {
   step?: string;
 };
 
+type DiscoveryStatus = 'existing' | 'needs_review';
+
+type DiscoveryDetail = {
+  label: string;
+  value: string;
+};
+
+type DiscoveryRow = {
+  id: string;
+  primary: string;
+  secondary: string | null;
+  details: DiscoveryDetail[];
+  status: DiscoveryStatus;
+};
+
+type DiscoverySection = {
+  key: string;
+  title: string;
+  totalDiscovered: number;
+  needsReviewCount: number;
+  alreadyExistsCount: number;
+  lastSourceImport: string | null;
+  lastSourceFile: string | null;
+  rows: DiscoveryRow[];
+  emptyMessage: string;
+  error: string | null;
+};
+
+type DiscoveryResponse = {
+  ok?: boolean;
+  sections?: DiscoverySection[];
+  error?: string;
+};
+
 const TEMPLATE_LINKS = [
   { href: '/templates/pos-import/plu-sales-sample.csv', label: 'Download PLU Sales CSV' },
   { href: '/templates/pos-import/department-sales-sample.csv', label: 'Download Department Sales CSV' },
@@ -61,16 +95,6 @@ const TEMPLATE_LINKS = [
   { href: '/templates/pos-import/payment-summary-sample.csv', label: 'Download Payment Summary CSV' },
   { href: '/templates/pos-import/fuel-dcr-summary-sample.csv', label: 'Download Fuel DCR CSV' },
   { href: '/templates/pos-import/cashier-summary-sample.csv', label: 'Download Cashier Summary CSV' },
-];
-
-const DISCOVERED_SETUP_ITEMS = [
-  { title: 'Products', text: 'No discovered products yet. Import a PLU report to find new products.' },
-  { title: 'Departments', text: 'No discovered departments yet. Import a Department report to find new departments.' },
-  { title: 'Categories', text: 'No discovered categories yet. Import a Category report to find new categories.' },
-  { title: 'Tax Categories', text: 'No discovered tax categories yet. Import a Tax report to find new tax categories.' },
-  { title: 'Deals / Promotions', text: 'No discovered deals yet. Import a Deal report to find new promotions.' },
-  { title: 'Payment Methods', text: 'No discovered payment methods yet. Import a Payment report to find new payment methods.' },
-  { title: 'Age Restriction Suggestions', text: 'No age restriction suggestions yet. Import product sales to generate suggestions.' },
 ];
 
 function formatError(error: unknown) {
@@ -109,11 +133,37 @@ export default function PosImportPage() {
   const [error, setError] = useState<string | null>(null);
   const [summary, setSummary] = useState<ImportSummary | null>(null);
   const [recent, setRecent] = useState<RecentResponse>({ batches: [], files: [] });
+  const [loadingDiscovery, setLoadingDiscovery] = useState(false);
+  const [discoveryError, setDiscoveryError] = useState<string | null>(null);
+  const [discoverySections, setDiscoverySections] = useState<DiscoverySection[]>([]);
 
   const blocked = storeScope === 'all' || !activeStoreId;
   const selectedStoreName = storeScope === 'all' ? 'All Stores' : activeStore?.store_name || 'Selected Store';
 
   const selectedFileNames = useMemo(() => files.map((file) => file.name).join(', '), [files]);
+
+  const loadDiscovery = useCallback(async () => {
+    if (!activeStoreId) {
+      setDiscoverySections([]);
+      setDiscoveryError(null);
+      return;
+    }
+
+    setLoadingDiscovery(true);
+    setDiscoveryError(null);
+    try {
+      const response = await fetch(`/api/pos-import/discovered?storeId=${encodeURIComponent(activeStoreId)}`);
+      const json = (await response.json().catch(() => ({}))) as DiscoveryResponse;
+      if (!response.ok || json.ok === false) throw new Error(json.error || 'Could not load discovered setup items.');
+      setDiscoverySections(Array.isArray(json.sections) ? json.sections : []);
+    } catch (loadError) {
+      console.error('[POS Discovery Load Error]', loadError);
+      setDiscoveryError(formatError(loadError));
+      setDiscoverySections([]);
+    } finally {
+      setLoadingDiscovery(false);
+    }
+  }, [activeStoreId]);
 
   const loadRecent = useCallback(async () => {
     if (!activeStoreId) {
@@ -142,6 +192,10 @@ export default function PosImportPage() {
   useEffect(() => {
     void loadRecent();
   }, [loadRecent]);
+
+  useEffect(() => {
+    void loadDiscovery();
+  }, [loadDiscovery]);
 
   const handleFiles = (fileList: FileList | null) => {
     setError(null);
@@ -182,6 +236,7 @@ export default function PosImportPage() {
       setFiles([]);
       if (inputRef.current) inputRef.current.value = '';
       await loadRecent();
+      await loadDiscovery();
       window.dispatchEvent(new Event('storepulse:data-updated'));
     } catch (importError) {
       console.error('[POS Import Error]', importError);
@@ -207,8 +262,15 @@ export default function PosImportPage() {
         title="POS Import Center"
         description="Upload POS report files, review parsed data, and prepare discovered setup items."
       >
-        <Button variant="outline" onClick={() => void loadRecent()} disabled={loadingRecent || !activeStoreId}>
-          {loadingRecent ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <RefreshCcw className="mr-2 h-4 w-4" />}
+        <Button
+          variant="outline"
+          onClick={() => {
+            void loadRecent();
+            void loadDiscovery();
+          }}
+          disabled={(loadingRecent && loadingDiscovery) || !activeStoreId}
+        >
+          {loadingRecent || loadingDiscovery ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <RefreshCcw className="mr-2 h-4 w-4" />}
           Refresh
         </Button>
       </PageHeader>
@@ -389,17 +451,30 @@ export default function PosImportPage() {
           <div>
             <h2 className="text-lg font-semibold text-foreground">Discovered Setup Items</h2>
             <p className="mt-1 text-sm text-muted-foreground">
-              After imports, StorePulse will identify new products, departments, categories, tax categories, deals, payment methods, and age restriction suggestions that can be approved into the main app.
+              Read-only preview of setup items discovered from imported POS reports for the selected store.
             </p>
           </div>
-          <div className="mt-5 grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-            {DISCOVERED_SETUP_ITEMS.map((item) => (
-              <div key={item.title} className="rounded-xl border border-border bg-secondary/30 p-4">
-                <h3 className="text-sm font-semibold text-foreground">{item.title}</h3>
-                <p className="mt-2 text-sm text-muted-foreground">{item.text}</p>
-              </div>
-            ))}
-          </div>
+          {blocked ? (
+            <div className="mt-4 rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-800">
+              Select a specific store to review discovered POS setup items.
+            </div>
+          ) : discoveryError ? (
+            <div className="mt-4 flex items-start gap-2 rounded-xl border border-destructive/30 bg-destructive/10 p-4 text-sm text-destructive">
+              <AlertCircle className="mt-0.5 h-4 w-4 flex-shrink-0" />
+              <span>{discoveryError}</span>
+            </div>
+          ) : loadingDiscovery ? (
+            <div className="mt-5 flex items-center gap-2 text-sm text-muted-foreground">
+              <Loader2 className="h-4 w-4 animate-spin" />
+              Loading discovered setup items...
+            </div>
+          ) : (
+            <div className="mt-5 grid gap-4 xl:grid-cols-2">
+              {discoverySections.map((section) => (
+                <DiscoveryCard key={section.key} section={section} />
+              ))}
+            </div>
+          )}
         </Card>
 
         <Card className="p-5">
@@ -452,6 +527,67 @@ function Metric({ label, value }: { label: string; value: number }) {
     <div className="rounded-xl border border-border bg-background p-4">
       <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">{label}</p>
       <p className="mt-2 text-2xl font-semibold text-foreground">{value}</p>
+    </div>
+  );
+}
+
+function DiscoveryCard({ section }: { section: DiscoverySection }) {
+  return (
+    <div className="rounded-xl border border-border bg-secondary/20 p-4">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+        <div>
+          <h3 className="text-sm font-semibold text-foreground">{section.title}</h3>
+          <p className="mt-1 text-xs text-muted-foreground">
+            Last source: {section.lastSourceImport ? `${formatDate(section.lastSourceImport)}${section.lastSourceFile ? ` | ${section.lastSourceFile}` : ''}` : 'None yet'}
+          </p>
+        </div>
+        <div className="grid grid-cols-3 gap-2 text-center">
+          <MiniMetric label="Total" value={section.totalDiscovered} />
+          <MiniMetric label="Review" value={section.needsReviewCount} />
+          <MiniMetric label="Exists" value={section.alreadyExistsCount} />
+        </div>
+      </div>
+
+      {section.error ? (
+        <div className="mt-4 rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs text-amber-800">
+          {section.error}
+        </div>
+      ) : section.rows.length === 0 ? (
+        <p className="mt-4 text-sm text-muted-foreground">{section.emptyMessage}</p>
+      ) : (
+        <div className="mt-4 space-y-2">
+          {section.rows.map((row) => (
+            <div key={row.id} className="rounded-lg border border-border bg-background p-3 text-sm">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <p className="font-medium text-foreground">{row.primary}</p>
+                  {row.secondary ? <p className="text-xs text-muted-foreground">{row.secondary}</p> : null}
+                </div>
+                <span className="rounded-full bg-amber-100 px-2 py-1 text-xs font-medium text-amber-700">
+                  {row.status === 'existing' ? 'Existing' : 'Needs review'}
+                </span>
+              </div>
+              <div className="mt-3 grid gap-2 sm:grid-cols-2">
+                {row.details.map((detail) => (
+                  <div key={`${row.id}-${detail.label}`} className="text-xs">
+                    <span className="text-muted-foreground">{detail.label}: </span>
+                    <span className="font-medium text-foreground">{detail.value}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function MiniMetric({ label, value }: { label: string; value: number }) {
+  return (
+    <div className="rounded-lg border border-border bg-background px-2 py-1">
+      <p className="text-[10px] font-medium uppercase text-muted-foreground">{label}</p>
+      <p className="text-sm font-semibold text-foreground">{value}</p>
     </div>
   );
 }

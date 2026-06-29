@@ -297,15 +297,206 @@ Purpose: Tracks uploads for transactions/products.
 Important:
 - Must be scoped by `store_id` and `owner_id`.
 
+### Store Settings product defaults
+
+These tables are used by `/app/store-settings` as product default sources. Store-owner writes must be scoped to the selected `activeStoreId`; All Stores mode is read-only for these settings.
+
+#### `store_settings`
+
+Purpose: One-row-per-store operating preferences for tax profile, payment methods, and discount rules.
+
+Confirmed columns:
+- `id uuid`
+- `store_id uuid`
+- `default_tax_rate numeric`
+- `default_tax_category text`
+- `default_reorder_level integer`
+- `currency_code text`
+- `price_rounding text`
+- `tax_registration_number text`
+- `payment_methods jsonb`
+- `discount_rules jsonb`
+- `created_at timestamptz`
+- `updated_at timestamptz`
+
+Rules:
+- `payment_methods` stores an array of `{ name, enabled }` values.
+- `discount_rules` stores an array of `{ name, percent, enabled }` values.
+- This is configuration only; it does not process payments or apply discounts to transactions.
+
+#### `tax_categories`
+
+Purpose: Store-specific tax options used by products, departments, categories, and promotions.
+
+Confirmed columns:
+- `id uuid`
+- `store_id uuid`
+- `name text`
+- `rate numeric`
+- `description text`
+- `is_default boolean`
+- `is_active boolean`
+- `created_at timestamptz`
+- `updated_at timestamptz`
+
+Rule: only one tax category should be default per store.
+
+#### `promotions`
+
+Purpose: Store-specific deal and promotion defaults.
+
+Confirmed columns:
+- `id uuid`
+- `store_id uuid`
+- `name text`
+- `deal_type text`
+- `quantity_required integer`
+- `deal_price numeric`
+- `start_date date`
+- `end_date date`
+- `tax_category_id uuid`
+- `is_active boolean`
+- `created_at timestamptz`
+- `updated_at timestamptz`
+
+#### `promotion_products`
+
+Purpose: Product links for store promotions.
+
+Confirmed columns:
+- `id uuid`
+- `store_id uuid`
+- `promotion_id uuid`
+- `product_id uuid`
+- `upc text`
+- `item_name text`
+- `created_at timestamptz`
+
+#### `promotion_departments`
+
+Purpose: Department applicability links for store promotions.
+
+Confirmed columns:
+- `id uuid`
+- `store_id uuid`
+- `promotion_id uuid`
+- `department_id uuid`
+- `created_at timestamptz`
+
+#### `promotion_categories`
+
+Purpose: Category applicability links for store promotions.
+
+Confirmed columns:
+- `id uuid`
+- `store_id uuid`
+- `promotion_id uuid`
+- `category_id uuid`
+- `created_at timestamptz`
+
+#### `store_departments`
+
+Purpose: Broad product departments for a store.
+
+Confirmed columns:
+- `id uuid`
+- `store_id uuid`
+- `name text`
+- `description text`
+- `ebt_eligible boolean`
+- `is_active boolean`
+- `tax_category_id uuid`
+- `age_restriction_id uuid`
+- `created_at timestamptz`
+- `updated_at timestamptz`
+
+#### `store_categories`
+
+Purpose: Detailed product categories under optional departments.
+
+Confirmed columns:
+- `id uuid`
+- `store_id uuid`
+- `name text`
+- `department_id uuid`
+- `ebt_eligible boolean`
+- `is_active boolean`
+- `tax_category_id uuid`
+- `age_restriction_id uuid`
+- `created_at timestamptz`
+- `updated_at timestamptz`
+
+#### `store_vendors`
+
+Purpose: Store-specific vendor records shared by store owner settings and superadmin vendor visibility.
+
+Confirmed columns:
+- `id uuid`
+- `store_id uuid`
+- `vendor_name text`
+- `sales_rep_name text`
+- `phone text`
+- `email text`
+- `website text`
+- `category text`
+- `notes text`
+- `order_days text[]`
+- `delivery_days text[]`
+- `expected_invoice_amount numeric`
+- `payment_terms text`
+- `notification_enabled boolean`
+- `schedule_frequency text`
+- `is_active boolean`
+- `created_at timestamptz`
+- `updated_at timestamptz`
+
+#### `global_vendors`
+
+Purpose: Superadmin-managed vendor templates that store owners can copy into `store_vendors`.
+
+Confirmed columns include the same vendor profile/schedule fields used by `store_vendors`, except `store_id`.
+
+#### `store_age_restriction_presets`
+
+Purpose: Store-specific age restriction presets used by product age verification defaults.
+
+Confirmed columns:
+- `id uuid`
+- `store_id uuid`
+- `name text`
+- `minimum_age integer`
+- `restriction_type text`
+- `is_active boolean`
+- `created_at timestamptz`
+- `updated_at timestamptz`
+
+#### `vendor_promotions`
+
+Purpose: Superadmin/company global promotion templates that store owners can copy into store-owned `promotions` rows.
+
+Confirmed columns:
+- `id uuid`
+- `title text`
+- `vendor_name text`
+- `description text`
+- `promotion_type text`
+- `status text`
+- `product_keywords text[]`
+- `target_store_notes text`
+- `internal_notes text`
+- `starts_at timestamptz`
+- `ends_at timestamptz`
+- `created_by uuid`
+- `created_at timestamptz`
+- `updated_at timestamptz`
+
+Rules:
+- Imported global promotions are copied into `promotions` as inactive store-owned deals.
+- Store promotions are not live-synced to `vendor_promotions`.
+
 ### Supporting tables
 
 Known supporting tables. Verify exact schema before writing:
-- `store_settings`
-- `store_departments`
-- `tax_categories`
-- `store_vendors`
-- `promotions`
-- `promotion_products`
 - `user_profiles`
 - `user_permissions`
 - `admin_audit_logs`

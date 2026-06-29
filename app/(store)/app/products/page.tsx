@@ -1544,20 +1544,38 @@ export default function ProductsPage() {
 
   const summary = useMemo(() => {
     const activeProducts = items.filter((product) => product.isActive ?? true);
-    const totalUnits = activeProducts.reduce((sum, product) => sum + product.stock, 0);
-    const totalCost = activeProducts.reduce((sum, product) => sum + product.stock * product.costPrice, 0);
-    const potentialRevenue = activeProducts.reduce((sum, product) => sum + product.stock * product.sellPrice, 0);
+    const inactiveProducts = items.filter((product) => product.isActive === false);
+    const totalUnits = activeProducts.reduce((sum, product) => sum + (Number(product.stock) || 0), 0);
+    const totalCost = activeProducts.reduce(
+      (sum, product) => sum + (Number(product.stock) || 0) * (Number(product.costPrice) || 0),
+      0
+    );
+    const potentialRevenue = activeProducts.reduce(
+      (sum, product) => sum + (Number(product.stock) || 0) * (Number(product.sellPrice) || 0),
+      0
+    );
     const potentialProfit = potentialRevenue - totalCost;
     const lowStock = activeProducts.filter((product) => product.stock <= product.reorderLevel);
+    const ebtEligible = activeProducts.filter((product) => product.ebtEligible === true);
+    const ageRestricted = activeProducts.filter(
+      (product) =>
+        product.ageVerification === true ||
+        product.minimumAge !== undefined ||
+        Boolean(product.ageRestrictionType?.trim())
+    );
 
     return {
       totalProducts: activeProducts.length,
+      activeProducts: activeProducts.length,
+      inactiveProducts: inactiveProducts.length,
       totalUnits,
       totalCost,
       potentialRevenue,
       potentialProfit,
       averageMargin: potentialRevenue > 0 ? (potentialProfit / potentialRevenue) * 100 : 0,
       lowStockCount: lowStock.length,
+      ebtEligibleCount: ebtEligible.length,
+      ageRestrictedCount: ageRestricted.length,
     };
   }, [items]);
 
@@ -3153,17 +3171,62 @@ const nextBreakdown = getCaseBreakdown(nextStock, unitsPerCase);
 
       {activeTab === 'overview' && (
         <div className="space-y-5">
-          <div className="grid gap-4 md:grid-cols-5">
-            <Card className="p-4">
-              <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Products</p>
-              <p className="mt-2 text-2xl font-bold text-foreground">{formatNumber(summary.totalProducts)}</p>
+          {!productsWriteBlocked && items.length === 0 && (
+            <Card className="p-6">
+              <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+                <div>
+                  <Package className="mb-3 h-8 w-8 text-primary" />
+                  <h2 className="text-lg font-semibold text-foreground">No products yet.</h2>
+                  <p className="mt-1 max-w-2xl text-sm text-muted-foreground">
+                    Add products manually, import a pricebook, or review New Products from POS import.
+                  </p>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <Button onClick={openAddModal}>
+                    <Plus className="mr-2 h-4 w-4" />
+                    Add Product
+                  </Button>
+                  <Button variant="outline" onClick={() => setActiveTab('products')}>
+                    Import Pricebook
+                  </Button>
+                  <Button variant="outline" onClick={() => setActiveTab('newProducts')}>
+                    Review New Products
+                  </Button>
+                </div>
+              </div>
             </Card>
+          )}
 
-            <Card className="p-4">
-              <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Units In Stock</p>
-              <p className="mt-2 text-2xl font-bold text-foreground">{formatNumber(summary.totalUnits)}</p>
-            </Card>
+          {productsWriteBlocked || items.length > 0 ? (
+            <>
+              <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-5">
+                <Card className="p-4">
+                  <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Active Products</p>
+                  <p className="mt-2 text-2xl font-bold text-foreground">{formatNumber(summary.activeProducts)}</p>
+                </Card>
 
+                <Card className="p-4">
+                  <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Low Stock</p>
+                  <p className="mt-2 text-2xl font-bold text-destructive">{formatNumber(summary.lowStockCount)}</p>
+                </Card>
+
+                <Card className="p-4">
+                  <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">EBT Eligible</p>
+                  <p className="mt-2 text-2xl font-bold text-foreground">{formatNumber(summary.ebtEligibleCount)}</p>
+                </Card>
+
+                <Card className="p-4">
+                  <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Age Restricted</p>
+                  <p className="mt-2 text-2xl font-bold text-foreground">{formatNumber(summary.ageRestrictedCount)}</p>
+                </Card>
+
+                <Card className="p-4">
+                  <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Inactive Products</p>
+                  <p className="mt-2 text-2xl font-bold text-muted-foreground">{formatNumber(summary.inactiveProducts)}</p>
+                </Card>
+              </div>
+
+          <div className="grid gap-4 md:grid-cols-4">
             <Card className="p-4">
               <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Inventory Cost</p>
               <p className="mt-2 text-2xl font-bold text-foreground">{formatCurrency(summary.totalCost, { compact: true })}</p>
@@ -3175,8 +3238,15 @@ const nextBreakdown = getCaseBreakdown(nextStock, unitsPerCase);
             </Card>
 
             <Card className="p-4">
-              <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Profit If Sold All</p>
-              <p className="mt-2 text-2xl font-bold text-success">{formatCurrency(summary.potentialProfit, { compact: true })}</p>
+              <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Potential Profit</p>
+              <p className={cn('mt-2 text-2xl font-bold', summary.potentialProfit >= 0 ? 'text-success' : 'text-destructive')}>
+                {formatCurrency(summary.potentialProfit, { compact: true })}
+              </p>
+            </Card>
+
+            <Card className="p-4">
+              <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Average Margin</p>
+              <p className="mt-2 text-2xl font-bold text-foreground">{summary.averageMargin.toFixed(1)}%</p>
             </Card>
           </div>
 
@@ -3235,6 +3305,8 @@ const nextBreakdown = getCaseBreakdown(nextStock, unitsPerCase);
               </div>
             </Card>
           </div>
+            </>
+          ) : null}
         </div>
       )}
 

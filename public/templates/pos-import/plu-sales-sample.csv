@@ -1,0 +1,4 @@
+plu_raw,description,unit_price,customer_count,items_sold,total_sales,sales_percent,reason_code,promotion_id
+00012000028496/000,SB DUBLST VANILL,3.00,1,2.000,6.00,0.04,MATCH_SALE,135
+00049000050103/000,COCA COLA 20OZ,2.79,4,4.000,11.16,0.08,,
+00002840006416/000,DORITOS NACHO,2.49,2,2.000,4.98,0.03,DISCOUNT_SALE,156

@@ -1,5 +1,6 @@
 'use client';
 
+import Link from 'next/link';
 import { useMemo, useState, type ElementType, type ReactNode } from 'react';
 import { DashboardShell, PageHeader, PageLoading } from '@/components/layout/sidebar';
 import { Card } from '@/components/ui/card';
@@ -14,6 +15,7 @@ import {
   CircleAlert,
   CreditCard,
   Download,
+  FileUp,
   Fuel,
   Receipt,
   RefreshCw,
@@ -1005,6 +1007,25 @@ export default function ReportsPage() {
               </Button>
             </div>
           </div>
+        </div>
+      </Card>
+
+      <Card className="mb-5 p-5">
+        <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+          <div className="flex gap-3">
+            <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-primary/10 text-primary">
+              <FileUp className="h-5 w-5" />
+            </div>
+            <div>
+              <h2 className="font-semibold text-foreground">POS Imports</h2>
+              <p className="mt-1 text-sm text-muted-foreground">
+                Upload POS report files and import PLU, department, category, tax, deal, payment, fuel, and cashier summaries.
+              </p>
+            </div>
+          </div>
+          <Button asChild>
+            <Link href="/app/reports/pos-import">Open POS Imports</Link>
+          </Button>
         </div>
       </Card>
 

@@ -1,0 +1,4 @@
+department_number,department_name,customer_count,items_sold,sales_percent,gross_sales,refunds,discounts,net_sales,cashier_name,register_number
+1,BEER,71,107.000,2.83,423.23,0.00,8.18,415.05,All Cashiers,
+2,TOBACCO/CIGARS,45,61.000,5.21,812.44,0.00,14.50,797.94,All Cashiers,
+3,DRINKS,120,146.000,8.33,1025.15,0.00,22.10,1003.05,All Cashiers,

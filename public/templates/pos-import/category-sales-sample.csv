@@ -1,0 +1,4 @@
+category_number,category_name,customer_count,items_sold,sales_percent,net_sales,cashier_name,register_number
+100,ENERGY DRINKS,35,42.000,3.25,156.78,All Cashiers,
+200,CIGARETTES,28,31.000,6.10,485.40,All Cashiers,
+9999,FUEL DEPOSIT,12,12.000,1.20,250.00,All Cashiers,

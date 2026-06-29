@@ -14,7 +14,6 @@ import {
   X,
   Zap,
   Store,
-  Upload,
   LogOut,
   Loader2,
   Settings,
@@ -31,7 +30,6 @@ import { useAuth } from '@/lib/auth';
 const navItems = [
   { href: '/app/dashboard', label: 'Dashboard', icon: LayoutDashboard },
   { href: '/app/transactions', label: 'Live Transactions', icon: Receipt },
-  { href: '/app/upload', label: 'Upload POS Data', icon: Upload },
   { href: '/app/products', label: 'Products', icon: Package },
   { href: '/app/fuel', label: 'Fuel', icon: Fuel },
   { href: '/app/store-settings', label: 'Store Settings', icon: Settings },
@@ -80,62 +78,64 @@ function StoreCard({ onNavigate }: { onNavigate?: () => void }) {
 
   return (
     <div className="space-y-2 border-t border-sidebar-accent p-4">
-      <button
-        type="button"
-        onClick={() => setOpen((current) => !current)}
-        className="flex items-center gap-3 rounded-lg bg-sidebar-accent p-3 transition-colors hover:bg-sidebar-accent/80"
-      >
-        <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-primary/15 text-primary">
-          <Store className="h-4 w-4" />
-        </div>
-        <div className="min-w-0 flex-1 text-left">
-          <p className="truncate text-sm font-medium text-white">{storeName}</p>
-          {storeScope === 'all' ? (
-            <p className="text-xs text-sidebar-foreground/60">{stores.length} stores selected</p>
-          ) : !setupComplete ? (
-            <p className="text-xs text-sidebar-foreground/60">Complete store setup</p>
-          ) : (
-            <p className="text-xs text-sidebar-foreground/60">Selected store</p>
-          )}
-        </div>
-        <ChevronDown className="h-4 w-4 text-sidebar-foreground/60" />
-      </button>
-
-      {open && (
-        <div className="rounded-lg border border-sidebar-accent bg-sidebar p-2 shadow-xl">
-          <button
-            type="button"
-            onClick={() => chooseStore(null)}
-            className={`flex w-full items-center gap-2 rounded-md px-3 py-2 text-left text-sm transition-colors ${
-              storeScope === 'all' ? 'bg-primary text-primary-foreground' : 'text-sidebar-foreground/75 hover:bg-sidebar-accent hover:text-white'
-            }`}
-          >
+      <div className="relative">
+        <button
+          type="button"
+          onClick={() => setOpen((current) => !current)}
+          className="flex w-full items-center gap-3 rounded-lg bg-sidebar-accent p-3 transition-colors hover:bg-sidebar-accent/80"
+        >
+          <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-primary/15 text-primary">
             <Store className="h-4 w-4" />
-            All Stores
-          </button>
-          {stores.map((ownedStore) => (
+          </div>
+          <div className="min-w-0 flex-1 text-left">
+            <p className="truncate text-sm font-medium text-white">{storeName}</p>
+            {storeScope === 'all' ? (
+              <p className="text-xs text-sidebar-foreground/60">{stores.length} stores selected</p>
+            ) : !setupComplete ? (
+              <p className="text-xs text-sidebar-foreground/60">Complete store setup</p>
+            ) : (
+              <p className="text-xs text-sidebar-foreground/60">Selected store</p>
+            )}
+          </div>
+          <ChevronDown className={cn('h-4 w-4 text-sidebar-foreground/60 transition-transform', open && 'rotate-180')} />
+        </button>
+
+        {open && (
+          <div className="absolute bottom-full left-0 right-0 z-50 mb-2 max-h-[min(60vh,20rem)] overflow-y-auto rounded-lg border border-sidebar-accent bg-sidebar p-2 shadow-xl">
             <button
-              key={ownedStore.id}
               type="button"
-              onClick={() => chooseStore(ownedStore.id)}
-              className={`mt-1 flex w-full items-center gap-2 rounded-md px-3 py-2 text-left text-sm transition-colors ${
-                activeStoreId === ownedStore.id ? 'bg-primary text-primary-foreground' : 'text-sidebar-foreground/75 hover:bg-sidebar-accent hover:text-white'
+              onClick={() => chooseStore(null)}
+              className={`flex w-full items-center gap-2 rounded-md px-3 py-2 text-left text-sm transition-colors ${
+                storeScope === 'all' ? 'bg-primary text-primary-foreground' : 'text-sidebar-foreground/75 hover:bg-sidebar-accent hover:text-white'
               }`}
             >
               <Store className="h-4 w-4" />
-              <span className="truncate">{ownedStore.store_name || 'Unnamed store'}</span>
+              All Stores
             </button>
-          ))}
-          <button
-            type="button"
-            onClick={handleAddStore}
-            className="mt-2 flex w-full items-center gap-2 rounded-md border border-sidebar-accent px-3 py-2 text-left text-sm text-sidebar-foreground/75 transition-colors hover:bg-sidebar-accent hover:text-white"
-          >
-            <Plus className="h-4 w-4" />
-            Add New Store
-          </button>
-        </div>
-      )}
+            {stores.map((ownedStore) => (
+              <button
+                key={ownedStore.id}
+                type="button"
+                onClick={() => chooseStore(ownedStore.id)}
+                className={`mt-1 flex w-full items-center gap-2 rounded-md px-3 py-2 text-left text-sm transition-colors ${
+                  activeStoreId === ownedStore.id ? 'bg-primary text-primary-foreground' : 'text-sidebar-foreground/75 hover:bg-sidebar-accent hover:text-white'
+                }`}
+              >
+                <Store className="h-4 w-4" />
+                <span className="truncate">{ownedStore.store_name || 'Unnamed store'}</span>
+              </button>
+            ))}
+            <button
+              type="button"
+              onClick={handleAddStore}
+              className="mt-2 flex w-full items-center gap-2 rounded-md border border-sidebar-accent px-3 py-2 text-left text-sm text-sidebar-foreground/75 transition-colors hover:bg-sidebar-accent hover:text-white"
+            >
+              <Plus className="h-4 w-4" />
+              Add New Store
+            </button>
+          </div>
+        )}
+      </div>
 
       {user && (
         <button

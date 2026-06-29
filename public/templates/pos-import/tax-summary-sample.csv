@@ -1,0 +1,4 @@
+tax_name,tax_rate,actual_rate,taxable_sales,non_taxable_sales,refund_taxes,sales_taxes,total_taxes,register_number
+Grocery & drinks Tax,4.125,4.131,1003.51,13654.40,0.00,41.79,41.45,
+ALCOHOL MISC TAX,8.625,8.627,2061.67,12596.24,0.00,177.85,177.85,
+TOBACCO TAX,8.625,8.625,850.00,0.00,0.00,73.31,73.31,

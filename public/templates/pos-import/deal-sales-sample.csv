@@ -1,0 +1,4 @@
+deal_type,promotion_id,description,customer_count,match_count,combo_count,total_sales
+mix_match,156,BEER 25OZ 2 FOR,8,8,0,56.00
+mix_match,157,BEER 25OZ 3 FOR,1,1,0,10.00
+combo,200,ENERGY DRINK 2 FOR 6,12,0,12,72.00

@@ -207,6 +207,7 @@ type StoreVendorData = {
 
 const RECEIVING_HISTORY_KEY = 'storepulse_receiving_history_v1';
 const INVOICE_BUCKET = 'inventory-invoices';
+const PRODUCTS_MANAGE_STORE_MESSAGE = 'Select a specific store to manage products.';
 const PRESET_AGE_TYPES = ['Tobacco', 'Alcohol', 'Lottery', 'Vape'];
 
 const EMPTY_PRODUCT_FORM: ProductFormState = {
@@ -592,6 +593,7 @@ function ProductModal({
   onUpcBlur,
   onPluBlur,
   onProductCodeBlur,
+  writeBlocked,
 }: {
   open: boolean;
   mode: 'add' | 'edit';
@@ -612,6 +614,7 @@ function ProductModal({
   onUpcBlur: () => void;
   onPluBlur: () => void;
   onProductCodeBlur: () => void;
+  writeBlocked?: boolean;
 }) {
   if (!open) return null;
 
@@ -806,14 +809,14 @@ function ProductModal({
 
         <div className="flex justify-end gap-2 border-t border-border px-4 py-3">
           <Button variant="outline" onClick={onClose} disabled={saving}>Cancel</Button>
-          <Button onClick={onSave} disabled={saving}>{saving ? 'Saving...' : mode === 'add' ? (upcDuplicate ? 'Update Existing Product' : 'Add Product') : 'Save Changes'}</Button>
+          <Button onClick={onSave} disabled={saving || writeBlocked}>{saving ? 'Saving...' : mode === 'add' ? (upcDuplicate ? 'Update Existing Product' : 'Add Product') : 'Save Changes'}</Button>
         </div>
       </div>
     </div>
   );
 }
 export default function ProductsPage() {
-  const { store } = useAuth();
+  const { user, store, activeStoreId, storeScope } = useAuth();
 
   const {
     products: storeProducts,
@@ -899,6 +902,16 @@ export default function ProductsPage() {
   const [vendorProductSearch, setVendorProductSearch] = useState('');
   const [orderUnitOverrides, setOrderUnitOverrides] = useState<Record<string, string>>({});
   const [todayVendorNoticeDismissed, setTodayVendorNoticeDismissed] = useState(false);
+  const productsWriteBlocked = Boolean(user && (storeScope === 'all' || !activeStoreId));
+  const selectedStoreId = activeStoreId ?? store?.id ?? null;
+  const requireSelectedStoreForWrite = useCallback(
+    (setMessage: (message: string | null) => void) => {
+      if (!productsWriteBlocked) return true;
+      setMessage(PRODUCTS_MANAGE_STORE_MESSAGE);
+      return false;
+    },
+    [productsWriteBlocked]
+  );
 
   useEffect(() => {
     setItems(storeProducts);
@@ -906,6 +919,11 @@ export default function ProductsPage() {
 
   const loadCloudReceivingHistory = async () => {
     if (!store?.id) {
+      if (user) {
+        setReceivingHistory([]);
+        return;
+      }
+
       try {
         const raw = localStorage.getItem(RECEIVING_HISTORY_KEY);
         if (raw) setReceivingHistory(JSON.parse(raw) as ReceivingHistoryItem[]);
@@ -1719,10 +1737,12 @@ export default function ProductsPage() {
   };
 
   const removeReceivingLine = (id: string) => {
+    if (!requireSelectedStoreForWrite(setReceivingMessage)) return;
     setReceivingLines((previous) => previous.filter((line) => line.id !== id));
   };
 
   const addManualReceivingLine = () => {
+    if (!requireSelectedStoreForWrite(setReceivingMessage)) return;
     setReceivingLines((previous) => [
       ...previous,
       {
@@ -1741,6 +1761,7 @@ export default function ProductsPage() {
 
   const handleInvoiceFile = (file: File | null) => {
     if (!file) return;
+    if (!requireSelectedStoreForWrite(setReceivingMessage)) return;
 
     const lowerName = file.name.toLowerCase();
     const sourceKind: InvoiceSourceKind = lowerName.endsWith('.pdf')
@@ -1764,6 +1785,8 @@ export default function ProductsPage() {
   };
 
   const extractSelectedInvoice = async () => {
+    if (!requireSelectedStoreForWrite(setReceivingMessage)) return;
+
     if (!invoiceFile) {
       setReceivingMessage('Please choose an invoice file first.');
       return;
@@ -1855,6 +1878,8 @@ export default function ProductsPage() {
   };
 
   const openAddModal = () => {
+    if (!requireSelectedStoreForWrite(setFormError)) return;
+
     setModalMode('add');
     setForm(EMPTY_PRODUCT_FORM);
     setFormError(null);
@@ -1867,6 +1892,8 @@ export default function ProductsPage() {
   };
 
   const openEditModal = (product: Product) => {
+    if (!requireSelectedStoreForWrite(setFormError)) return;
+
     setModalMode('edit');
     setForm(productToForm(product));
     setFormError(null);
@@ -1910,6 +1937,8 @@ export default function ProductsPage() {
   };
 
   const saveProduct = async () => {
+    if (!requireSelectedStoreForWrite(setFormError)) return;
+
     const validationError = validateProductForm(form);
 
     if (validationError) {
@@ -1939,6 +1968,12 @@ export default function ProductsPage() {
     event.target.value = '';
 
     if (!file) return;
+    if (!requireSelectedStoreForWrite(setProductImportError)) {
+      setProductImportFileName('');
+      setProductImportResult(null);
+      setProductImportSummary(null);
+      return;
+    }
 
     setProductImportFileName(file.name);
     setProductImportError(null);
@@ -1988,6 +2023,7 @@ export default function ProductsPage() {
   };
 
   const importParsedProducts = async () => {
+    if (!requireSelectedStoreForWrite(setProductImportError)) return;
     if (!productImportResult || productImportResult.products.length === 0) return;
 
     setImportingProducts(true);
@@ -2116,6 +2152,7 @@ export default function ProductsPage() {
     if (bulkEditMode) {
       exitBulkEdit();
     } else {
+      if (!requireSelectedStoreForWrite(setBulkMessage)) return;
       setBulkEditMode(true);
       setBulkMessage(null);
     }
@@ -2142,6 +2179,8 @@ export default function ProductsPage() {
   };
 
   const applyBulkChanges = async () => {
+    if (!requireSelectedStoreForWrite(setBulkMessage)) return;
+
     const changes: Partial<Product> = {};
 
     if (bulkDepartment.trim()) changes.department = bulkDepartment.trim();
@@ -2227,10 +2266,11 @@ export default function ProductsPage() {
   };
 
   const uploadInvoiceSource = async (existingPath?: string) => {
-    if (!store?.id) return existingPath || '';
+    if (productsWriteBlocked) throw new Error(PRODUCTS_MANAGE_STORE_MESSAGE);
+    if (!selectedStoreId) return existingPath || '';
     if (!invoiceFile) return existingPath || '';
 
-    const path = `${store.id}/${Date.now()}-${safeFileName(invoiceFile.name)}`;
+    const path = `${selectedStoreId}/${Date.now()}-${safeFileName(invoiceFile.name)}`;
 
     const { error } = await supabase.storage.from(INVOICE_BUCKET).upload(path, invoiceFile, {
       upsert: true,
@@ -2247,6 +2287,8 @@ export default function ProductsPage() {
     lines: ReceivingLine[],
     mode: 'add' | 'subtract'
   ) => {
+    if (productsWriteBlocked) throw new Error(PRODUCTS_MANAGE_STORE_MESSAGE);
+
     let nextProducts = [...workingProducts];
     const savedLines: ReceivingLine[] = [];
 
@@ -2327,10 +2369,10 @@ const nextBreakdown = getCaseBreakdown(nextStock, unitsPerCase);
   };
 
   const saveCloudReceipt = async (entry: ReceivingHistoryItem) => {
-    if (!store?.id) return entry;
+    if (!selectedStoreId) return entry;
 
     const receiptPayload = {
-      store_id: store.id,
+      store_id: selectedStoreId,
       file_name: entry.fileName,
       receipt_name: entry.receiptName || entry.fileName,
       invoice_number: entry.invoiceNumber || null,
@@ -2349,14 +2391,16 @@ const nextBreakdown = getCaseBreakdown(nextStock, unitsPerCase);
       const { error } = await supabase
         .from('inventory_receipts')
         .update(receiptPayload)
-        .eq('id', editingHistoryId);
+        .eq('id', editingHistoryId)
+        .eq('store_id', selectedStoreId);
 
       if (error) throw new Error(error.message);
 
       const { error: deleteItemsError } = await supabase
         .from('inventory_receipt_items')
         .delete()
-        .eq('receipt_id', editingHistoryId);
+        .eq('receipt_id', editingHistoryId)
+        .eq('store_id', selectedStoreId);
 
       if (deleteItemsError) throw new Error(deleteItemsError.message);
     } else {
@@ -2372,7 +2416,7 @@ const nextBreakdown = getCaseBreakdown(nextStock, unitsPerCase);
 
     const itemPayload = (entry.lines || []).map((line) => ({
       receipt_id: receiptId,
-      store_id: store.id,
+      store_id: selectedStoreId,
       upc: line.upc || null,
       item_name: line.name,
       department: line.department || null,
@@ -2395,6 +2439,8 @@ const nextBreakdown = getCaseBreakdown(nextStock, unitsPerCase);
   };
 
   const saveReceiving = async () => {
+    if (!requireSelectedStoreForWrite(setReceivingMessage)) return;
+
     const validLines = receivingLines.filter((line) => line.name.trim() && line.quantity > 0);
 
     if (!validLines.length) {
@@ -2470,7 +2516,7 @@ const nextBreakdown = getCaseBreakdown(nextStock, unitsPerCase);
 
       setReceivingHistory(limitedHistory);
 
-      if (!store?.id) {
+      if (!selectedStoreId) {
         localStorage.setItem(RECEIVING_HISTORY_KEY, JSON.stringify(limitedHistory));
       }
 
@@ -2511,6 +2557,8 @@ const nextBreakdown = getCaseBreakdown(nextStock, unitsPerCase);
   };
 
   const deleteHistoryEntry = async (entry: ReceivingHistoryItem) => {
+    if (!requireSelectedStoreForWrite(setReceivingMessage)) return;
+
     setReceivingMessage(null);
 
     try {
@@ -2519,8 +2567,12 @@ const nextBreakdown = getCaseBreakdown(nextStock, unitsPerCase);
         setItems(reversed.nextProducts);
       }
 
-      if (store?.id) {
-        const { error } = await supabase.from('inventory_receipts').delete().eq('id', entry.id);
+      if (selectedStoreId) {
+        const { error } = await supabase
+          .from('inventory_receipts')
+          .delete()
+          .eq('id', entry.id)
+          .eq('store_id', selectedStoreId);
         if (error) throw new Error(error.message);
 
         if (entry.sourcePath) {
@@ -2531,7 +2583,7 @@ const nextBreakdown = getCaseBreakdown(nextStock, unitsPerCase);
       const nextHistory = receivingHistory.filter((item) => item.id !== entry.id);
       setReceivingHistory(nextHistory);
 
-      if (!store?.id) {
+      if (!selectedStoreId) {
         localStorage.setItem(RECEIVING_HISTORY_KEY, JSON.stringify(nextHistory));
       }
     } catch (error) {
@@ -2561,12 +2613,19 @@ const nextBreakdown = getCaseBreakdown(nextStock, unitsPerCase);
             Export
           </Button>
 
-          <Button size="sm" onClick={openAddModal}>
+          <Button size="sm" onClick={openAddModal} disabled={productsWriteBlocked}>
             <Plus className="mr-2 h-4 w-4" />
             Add Product
           </Button>
         </div>
       </PageHeader>
+
+      {productsWriteBlocked && (
+        <div className="mb-5 flex items-start gap-3 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+          <CircleAlert className="mt-0.5 h-4 w-4 shrink-0" />
+          <span>{PRODUCTS_MANAGE_STORE_MESSAGE}</span>
+        </div>
+      )}
 
       {(cloudError || receivingMessage || purchaseOrderMessage) && (
         <div className="mb-5 flex items-start gap-3 rounded-lg border border-border bg-card px-4 py-3 text-sm text-muted-foreground">
@@ -2576,7 +2635,14 @@ const nextBreakdown = getCaseBreakdown(nextStock, unitsPerCase);
       )}
 
       <div className="mb-5 grid gap-3 md:grid-cols-4">
-        <button onClick={openAddModal} className="rounded-lg border bg-card p-4 text-left shadow-sm transition hover:bg-secondary/40">
+        <button
+          onClick={openAddModal}
+          disabled={productsWriteBlocked}
+          className={cn(
+            'rounded-lg border bg-card p-4 text-left shadow-sm transition hover:bg-secondary/40',
+            productsWriteBlocked && 'cursor-not-allowed opacity-60 hover:bg-card'
+          )}
+        >
           <Plus className="mb-3 h-5 w-5 text-primary" />
           <p className="font-semibold text-foreground">Add Product</p>
           <p className="mt-1 text-xs text-muted-foreground">Create a new item.</p>
@@ -2684,7 +2750,7 @@ const nextBreakdown = getCaseBreakdown(nextStock, unitsPerCase);
                       </p>
                     </div>
 
-                    <Button size="sm" variant="outline" onClick={() => openEditModal(product)}>
+                    <Button size="sm" variant="outline" onClick={() => openEditModal(product)} disabled={productsWriteBlocked}>
                       Edit
                     </Button>
                   </div>
@@ -2767,7 +2833,7 @@ const nextBreakdown = getCaseBreakdown(nextStock, unitsPerCase);
                 placeholder="Max $"
               />
 
-              <Button variant="outline" onClick={toggleBulkEdit}>
+              <Button variant="outline" onClick={toggleBulkEdit} disabled={productsWriteBlocked}>
                 {bulkEditMode ? 'Exit Bulk Edit' : 'Bulk Edit'}
               </Button>
             </div>
@@ -2799,7 +2865,12 @@ const nextBreakdown = getCaseBreakdown(nextStock, unitsPerCase);
                 <p className="text-sm text-muted-foreground">Upload a CSV or XLSX pricebook and choose how duplicates are handled.</p>
               </div>
 
-              <label className="inline-flex cursor-pointer items-center justify-center gap-2 rounded-md border border-input bg-background px-3 py-2 text-sm font-medium shadow-sm hover:bg-secondary/50">
+              <label
+                className={cn(
+                  'inline-flex cursor-pointer items-center justify-center gap-2 rounded-md border border-input bg-background px-3 py-2 text-sm font-medium shadow-sm hover:bg-secondary/50',
+                  productsWriteBlocked && 'cursor-not-allowed opacity-60 hover:bg-background'
+                )}
+              >
                 <Upload className="h-4 w-4" />
                 CSV or XLSX
                 <input
@@ -2807,6 +2878,7 @@ const nextBreakdown = getCaseBreakdown(nextStock, unitsPerCase);
                   accept=".csv,.xlsx,.xls,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel"
                   className="hidden"
                   onChange={handleProductImportFile}
+                  disabled={productsWriteBlocked}
                 />
               </label>
             </div>
@@ -2876,7 +2948,7 @@ const nextBreakdown = getCaseBreakdown(nextStock, unitsPerCase);
                   </div>
                 </div>
 
-                <Button onClick={() => void importParsedProducts()} disabled={importingProducts || productImportResult.validRows === 0}>
+                <Button onClick={() => void importParsedProducts()} disabled={importingProducts || productsWriteBlocked || productImportResult.validRows === 0}>
                   {importingProducts ? 'Importing...' : 'Import Products'}
                 </Button>
               </div>
@@ -2912,7 +2984,7 @@ const nextBreakdown = getCaseBreakdown(nextStock, unitsPerCase);
             <Card className="sticky top-3 z-20 border-primary/30 p-4 shadow-md">
               <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
                 <p className="font-semibold text-foreground">{selectedUpcs.size} products selected</p>
-                <Button size="sm" onClick={() => void applyBulkChanges()}>
+                <Button size="sm" onClick={() => void applyBulkChanges()} disabled={productsWriteBlocked}>
                   Apply Changes
                 </Button>
               </div>
@@ -3084,7 +3156,7 @@ const nextBreakdown = getCaseBreakdown(nextStock, unitsPerCase);
                         </td>
 
                         <td className="px-4 py-4 text-right">
-                          <Button variant="outline" size="sm" onClick={() => openEditModal(product)}>
+                          <Button variant="outline" size="sm" onClick={() => openEditModal(product)} disabled={productsWriteBlocked}>
                             <Pencil className="mr-2 h-4 w-4" />
                             Edit
                           </Button>
@@ -3110,7 +3182,12 @@ const nextBreakdown = getCaseBreakdown(nextStock, unitsPerCase);
                 </p>
 
                 <div className="mt-5 grid gap-3">
-                  <label className="flex cursor-pointer items-center justify-center gap-3 rounded-lg border border-dashed border-border bg-secondary/30 p-6 text-center transition hover:bg-secondary/50">
+                  <label
+                    className={cn(
+                      'flex cursor-pointer items-center justify-center gap-3 rounded-lg border border-dashed border-border bg-secondary/30 p-6 text-center transition hover:bg-secondary/50',
+                      productsWriteBlocked && 'cursor-not-allowed opacity-60 hover:bg-secondary/30'
+                    )}
+                  >
                     <Upload className="h-5 w-5 text-primary" />
                     <span className="text-sm font-medium text-foreground">Choose CSV, PDF, or image invoice</span>
                     <input
@@ -3118,10 +3195,16 @@ const nextBreakdown = getCaseBreakdown(nextStock, unitsPerCase);
                       accept=".csv,text/csv,application/pdf,image/*"
                       className="hidden"
                       onChange={(event) => handleInvoiceFile(event.target.files?.[0] || null)}
+                      disabled={productsWriteBlocked}
                     />
                   </label>
 
-                  <label className="flex cursor-pointer items-center justify-center gap-3 rounded-lg border border-border p-4 text-center transition hover:bg-secondary/40">
+                  <label
+                    className={cn(
+                      'flex cursor-pointer items-center justify-center gap-3 rounded-lg border border-border p-4 text-center transition hover:bg-secondary/40',
+                      productsWriteBlocked && 'cursor-not-allowed opacity-60 hover:bg-background'
+                    )}
+                  >
                     <Camera className="h-5 w-5 text-primary" />
                     <span className="text-sm font-medium text-foreground">Take invoice photo</span>
                     <input
@@ -3130,6 +3213,7 @@ const nextBreakdown = getCaseBreakdown(nextStock, unitsPerCase);
                       capture="environment"
                       className="hidden"
                       onChange={(event) => handleInvoiceFile(event.target.files?.[0] || null)}
+                      disabled={productsWriteBlocked}
                     />
                   </label>
                 </div>
@@ -3144,7 +3228,7 @@ const nextBreakdown = getCaseBreakdown(nextStock, unitsPerCase);
                 <Button
                   className="mt-4 w-full"
                   onClick={() => void extractSelectedInvoice()}
-                  disabled={!invoiceFile || extractingInvoice}
+                  disabled={!invoiceFile || extractingInvoice || productsWriteBlocked}
                 >
                   <Upload className="mr-2 h-4 w-4" />
                   {extractingInvoice ? 'Extracting...' : 'Upload & Extract'}
@@ -3250,12 +3334,12 @@ const nextBreakdown = getCaseBreakdown(nextStock, unitsPerCase);
                 </div>
 
                 <div className="flex flex-wrap gap-2">
-                  <Button variant="outline" onClick={addManualReceivingLine}>
+                  <Button variant="outline" onClick={addManualReceivingLine} disabled={productsWriteBlocked}>
                     <Plus className="mr-2 h-4 w-4" />
                     Add Row
                   </Button>
 
-                  <Button onClick={() => void saveReceiving()} disabled={savingReceiving}>
+                  <Button onClick={() => void saveReceiving()} disabled={savingReceiving || productsWriteBlocked}>
                     <CheckCircle2 className="mr-2 h-4 w-4" />
                     {savingReceiving ? 'Saving...' : editingHistoryId ? 'Update Receiving' : 'Save Receiving'}
                   </Button>
@@ -3285,7 +3369,7 @@ const nextBreakdown = getCaseBreakdown(nextStock, unitsPerCase);
                           {line.status}
                         </span>
 
-                        <Button variant="outline" size="sm" onClick={() => removeReceivingLine(line.id)}>
+                        <Button variant="outline" size="sm" onClick={() => removeReceivingLine(line.id)} disabled={productsWriteBlocked}>
                           <X className="mr-2 h-4 w-4" />
                           Remove
                         </Button>
@@ -3794,7 +3878,7 @@ const nextBreakdown = getCaseBreakdown(nextStock, unitsPerCase);
                                   {selected ? 'In Order' : 'Add to Order'}
                                 </Button>
 
-                                <Button size="sm" variant="outline" onClick={() => openEditModal(product)}>
+                                <Button size="sm" variant="outline" onClick={() => openEditModal(product)} disabled={productsWriteBlocked}>
                                   <Pencil className="mr-2 h-4 w-4" />
                                   Edit
                                 </Button>
@@ -4065,6 +4149,7 @@ const nextBreakdown = getCaseBreakdown(nextStock, unitsPerCase);
                     <Button
                       variant="outline"
                       size="sm"
+                      disabled={productsWriteBlocked}
                       onClick={() => {
                         setReceivingLines(entry.lines || []);
                         setInvoiceFileName(entry.fileName);
@@ -4085,6 +4170,7 @@ const nextBreakdown = getCaseBreakdown(nextStock, unitsPerCase);
                     <Button
                       variant="outline"
                       size="sm"
+                      disabled={productsWriteBlocked}
                       onClick={() => void deleteHistoryEntry(entry)}
                     >
                       <Trash2 className="mr-2 h-4 w-4" />
@@ -4163,6 +4249,7 @@ const nextBreakdown = getCaseBreakdown(nextStock, unitsPerCase);
         onUpcBlur={() => checkUpcDuplicate()}
         onPluBlur={checkPluDuplicate}
         onProductCodeBlur={checkProductCodeDuplicate}
+        writeBlocked={productsWriteBlocked}
       />
     </DashboardShell>
   );

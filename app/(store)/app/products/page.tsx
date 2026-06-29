@@ -1,5 +1,6 @@
 'use client';
 
+import Link from 'next/link';
 import { useCallback, useEffect, useMemo, useState, type ChangeEvent } from 'react';
 import {
   AlertTriangle,
@@ -45,7 +46,7 @@ import {
 import { exportToCsv, formatCurrency, formatNumber } from '@/lib/format';
 import { cn } from '@/lib/utils';
 
-type Tab = 'overview' | 'products' | 'receiving' | 'reorder' | 'history';
+type Tab = 'overview' | 'products' | 'newProducts' | 'receiving' | 'reorder' | 'history';
 
 type ProductFormState = {
   upc: string;
@@ -89,6 +90,63 @@ type ProductImportSummary = {
   unmatched: number;
   errorRows: number;
 } | null;
+
+type NewProductStatus = 'ready_to_add' | 'missing_upc' | 'duplicate_found' | 'price_conflict';
+
+type NewProductCounts = {
+  total: number;
+  readyToAdd: number;
+  missingUpc: number;
+  duplicateFound: number;
+  priceConflict: number;
+  needsReview: number;
+};
+
+type NewProductCandidate = {
+  sourceType: 'pos_import';
+  candidateKey: string;
+  sourceRef: {
+    candidateKey: string;
+    pos_plu_sale_ids: string[];
+    report_period_ids: string[];
+    report_file_ids: string[];
+    pos_plu_sale_count: number;
+    report_period_count: number;
+    report_file_count: number;
+    first_seen_at: string | null;
+    last_seen_at: string | null;
+  };
+  pluRaw: string | null;
+  pluNormalized: string | null;
+  upcNormalized: string | null;
+  description: string | null;
+  unitPrice: number;
+  timesSold: number;
+  totalRevenue: number;
+  firstSeenAt: string | null;
+  lastSeenAt: string | null;
+  latestImport: string | null;
+  promotionId: string | null;
+  confidenceScore: number;
+  status: NewProductStatus;
+  existingProduct: {
+    id: string;
+    upc: string;
+    item_name: string | null;
+    selling_price: number | string | null;
+    plu: string | null;
+    product_code: string | null;
+  } | null;
+  priceConflict: {
+    posPrice: number;
+    existingPrice: number;
+    percentDifference: number;
+  } | null;
+};
+
+type NewProductsResponse =
+  | { ok: true; candidates: NewProductCandidate[]; counts: NewProductCounts }
+  | { ok: false; error: string };
 
 type TaxCategoryOption = {
   id: string;
@@ -211,6 +269,20 @@ const PRODUCTS_MANAGE_STORE_MESSAGE = 'Select a specific store to manage product
 const PRODUCTS_ALL_STORES_READONLY_MESSAGE =
   'All Stores product aggregation is not available yet. Select a specific store to view and manage products.';
 const PRESET_AGE_TYPES = ['Tobacco', 'Alcohol', 'Lottery', 'Vape'];
+const EMPTY_NEW_PRODUCT_COUNTS: NewProductCounts = {
+  total: 0,
+  readyToAdd: 0,
+  missingUpc: 0,
+  duplicateFound: 0,
+  priceConflict: 0,
+  needsReview: 0,
+};
+const NEW_PRODUCT_STATUS_LABELS: Record<NewProductStatus, string> = {
+  ready_to_add: 'Ready to Add',
+  missing_upc: 'Missing UPC',
+  duplicate_found: 'Duplicate Found',
+  price_conflict: 'Price Conflict',
+};
 
 const EMPTY_PRODUCT_FORM: ProductFormState = {
   upc: '',
@@ -259,6 +331,7 @@ const DEFAULT_DEPARTMENTS = [
 const TABS: Array<{ key: Tab; label: string }> = [
   { key: 'overview', label: 'Overview' },
   { key: 'products', label: 'Products' },
+  { key: 'newProducts', label: 'New Products' },
   { key: 'receiving', label: 'Receiving' },
   { key: 'reorder', label: 'Reorder' },
   { key: 'history', label: 'History' },
@@ -267,6 +340,28 @@ const TABS: Array<{ key: Tab; label: string }> = [
 function safeNumber(value: string | number | undefined, fallback = 0) {
   const parsed = Number(String(value ?? '').replace(/[$,]/g, '').trim());
   return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function newProductStatusRank(status: NewProductStatus) {
+  return status === 'ready_to_add' ? 0 : status === 'price_conflict' ? 1 : status === 'missing_upc' ? 2 : 3;
+}
+
+function newProductStatusClass(status: NewProductStatus) {
+  if (status === 'ready_to_add') return 'bg-success/10 text-success';
+  if (status === 'price_conflict') return 'bg-orange-100 text-orange-700';
+  if (status === 'missing_upc') return 'bg-amber-100 text-amber-800';
+  return 'bg-secondary text-muted-foreground';
+}
+
+function formatCandidateDate(value: string | null) {
+  if (!value) return '-';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '-';
+  return date.toLocaleDateString();
+}
+
+function formatPercentDifference(value: number) {
+  return `${(value * 100).toFixed(1)}%`;
 }
 
 function safeFileName(fileName: string) {
@@ -857,6 +952,10 @@ export default function ProductsPage() {
   const [productImportMode, setProductImportMode] = useState<ProductImportMode>('add_update');
   const [duplicateImportMode, setDuplicateImportMode] = useState<DuplicateImportMode>('skip');
   const [importingProducts, setImportingProducts] = useState(false);
+  const [newProductCandidates, setNewProductCandidates] = useState<NewProductCandidate[]>([]);
+  const [newProductCounts, setNewProductCounts] = useState<NewProductCounts>(EMPTY_NEW_PRODUCT_COUNTS);
+  const [newProductsLoading, setNewProductsLoading] = useState(false);
+  const [newProductsError, setNewProductsError] = useState<string | null>(null);
   const [bulkEditMode, setBulkEditMode] = useState(false);
   const [selectedUpcs, setSelectedUpcs] = useState<Set<string>>(new Set());
   const [bulkDepartment, setBulkDepartment] = useState('');
@@ -915,9 +1014,45 @@ export default function ProductsPage() {
     [productsWriteBlocked]
   );
 
+  const loadNewProductCandidates = useCallback(async () => {
+    if (!activeStoreId) {
+      setNewProductCandidates([]);
+      setNewProductCounts(EMPTY_NEW_PRODUCT_COUNTS);
+      setNewProductsError(null);
+      setNewProductsLoading(false);
+      return;
+    }
+
+    setNewProductsLoading(true);
+    setNewProductsError(null);
+
+    try {
+      const response = await fetch(`/api/products/new-products?storeId=${encodeURIComponent(activeStoreId)}`);
+      const json = (await response.json()) as NewProductsResponse;
+
+      if (!response.ok || !json.ok) {
+        throw new Error(json.ok ? 'Could not load new products.' : json.error);
+      }
+
+      setNewProductCandidates(json.candidates);
+      setNewProductCounts(json.counts);
+    } catch (error) {
+      setNewProductCandidates([]);
+      setNewProductCounts(EMPTY_NEW_PRODUCT_COUNTS);
+      setNewProductsError(error instanceof Error ? error.message : 'Could not load new products.');
+    } finally {
+      setNewProductsLoading(false);
+    }
+  }, [activeStoreId]);
+
   useEffect(() => {
     setItems(storeProducts);
   }, [storeProducts]);
+
+  useEffect(() => {
+    if (activeTab !== 'newProducts') return;
+    void loadNewProductCandidates();
+  }, [activeTab, loadNewProductCandidates]);
 
   const loadCloudReceivingHistory = async () => {
     if (!store?.id) {
@@ -1706,6 +1841,15 @@ export default function ProductsPage() {
     ageVerificationFilter,
     taxableFilter,
   ]);
+
+  const orderedNewProductCandidates = useMemo(() => {
+    return [...newProductCandidates].sort((a, b) => {
+      const statusDifference = newProductStatusRank(a.status) - newProductStatusRank(b.status);
+      if (statusDifference !== 0) return statusDifference;
+      if (b.confidenceScore !== a.confidenceScore) return b.confidenceScore - a.confidenceScore;
+      return b.timesSold - a.timesSold;
+    });
+  }, [newProductCandidates]);
 
   const invoiceTotal = receivingLines.reduce((sum, line) => sum + line.totalCost, 0);
 
@@ -3175,6 +3319,181 @@ const nextBreakdown = getCaseBreakdown(nextStock, unitsPerCase);
               </table>
             </div>
           </Card>
+        </div>
+      )}
+
+      {activeTab === 'newProducts' && (
+        <div className="space-y-5">
+          {!activeStoreId ? (
+            <Card className="border-amber-200 bg-amber-50 p-5 text-amber-950">
+              <div className="flex items-start gap-3">
+                <CircleAlert className="mt-0.5 h-5 w-5 shrink-0 text-amber-700" />
+                <div>
+                  <h2 className="font-semibold">Select a specific store</h2>
+                  <p className="mt-1 text-sm text-amber-900">
+                    Select a specific store to review and approve new products.
+                  </p>
+                </div>
+              </div>
+            </Card>
+          ) : (
+            <>
+              <Card className="p-5">
+                <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                  <div>
+                    <h2 className="text-lg font-semibold text-foreground">New Product Candidates</h2>
+                    <p className="mt-1 text-sm text-muted-foreground">
+                      Read-only candidates discovered from POS PLU sales for the selected store.
+                    </p>
+                  </div>
+                  <Button variant="outline" size="sm" onClick={() => void loadNewProductCandidates()} disabled={newProductsLoading}>
+                    {newProductsLoading ? 'Loading...' : 'Retry'}
+                  </Button>
+                </div>
+              </Card>
+
+              {newProductsLoading ? (
+                <Card className="p-8 text-center text-sm text-muted-foreground">
+                  Loading new product candidates...
+                </Card>
+              ) : newProductsError ? (
+                <Card className="border-destructive/30 bg-destructive/10 p-5 text-destructive">
+                  <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                    <div className="flex items-start gap-3">
+                      <CircleAlert className="mt-0.5 h-5 w-5 shrink-0" />
+                      <div>
+                        <h3 className="font-semibold">Could not load new products</h3>
+                        <p className="mt-1 text-sm">{newProductsError}</p>
+                      </div>
+                    </div>
+                    <Button variant="outline" size="sm" onClick={() => void loadNewProductCandidates()}>
+                      Retry
+                    </Button>
+                  </div>
+                </Card>
+              ) : (
+                <>
+                  <div className="grid gap-4 md:grid-cols-5">
+                    <Card className="p-4">
+                      <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Ready to Add</p>
+                      <p className="mt-2 text-2xl font-bold text-success">{formatNumber(newProductCounts.readyToAdd)}</p>
+                    </Card>
+                    <Card className="p-4">
+                      <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Missing UPC</p>
+                      <p className="mt-2 text-2xl font-bold text-amber-700">{formatNumber(newProductCounts.missingUpc)}</p>
+                    </Card>
+                    <Card className="p-4">
+                      <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Duplicates</p>
+                      <p className="mt-2 text-2xl font-bold text-foreground">{formatNumber(newProductCounts.duplicateFound)}</p>
+                    </Card>
+                    <Card className="p-4">
+                      <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Price Conflicts</p>
+                      <p className="mt-2 text-2xl font-bold text-orange-700">{formatNumber(newProductCounts.priceConflict)}</p>
+                    </Card>
+                    <Card className="p-4">
+                      <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Needs Review</p>
+                      <p className="mt-2 text-2xl font-bold text-foreground">{formatNumber(newProductCounts.needsReview)}</p>
+                    </Card>
+                  </div>
+
+                  {newProductCandidates.length === 0 ? (
+                    <Card className="p-8 text-center">
+                      <Package className="mx-auto h-8 w-8 text-muted-foreground" />
+                      <h3 className="mt-3 font-semibold text-foreground">No POS data found for this store.</h3>
+                      <p className="mx-auto mt-1 max-w-xl text-sm text-muted-foreground">
+                        Upload Verifone reports in POS Import to discover new products.
+                      </p>
+                      <Button asChild className="mt-4">
+                        <Link href="/app/reports/pos-import">Open POS Import</Link>
+                      </Button>
+                    </Card>
+                  ) : newProductCounts.duplicateFound === newProductCounts.total ? (
+                    <Card className="border-success/20 bg-success/5 p-4 text-sm text-foreground">
+                      All discovered products have already been added. Import more POS reports to find new products.
+                    </Card>
+                  ) : null}
+
+                  {orderedNewProductCandidates.length > 0 && (
+                    <Card className="overflow-hidden">
+                      <div className="border-b border-border p-5">
+                        <h3 className="font-semibold text-foreground">Candidate Details</h3>
+                        <p className="mt-1 text-sm text-muted-foreground">
+                          Session A is read-only. Review and save actions will come next.
+                        </p>
+                      </div>
+                      <div className="overflow-x-auto">
+                        <table className="w-full min-w-[1180px] text-sm">
+                          <thead className="bg-secondary/50 text-xs uppercase tracking-wide text-muted-foreground">
+                            <tr>
+                              <th className="px-4 py-3 text-left">Source</th>
+                              <th className="px-4 py-3 text-left">Product</th>
+                              <th className="px-4 py-3 text-left">Identifiers</th>
+                              <th className="px-4 py-3 text-left">Sales Context</th>
+                              <th className="px-4 py-3 text-left">Seen</th>
+                              <th className="px-4 py-3 text-left">Status</th>
+                              <th className="px-4 py-3 text-right">Action</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {orderedNewProductCandidates.map((candidate) => (
+                              <tr key={candidate.candidateKey} className="border-t border-border/70 hover:bg-secondary/30">
+                                <td className="px-4 py-4 align-top">
+                                  <span className="inline-flex rounded-full bg-primary/10 px-2 py-0.5 text-xs font-semibold text-primary">
+                                    POS Import
+                                  </span>
+                                  <p className="mt-2 text-xs text-muted-foreground">
+                                    {candidate.sourceRef.pos_plu_sale_count} PLU row(s)
+                                  </p>
+                                </td>
+                                <td className="px-4 py-4 align-top">
+                                  <p className="font-semibold text-foreground">{candidate.description || 'Unnamed product'}</p>
+                                  <p className="mt-1 text-xs text-muted-foreground">POS price {formatCurrency(candidate.unitPrice)}</p>
+                                  {candidate.promotionId && (
+                                    <p className="mt-1 text-xs text-muted-foreground">Promotion {candidate.promotionId}</p>
+                                  )}
+                                  {candidate.priceConflict && (
+                                    <div className="mt-2 rounded-md bg-orange-100 px-2 py-1 text-xs text-orange-800">
+                                      POS {formatCurrency(candidate.priceConflict.posPrice)} vs current {formatCurrency(candidate.priceConflict.existingPrice)}
+                                      {' '}({formatPercentDifference(candidate.priceConflict.percentDifference)} difference)
+                                    </div>
+                                  )}
+                                </td>
+                                <td className="px-4 py-4 align-top font-mono text-xs text-muted-foreground">
+                                  <p>UPC: {candidate.upcNormalized || '-'}</p>
+                                  <p>PLU: {candidate.pluRaw || candidate.pluNormalized || '-'}</p>
+                                </td>
+                                <td className="px-4 py-4 align-top">
+                                  <p className="font-semibold text-foreground">{formatNumber(candidate.timesSold)} sold</p>
+                                  <p className="text-xs text-muted-foreground">{formatCurrency(candidate.totalRevenue)} revenue</p>
+                                </td>
+                                <td className="px-4 py-4 align-top text-xs text-muted-foreground">
+                                  <p>First: {formatCandidateDate(candidate.firstSeenAt)}</p>
+                                  <p>Last: {formatCandidateDate(candidate.lastSeenAt)}</p>
+                                </td>
+                                <td className="px-4 py-4 align-top">
+                                  <span className={cn('inline-flex rounded-full px-2 py-0.5 text-xs font-semibold', newProductStatusClass(candidate.status))}>
+                                    {NEW_PRODUCT_STATUS_LABELS[candidate.status]}
+                                  </span>
+                                  <p className="mt-2 text-xs text-muted-foreground">
+                                    Confidence {candidate.confidenceScore}
+                                  </p>
+                                </td>
+                                <td className="px-4 py-4 text-right align-top">
+                                  <Button variant="outline" size="sm" disabled>
+                                    Review &amp; Save coming next
+                                  </Button>
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </Card>
+                  )}
+                </>
+              )}
+            </>
+          )}
         </div>
       )}
 

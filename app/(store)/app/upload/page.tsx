@@ -3,6 +3,7 @@
 import { useCallback, useRef, useState } from 'react';
 import { DashboardShell, PageHeader } from '@/components/layout/sidebar';
 import { useStoreData, saveUploadedTransactions, saveUploadedProducts } from '@/lib/store';
+import { useAuth } from '@/lib/auth';
 import {
   parseTransactionsCsv,
   downloadSampleCsv,
@@ -38,8 +39,13 @@ const initialState = <R,>(): SectionState<R> => ({
   importedCount: 0,
 });
 
+const SELECT_STORE_UPLOAD_MESSAGE = 'Select a specific store to upload CSV data.';
+
 export default function UploadPage() {
   const store = useStoreData();
+  const { activeStore, activeStoreId, storeScope } = useAuth();
+  const uploadDisabled = storeScope === 'all' || !activeStoreId;
+  const selectedStoreName = uploadDisabled ? 'All Stores' : activeStore?.store_name ?? 'Selected store';
 
   const txInputRef = useRef<HTMLInputElement>(null);
   const [tx, setTx] = useState<SectionState<ParseResult>>(initialState());
@@ -48,6 +54,17 @@ export default function UploadPage() {
   const [p, setP] = useState<SectionState<ProductParseResult>>(initialState());
 
   const handleTxFile = useCallback((file: File) => {
+    if (uploadDisabled) {
+      setTx((s) => ({
+        ...s,
+        error: SELECT_STORE_UPLOAD_MESSAGE,
+        imported: false,
+        result: null,
+        fileName: null,
+      }));
+      return;
+    }
+
     setTx((s) => ({
       ...s,
       error: null,
@@ -73,9 +90,20 @@ export default function UploadPage() {
     };
 
     reader.readAsText(file);
-  }, []);
+  }, [uploadDisabled]);
 
   const handleProductFile = useCallback((file: File) => {
+    if (uploadDisabled) {
+      setP((s) => ({
+        ...s,
+        error: SELECT_STORE_UPLOAD_MESSAGE,
+        imported: false,
+        result: null,
+        fileName: null,
+      }));
+      return;
+    }
+
     setP((s) => ({
       ...s,
       error: null,
@@ -101,16 +129,22 @@ export default function UploadPage() {
     };
 
     reader.readAsText(file);
-  }, []);
+  }, [uploadDisabled]);
 
   const importTx = async () => {
+    if (uploadDisabled || !activeStoreId) {
+      setTx((s) => ({ ...s, error: SELECT_STORE_UPLOAD_MESSAGE }));
+      return;
+    }
+
     if (!tx.result || tx.result.transactions.length === 0) return;
 
     setTx((s) => ({ ...s, error: null }));
 
     const result = await saveUploadedTransactions(
       tx.result.transactions,
-      tx.fileName || 'transactions.csv'
+      tx.fileName || 'transactions.csv',
+      activeStoreId
     );
 
     if (result.error) {
@@ -129,13 +163,19 @@ export default function UploadPage() {
   };
 
   const importProducts = async () => {
+    if (uploadDisabled || !activeStoreId) {
+      setP((s) => ({ ...s, error: SELECT_STORE_UPLOAD_MESSAGE }));
+      return;
+    }
+
     if (!p.result || p.result.products.length === 0) return;
 
     setP((s) => ({ ...s, error: null }));
 
     const result = await saveUploadedProducts(
       p.result.products,
-      p.fileName || 'pricebook.csv'
+      p.fileName || 'pricebook.csv',
+      activeStoreId
     );
 
     if (result.error) {
@@ -194,6 +234,13 @@ export default function UploadPage() {
       />
 
       <div className="space-y-6">
+        <div className="rounded-xl border border-border bg-background p-4 text-sm">
+          <p className="font-medium text-foreground">Selected store: {selectedStoreName}</p>
+          {uploadDisabled ? (
+            <p className="mt-1 text-amber-700">{SELECT_STORE_UPLOAD_MESSAGE}</p>
+          ) : null}
+        </div>
+
         <Tabs defaultValue="transactions" className="space-y-5">
           <TabsList className="grid h-auto w-full grid-cols-1 gap-2 bg-muted/60 p-1.5 sm:grid-cols-2">
             <TabsTrigger value="transactions" className="h-auto justify-start gap-3 px-4 py-3 text-left">

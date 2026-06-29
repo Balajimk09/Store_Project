@@ -159,6 +159,25 @@ const EMPTY_PRODUCTS_META: ProductMeta = {
   rowCount: 0,
 };
 
+const SELECT_STORE_UPLOAD_MESSAGE = 'Select a specific store to upload CSV data.';
+const VERIFY_SELECTED_STORE_ERROR = 'Unable to verify access to the selected store.';
+
+async function verifySelectedStoreAccess(userId: string, selectedStoreId: string): Promise<string | null> {
+  const { data: storeRow, error } = await supabase
+    .from('stores')
+    .select('id')
+    .eq('id', selectedStoreId)
+    .eq('owner_id', userId)
+    .maybeSingle();
+
+  if (error) {
+    console.error('Unable to verify access to the selected store:', error);
+    return null;
+  }
+
+  return storeRow?.id ?? null;
+}
+
 function aggregations(txns: Transaction[]) {
   return {
     transactions: txns,
@@ -635,7 +654,11 @@ export function useStoreData(): StoreData & {
   };
 }
 
-export async function saveUploadedTransactions(txns: Transaction[], fileName: string): Promise<SaveResult> {
+export async function saveUploadedTransactions(
+  txns: Transaction[],
+  fileName: string,
+  selectedStoreId?: string | null
+): Promise<SaveResult> {
   let userId: string | null = null;
 
   try {
@@ -649,17 +672,11 @@ export async function saveUploadedTransactions(txns: Transaction[], fileName: st
   }
 
   if (userId) {
-    const { data: storeRow, error: storeErr } = await supabase
-      .from('stores')
-      .select('id')
-      .eq('owner_id', userId)
-      .limit(1)
-      .maybeSingle();
+    if (!selectedStoreId) return { mode: 'cloud', error: SELECT_STORE_UPLOAD_MESSAGE };
 
-    if (storeErr) return { mode: 'cloud', error: `Could not load store: ${storeErr.message}` };
-    if (!storeRow) return { mode: 'cloud', error: 'No store found. Please complete store setup first.' };
+    const storeId = await verifySelectedStoreAccess(userId, selectedStoreId);
 
-    const storeId = storeRow.id;
+    if (!storeId) return { mode: 'cloud', error: VERIFY_SELECTED_STORE_ERROR };
 
     const { data: batch, error: batchErr } = await supabase
       .from('upload_batches')
@@ -735,7 +752,11 @@ export async function saveUploadedTransactions(txns: Transaction[], fileName: st
   return { mode: 'demo' };
 }
 
-export async function saveUploadedProducts(products: Product[], fileName: string): Promise<SaveResult> {
+export async function saveUploadedProducts(
+  products: Product[],
+  fileName: string,
+  selectedStoreId?: string | null
+): Promise<SaveResult> {
   let userId: string | null = null;
 
   try {
@@ -749,17 +770,11 @@ export async function saveUploadedProducts(products: Product[], fileName: string
   }
 
   if (userId) {
-    const { data: storeRow, error: storeErr } = await supabase
-      .from('stores')
-      .select('id')
-      .eq('owner_id', userId)
-      .limit(1)
-      .maybeSingle();
+    if (!selectedStoreId) return { mode: 'cloud', error: SELECT_STORE_UPLOAD_MESSAGE };
 
-    if (storeErr) return { mode: 'cloud', error: `Could not load store: ${storeErr.message}` };
-    if (!storeRow) return { mode: 'cloud', error: 'No store found. Please complete store setup first.' };
+    const storeId = await verifySelectedStoreAccess(userId, selectedStoreId);
 
-    const storeId = storeRow.id;
+    if (!storeId) return { mode: 'cloud', error: VERIFY_SELECTED_STORE_ERROR };
 
     const { data: batch, error: batchErr } = await supabase
       .from('upload_batches')

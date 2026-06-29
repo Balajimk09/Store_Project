@@ -25,6 +25,7 @@ export type ExceptionReason =
   | 'OTHER';
 
 export interface Product {
+  id?: string;
   upc: string;
   name: string;
   category: string;

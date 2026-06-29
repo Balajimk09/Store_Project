@@ -55,22 +55,16 @@ function mapDbTransaction(row: TransactionRow): Transaction {
 
 function mapDbProduct(row: ProductRow): Product {
   const category = row.category ?? row.department ?? 'Uncategorized';
-  const extendedRow = row as ProductRow & {
-    plu?: string | null;
-    product_code?: string | null;
-    age_verification?: boolean | null;
-    minimum_age?: number | null;
-    age_restriction_type?: string | null;
-  };
 
   return {
+    id: row.id,
     upc: row.upc,
     name: row.item_name ?? '',
     category,
     department: row.department ?? category,
     sku: row.sku ?? undefined,
-    plu: extendedRow.plu ?? undefined,
-    productCode: extendedRow.product_code ?? undefined,
+    plu: row.plu ?? undefined,
+    productCode: row.product_code ?? undefined,
     brand: row.brand ?? 'Unknown',
     costPrice: row.cost_price,
     sellPrice: row.selling_price,
@@ -81,9 +75,9 @@ function mapDbProduct(row: ProductRow): Product {
     taxCategory: row.tax_category ?? 'standard',
     taxable: row.taxable ?? true,
     ebtEligible: row.ebt_eligible ?? false,
-    ageVerification: extendedRow.age_verification ?? false,
-    minimumAge: extendedRow.minimum_age ?? undefined,
-    ageRestrictionType: extendedRow.age_restriction_type ?? undefined,
+    ageVerification: row.age_verification ?? false,
+    minimumAge: row.minimum_age ?? undefined,
+    ageRestrictionType: row.age_restriction_type ?? undefined,
     isActive: row.is_active ?? true,
     notes: row.notes ?? undefined,
     unitsPerCase: Number(row.units_per_case) || 1,
@@ -230,6 +224,10 @@ function normalizeProduct(product: Product): Product {
   };
 }
 
+function productIdentity(product: Product) {
+  return product.id || product.upc || product.productCode || product.plu || '';
+}
+
 function productToDbFields(product: Product) {
   const normalized = normalizeProduct(product);
 
@@ -275,10 +273,11 @@ function productToDbInsert(product: Product, storeId: string, batchId: string | 
 
 function upsertProductList(products: Product[], product: Product): Product[] {
   const nextProduct = normalizeProduct(product);
-  const exists = products.some((current) => current.upc === nextProduct.upc);
+  const nextIdentity = productIdentity(nextProduct);
+  const exists = products.some((current) => productIdentity(current) === nextIdentity);
 
   if (exists) {
-    return products.map((current) => (current.upc === nextProduct.upc ? nextProduct : current));
+    return products.map((current) => (productIdentity(current) === nextIdentity ? nextProduct : current));
   }
 
   return [nextProduct, ...products];
@@ -329,7 +328,7 @@ export function useStoreData(): StoreData & {
   resetToDemo: () => void;
   refresh: () => void;
   resetProductsToDemo: () => void;
-  updateProductPrice: (upc: string, costPrice: number, sellPrice: number) => void;
+  updateProductPrice: (productKey: string, costPrice: number, sellPrice: number) => void;
   updateProduct: (product: Product) => Promise<SaveResult>;
   createProduct: (product: Product) => Promise<SaveResult>;
 } {
@@ -536,11 +535,16 @@ export function useStoreData(): StoreData & {
       });
 
       if (user && authStore && data.dataMode === 'cloud') {
-        const { error } = await supabase
+        let updateQuery = supabase
           .from('products')
           .update(productToDbFields(nextProduct))
-          .eq('store_id', authStore.id)
-          .eq('upc', nextProduct.upc);
+          .eq('store_id', authStore.id);
+
+        updateQuery = nextProduct.id
+          ? updateQuery.eq('id', nextProduct.id)
+          : updateQuery.eq('upc', nextProduct.upc);
+
+        const { error } = await updateQuery;
 
         if (error) {
           setData((previous) => ({
@@ -629,8 +633,8 @@ export function useStoreData(): StoreData & {
   );
 
   const updateProductPrice = useCallback(
-    (upc: string, costPrice: number, sellPrice: number) => {
-      const product = data.products.find((item) => item.upc === upc);
+    (productKey: string, costPrice: number, sellPrice: number) => {
+      const product = data.products.find((item) => productIdentity(item) === productKey || item.upc === productKey);
 
       if (!product) return;
 

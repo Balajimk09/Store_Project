@@ -47,6 +47,10 @@ function fuelGradeName(product: Product) {
   return product.name;
 }
 
+function getProductIdentity(product: Product) {
+  return product.id || product.upc || product.productCode || product.plu || '';
+}
+
 type FuelEdit = {
   costPrice: string;
   sellPrice: string;
@@ -64,13 +68,15 @@ export default function FuelPage() {
   }, [products]);
 
   const [editing, setEditing] = useState<Record<string, FuelEdit>>({});
-  const [savingUpc, setSavingUpc] = useState<string | null>(null);
+  const [savingProductKey, setSavingProductKey] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [pageError, setPageError] = useState<string | null>(null);
 
   const getEdit = (product: Product): FuelEdit => {
+    const productKey = getProductIdentity(product);
+
     return (
-      editing[product.upc] || {
+      editing[productKey] || {
         costPrice: String(product.costPrice || 0),
         sellPrice: String(product.sellPrice || 0),
         stock: String(product.stock || 0),
@@ -79,11 +85,11 @@ export default function FuelPage() {
     );
   };
 
-  const setEdit = (upc: string, patch: Partial<FuelEdit>) => {
+  const setEdit = (productKey: string, patch: Partial<FuelEdit>) => {
     setEditing((current) => ({
       ...current,
-      [upc]: {
-        ...(current[upc] || {
+      [productKey]: {
+        ...(current[productKey] || {
           costPrice: '',
           sellPrice: '',
           stock: '',
@@ -95,6 +101,7 @@ export default function FuelPage() {
   };
 
   const saveFuelProduct = async (product: Product) => {
+    const productKey = getProductIdentity(product);
     const edit = getEdit(product);
 
     const costPrice = Number(edit.costPrice);
@@ -112,7 +119,7 @@ export default function FuelPage() {
       return;
     }
 
-    setSavingUpc(product.upc);
+    setSavingProductKey(productKey);
     setPageError(null);
     setMessage(null);
 
@@ -129,7 +136,7 @@ export default function FuelPage() {
       ebtEligible: false,
     });
 
-    setSavingUpc(null);
+    setSavingProductKey(null);
 
     if (result.error) {
       setPageError(result.error);
@@ -226,13 +233,14 @@ export default function FuelPage() {
 
           <div className="divide-y divide-border">
             {fuelProducts.map((product) => {
+              const productKey = getProductIdentity(product);
               const edit = getEdit(product);
               const margin = Number(edit.sellPrice) - Number(edit.costPrice);
-              const saving = savingUpc === product.upc;
+              const saving = savingProductKey === productKey;
 
               return (
                 <div
-                  key={product.upc}
+                  key={productKey}
                   className="grid gap-4 p-5 xl:grid-cols-[1.2fr_0.8fr_0.8fr_0.8fr_0.8fr_auto] xl:items-end"
                 >
                   <div>
@@ -254,7 +262,7 @@ export default function FuelPage() {
                       type="number"
                       step="0.001"
                       value={edit.costPrice}
-                      onChange={(event) => setEdit(product.upc, { costPrice: event.target.value })}
+                      onChange={(event) => setEdit(productKey, { costPrice: event.target.value })}
                     />
                   </label>
 
@@ -264,7 +272,7 @@ export default function FuelPage() {
                       type="number"
                       step="0.001"
                       value={edit.sellPrice}
-                      onChange={(event) => setEdit(product.upc, { sellPrice: event.target.value })}
+                      onChange={(event) => setEdit(productKey, { sellPrice: event.target.value })}
                     />
                   </label>
 
@@ -274,7 +282,7 @@ export default function FuelPage() {
                       type="number"
                       step="0.001"
                       value={edit.stock}
-                      onChange={(event) => setEdit(product.upc, { stock: event.target.value })}
+                      onChange={(event) => setEdit(productKey, { stock: event.target.value })}
                     />
                   </label>
 
@@ -284,7 +292,7 @@ export default function FuelPage() {
                       type="number"
                       step="0.001"
                       value={edit.reorderLevel}
-                      onChange={(event) => setEdit(product.upc, { reorderLevel: event.target.value })}
+                      onChange={(event) => setEdit(productKey, { reorderLevel: event.target.value })}
                     />
                   </label>
 

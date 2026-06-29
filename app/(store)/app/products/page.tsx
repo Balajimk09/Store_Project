@@ -570,6 +570,10 @@ function normalizeText(value: string | undefined | null) {
   return String(value || '').trim().toLowerCase();
 }
 
+function getProductIdentity(product: Product) {
+  return product.id || product.upc || product.productCode || product.plu || '';
+}
+
 function findProductDuplicate(products: Product[], product: Product) {
   const upc = normalizeText(product.upc);
   const plu = normalizeText(product.plu);
@@ -971,6 +975,7 @@ export default function ProductsPage() {
   const [stockFilter, setStockFilter] = useState('All');
   const [modalMode, setModalMode] = useState<'add' | 'edit'>('add');
   const [modalOpen, setModalOpen] = useState(false);
+  const [editingProduct, setEditingProduct] = useState<Product | null>(null);
   const [form, setForm] = useState<ProductFormState>(EMPTY_PRODUCT_FORM);
   const [formError, setFormError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
@@ -996,7 +1001,7 @@ export default function ProductsPage() {
   const [savingNewProduct, setSavingNewProduct] = useState(false);
   const newProductUpcInputRef = useRef<HTMLInputElement | null>(null);
   const [bulkEditMode, setBulkEditMode] = useState(false);
-  const [selectedUpcs, setSelectedUpcs] = useState<Set<string>>(new Set());
+  const [selectedProductKeys, setSelectedProductKeys] = useState<Set<string>>(new Set());
   const [bulkDepartment, setBulkDepartment] = useState('');
   const [bulkCategory, setBulkCategory] = useState('');
   const [bulkVendor, setBulkVendor] = useState('');
@@ -1036,7 +1041,7 @@ export default function ProductsPage() {
   const [storeVendorMap, setStoreVendorMap] = useState<Map<string, StoreVendorData>>(new Map());
   const [reorderSearch, setReorderSearch] = useState('');
   const [reorderPriorityFilter, setReorderPriorityFilter] = useState<'All' | ReorderPriority>('All');
-  const [selectedReorderUpcs, setSelectedReorderUpcs] = useState<string[]>([]);
+  const [selectedReorderProductKeys, setSelectedReorderProductKeys] = useState<string[]>([]);
   const [purchaseOrderMessage, setPurchaseOrderMessage] = useState<string | null>(null);
   const [openVendorOrder, setOpenVendorOrder] = useState<string | null>(null);
   const [vendorProductSearch, setVendorProductSearch] = useState('');
@@ -1615,20 +1620,20 @@ export default function ProductsPage() {
   }, [reorderInsights]);
 
   const selectedReorderSet = useMemo(() => {
-    return new Set(selectedReorderUpcs);
-  }, [selectedReorderUpcs]);
+    return new Set(selectedReorderProductKeys);
+  }, [selectedReorderProductKeys]);
 
   const selectedPurchaseOrderInsights = useMemo(() => {
-    if (selectedReorderUpcs.length === 0) return filteredReorderInsights;
+    if (selectedReorderProductKeys.length === 0) return filteredReorderInsights;
 
     return filteredReorderInsights.filter((insight) =>
-      selectedReorderSet.has(insight.product.upc)
+      selectedReorderSet.has(getProductIdentity(insight.product))
     );
-  }, [filteredReorderInsights, selectedReorderSet, selectedReorderUpcs.length]);
+  }, [filteredReorderInsights, selectedReorderSet, selectedReorderProductKeys.length]);
 
   const getOrderUnitsForProduct = useCallback(
     (product: Product, suggestedUnits: number) => {
-      const overrideValue = orderUnitOverrides[product.upc];
+      const overrideValue = orderUnitOverrides[getProductIdentity(product)];
 
       if (overrideValue !== undefined && overrideValue.trim() !== '') {
         return Math.max(0, safeNumber(overrideValue));
@@ -1652,10 +1657,10 @@ export default function ProductsPage() {
     [getOrderUnitsForProduct]
   );
 
-  const updateOrderUnits = (upc: string, units: string) => {
+  const updateOrderUnits = (productKey: string, units: string) => {
     setOrderUnitOverrides((previous) => ({
       ...previous,
-      [upc]: units,
+      [productKey]: units,
     }));
   };
 
@@ -1666,7 +1671,7 @@ export default function ProductsPage() {
 
     setOrderUnitOverrides((previous) => ({
       ...previous,
-      [product.upc]: String(orderUnits),
+      [getProductIdentity(product)]: String(orderUnits),
     }));
   };
 
@@ -1762,17 +1767,17 @@ export default function ProductsPage() {
   const activeVendorOrderItems = useMemo<VendorOrderItem[]>(() => {
     if (!openVendorOrder) return [];
 
-    const insightByUpc = new Map<string, ReorderInsight>(
-      (activeVendorOrder?.insights || []).map((insight) => [insight.product.upc, insight])
+    const insightByProductKey = new Map<string, ReorderInsight>(
+      (activeVendorOrder?.insights || []).map((insight) => [getProductIdentity(insight.product), insight])
     );
 
     return items
       .filter((product) => {
         const vendor = product.vendor || 'No vendor';
-        return vendor === openVendorOrder && selectedReorderSet.has(product.upc);
+        return vendor === openVendorOrder && selectedReorderSet.has(getProductIdentity(product));
       })
       .map((product) => {
-        const insight = insightByUpc.get(product.upc);
+        const insight = insightByProductKey.get(getProductIdentity(product));
         const unitsPerCase = Math.max(1, Number(product.unitsPerCase) || 1);
         const suggestedQty =
           insight?.suggestedQty ||
@@ -1809,36 +1814,44 @@ export default function ProductsPage() {
     };
   }, [activeVendorOrderItems]);
 
-  const toggleReorderSelection = (upc: string) => {
-    setSelectedReorderUpcs((previous) =>
-      previous.includes(upc)
-        ? previous.filter((item) => item !== upc)
-        : [...previous, upc]
+  const toggleReorderSelection = (productKey: string) => {
+    setSelectedReorderProductKeys((previous) =>
+      previous.includes(productKey)
+        ? previous.filter((item) => item !== productKey)
+        : [...previous, productKey]
     );
   };
 
   const selectCriticalReorders = () => {
-    setSelectedReorderUpcs(
+    setSelectedReorderProductKeys(
       filteredReorderInsights
         .filter((insight) => insight.priority === 'Critical')
-        .map((insight) => insight.product.upc)
+        .map((insight) => getProductIdentity(insight.product))
+        .filter(Boolean)
     );
   };
 
   const selectAllReorders = () => {
-    setSelectedReorderUpcs(filteredReorderInsights.map((insight) => insight.product.upc));
+    setSelectedReorderProductKeys(
+      filteredReorderInsights.map((insight) => getProductIdentity(insight.product)).filter(Boolean)
+    );
   };
 
   const clearReorderSelection = () => {
-    setSelectedReorderUpcs([]);
+    setSelectedReorderProductKeys([]);
   };
 
   const clearActiveVendorOrder = () => {
     if (!activeVendorOrder) return;
 
-    setSelectedReorderUpcs((previous) =>
+    setSelectedReorderProductKeys((previous) =>
       previous.filter(
-        (upc) => !items.some((product) => (product.vendor || 'No vendor') === activeVendorOrder.vendor && product.upc === upc)
+        (productKey) =>
+          !items.some(
+            (product) =>
+              (product.vendor || 'No vendor') === activeVendorOrder.vendor &&
+              getProductIdentity(product) === productKey
+          )
       )
     );
   };
@@ -1886,7 +1899,7 @@ export default function ProductsPage() {
     );
 
     setPurchaseOrderMessage(
-      selectedReorderUpcs.length > 0
+      selectedReorderProductKeys.length > 0
         ? `Purchase order exported for ${rows.length} selected item(s).`
         : `Purchase order exported for ${rows.length} filtered reorder item(s).`
     );
@@ -1900,11 +1913,13 @@ export default function ProductsPage() {
       return;
     }
 
-    const insightByUpc = new Map<string, ReorderInsight>(group.insights.map((insight) => [insight.product.upc, insight]));
+    const insightByProductKey = new Map<string, ReorderInsight>(
+      group.insights.map((insight) => [getProductIdentity(insight.product), insight])
+    );
 
     const selectedVendorProducts = items.filter((product) => {
       const productVendor = product.vendor || 'No vendor';
-      return productVendor === vendor && selectedReorderSet.has(product.upc);
+      return productVendor === vendor && selectedReorderSet.has(getProductIdentity(product));
     });
 
     const rows =
@@ -1922,7 +1937,7 @@ export default function ProductsPage() {
     exportToCsv(
       `storepulse-${safeFileName(vendor)}-purchase-order-${today}.csv`,
       rows.map((product) => {
-        const insight = insightByUpc.get(product.upc);
+        const insight = insightByProductKey.get(getProductIdentity(product));
         const unitsPerCase = Number(product.unitsPerCase) || 1;
         const suggestedUnits =
           insight?.suggestedQty ||
@@ -2192,6 +2207,7 @@ export default function ProductsPage() {
     if (!requireSelectedStoreForWrite(setFormError)) return;
 
     setModalMode('add');
+    setEditingProduct(null);
     setForm(EMPTY_PRODUCT_FORM);
     setFormError(null);
     setUpcDuplicate(null);
@@ -2206,6 +2222,7 @@ export default function ProductsPage() {
     if (!requireSelectedStoreForWrite(setFormError)) return;
 
     setModalMode('edit');
+    setEditingProduct(product);
     setForm(productToForm(product));
     setFormError(null);
     setUpcDuplicate(null);
@@ -2218,6 +2235,7 @@ export default function ProductsPage() {
 
   const closeProductModal = () => {
     setModalOpen(false);
+    setEditingProduct(null);
     setFormError(null);
     setUpcDuplicate(null);
     setPluDuplicate(null);
@@ -2270,7 +2288,12 @@ export default function ProductsPage() {
     setFormError(null);
 
     const product = formToProduct(form);
-    const productToSave = modalMode === 'add' && upcDuplicate ? { ...upcDuplicate, ...product, upc: upcDuplicate.upc } : product;
+    const productToSave =
+      modalMode === 'add' && upcDuplicate
+        ? { ...upcDuplicate, ...product, upc: upcDuplicate.upc }
+        : modalMode === 'edit' && editingProduct
+          ? { ...editingProduct, ...product, id: editingProduct.id, upc: editingProduct.upc }
+          : product;
     const result = modalMode === 'add' && !upcDuplicate ? await createProduct(productToSave) : await updateProduct(productToSave);
 
     setSaving(false);
@@ -2464,7 +2487,7 @@ export default function ProductsPage() {
 
   const exitBulkEdit = () => {
     setBulkEditMode(false);
-    setSelectedUpcs(new Set());
+    setSelectedProductKeys(new Set());
     resetBulkFields();
   };
 
@@ -2478,23 +2501,25 @@ export default function ProductsPage() {
     }
   };
 
-  const toggleSelectedProduct = (upc: string) => {
-    setSelectedUpcs((previous) => {
+  const toggleSelectedProduct = (productKey: string) => {
+    setSelectedProductKeys((previous) => {
       const next = new Set(previous);
-      if (next.has(upc)) {
-        next.delete(upc);
+      if (next.has(productKey)) {
+        next.delete(productKey);
       } else {
-        next.add(upc);
+        next.add(productKey);
       }
       return next;
     });
   };
 
   const toggleAllFilteredProducts = () => {
-    setSelectedUpcs((previous) => {
-      const allSelected = filteredProducts.length > 0 && filteredProducts.every((product) => previous.has(product.upc));
+    setSelectedProductKeys((previous) => {
+      const allSelected =
+        filteredProducts.length > 0 &&
+        filteredProducts.every((product) => previous.has(getProductIdentity(product)));
       if (allSelected) return new Set();
-      return new Set(filteredProducts.map((product) => product.upc));
+      return new Set(filteredProducts.map((product) => getProductIdentity(product)).filter(Boolean));
     });
   };
 
@@ -2529,14 +2554,14 @@ export default function ProductsPage() {
       return;
     }
 
-    const count = selectedUpcs.size;
+    const count = selectedProductKeys.size;
     if (!window.confirm(`Update ${count} products with these changes?`)) return;
 
     let updatedCount = 0;
     let nextItems = [...items];
 
-    for (const upc of selectedUpcs) {
-      const existing = nextItems.find((product) => product.upc === upc);
+    for (const productKey of selectedProductKeys) {
+      const existing = nextItems.find((product) => getProductIdentity(product) === productKey);
       if (!existing) continue;
 
       const updatedProduct: Product = {
@@ -2547,7 +2572,7 @@ export default function ProductsPage() {
       const result = await updateProduct(updatedProduct);
       if (!result.error) {
         updatedCount += 1;
-        nextItems = nextItems.map((product) => (product.upc === upc ? updatedProduct : product));
+        nextItems = nextItems.map((product) => (getProductIdentity(product) === productKey ? updatedProduct : product));
       }
     }
 
@@ -3067,7 +3092,7 @@ const nextBreakdown = getCaseBreakdown(nextStock, unitsPerCase);
 
               <div className="mt-4 space-y-3">
                 {lowStockProducts.slice(0, 6).map((product) => (
-                  <div key={product.upc} className="flex items-center justify-between rounded-lg border border-border p-3">
+                  <div key={getProductIdentity(product)} className="flex items-center justify-between rounded-lg border border-border p-3">
                     <div className="min-w-0">
                       <p className="truncate text-sm font-semibold text-foreground">{product.name}</p>
                       <p className="text-xs text-muted-foreground">
@@ -3305,10 +3330,10 @@ const nextBreakdown = getCaseBreakdown(nextStock, unitsPerCase);
             </div>
           )}
 
-          {bulkEditMode && selectedUpcs.size > 0 && (
+          {bulkEditMode && selectedProductKeys.size > 0 && (
             <Card className="sticky top-3 z-20 border-primary/30 p-4 shadow-md">
               <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-                <p className="font-semibold text-foreground">{selectedUpcs.size} products selected</p>
+                <p className="font-semibold text-foreground">{selectedProductKeys.size} products selected</p>
                 <Button size="sm" onClick={() => void applyBulkChanges()} disabled={productsWriteBlocked}>
                   Apply Changes
                 </Button>
@@ -3388,7 +3413,10 @@ const nextBreakdown = getCaseBreakdown(nextStock, unitsPerCase);
                       <th className="w-12 px-4 py-3 text-left">
                         <input
                           type="checkbox"
-                          checked={filteredProducts.length > 0 && filteredProducts.every((product) => selectedUpcs.has(product.upc))}
+                          checked={
+                            filteredProducts.length > 0 &&
+                            filteredProducts.every((product) => selectedProductKeys.has(getProductIdentity(product)))
+                          }
                           onChange={toggleAllFilteredProducts}
                           aria-label="Select all products"
                         />
@@ -3407,15 +3435,16 @@ const nextBreakdown = getCaseBreakdown(nextStock, unitsPerCase);
                   {filteredProducts.map((product) => {
                     const lowStock = product.stock <= product.reorderLevel;
                     const margin = computeMargin(product.sellPrice, product.costPrice);
+                    const productKey = getProductIdentity(product);
 
                     return (
-                      <tr key={product.upc} className="border-t border-border/70 hover:bg-secondary/30">
+                      <tr key={productKey} className="border-t border-border/70 hover:bg-secondary/30">
                         {bulkEditMode && (
                           <td className="px-4 py-4">
                             <input
                               type="checkbox"
-                              checked={selectedUpcs.has(product.upc)}
-                              onChange={() => toggleSelectedProduct(product.upc)}
+                              checked={selectedProductKeys.has(productKey)}
+                              onChange={() => toggleSelectedProduct(productKey)}
                               aria-label={`Select ${product.name}`}
                             />
                           </td>
@@ -4103,8 +4132,8 @@ const nextBreakdown = getCaseBreakdown(nextStock, unitsPerCase);
                 </p>
 
                 <p className="mt-2 text-sm text-muted-foreground">
-                  {selectedReorderUpcs.length > 0
-                    ? `${selectedReorderUpcs.length} item(s) currently added to order lists`
+                  {selectedReorderProductKeys.length > 0
+                    ? `${selectedReorderProductKeys.length} item(s) currently added to order lists`
                     : 'No items added yet. Open a vendor and click Add to Order.'}
                 </p>
               </div>
@@ -4134,7 +4163,7 @@ const nextBreakdown = getCaseBreakdown(nextStock, unitsPerCase);
                 {vendorOrderGroups.map((group) => {
                   const selectedCount = items.filter((product) => {
                     const vendor = product.vendor || 'No vendor';
-                    return vendor === group.vendor && selectedReorderSet.has(product.upc);
+                    return vendor === group.vendor && selectedReorderSet.has(getProductIdentity(product));
                   }).length;
 
                   const isOpen = openVendorOrder === group.vendor;
@@ -4283,11 +4312,11 @@ const nextBreakdown = getCaseBreakdown(nextStock, unitsPerCase);
                   size="sm"
                   variant="outline"
                   onClick={() =>
-                    setSelectedReorderUpcs((previous) =>
+                    setSelectedReorderProductKeys((previous) =>
                       Array.from(
                         new Set([
                           ...previous,
-                          ...activeVendorOrder.insights.map((insight) => insight.product.upc),
+                          ...activeVendorOrder.insights.map((insight) => getProductIdentity(insight.product)).filter(Boolean),
                         ])
                       )
                     )
@@ -4338,10 +4367,11 @@ const nextBreakdown = getCaseBreakdown(nextStock, unitsPerCase);
                     {openVendorProducts.length > 0 ? (
                       openVendorProducts.map((product) => {
                         const existingInsight = activeVendorOrder.insights.find(
-                          (insight) => insight.product.upc === product.upc
+                          (insight) => getProductIdentity(insight.product) === getProductIdentity(product)
                         );
 
-                        const selected = selectedReorderSet.has(product.upc);
+                        const productKey = getProductIdentity(product);
+                        const selected = selectedReorderSet.has(productKey);
                         const unitsPerCase = Number(product.unitsPerCase) || 1;
 
                         const suggestedQty =
@@ -4352,7 +4382,7 @@ const nextBreakdown = getCaseBreakdown(nextStock, unitsPerCase);
 
                         return (
                           <Card
-                            key={product.upc}
+                            key={productKey}
                             className={cn(
                               'p-4',
                               selected && 'border-primary bg-primary/5',
@@ -4396,7 +4426,7 @@ const nextBreakdown = getCaseBreakdown(nextStock, unitsPerCase);
                                 <Button
                                   size="sm"
                                   variant={selected ? 'default' : 'outline'}
-                                  onClick={() => toggleReorderSelection(product.upc)}
+                                  onClick={() => toggleReorderSelection(productKey)}
                                 >
                                   {selected ? 'In Order' : 'Add to Order'}
                                 </Button>
@@ -4510,8 +4540,11 @@ const nextBreakdown = getCaseBreakdown(nextStock, unitsPerCase);
                   <div className="flex-1 overflow-y-auto p-4">
                     {activeVendorOrderItems.length > 0 ? (
                       <div className="space-y-3">
-                        {activeVendorOrderItems.map((item) => (
-                          <Card key={item.product.upc} className="p-3">
+                        {activeVendorOrderItems.map((item) => {
+                          const productKey = getProductIdentity(item.product);
+
+                          return (
+                          <Card key={productKey} className="p-3">
                             <div className="flex items-start justify-between gap-3">
                               <div className="min-w-0">
                                 <p className="truncate font-semibold text-foreground">{item.product.name}</p>
@@ -4524,7 +4557,7 @@ const nextBreakdown = getCaseBreakdown(nextStock, unitsPerCase);
                               <Button
                                 size="sm"
                                 variant="outline"
-                                onClick={() => toggleReorderSelection(item.product.upc)}
+                                onClick={() => toggleReorderSelection(productKey)}
                               >
                                 Remove
                               </Button>
@@ -4551,7 +4584,7 @@ const nextBreakdown = getCaseBreakdown(nextStock, unitsPerCase);
                                     min="0"
                                     step="1"
                                     value={String(item.orderUnits)}
-                                    onChange={(event) => updateOrderUnits(item.product.upc, event.target.value)}
+                                    onChange={(event) => updateOrderUnits(productKey, event.target.value)}
                                   />
                                 </label>
                               </div>
@@ -4577,7 +4610,8 @@ const nextBreakdown = getCaseBreakdown(nextStock, unitsPerCase);
                               </div>
                             </div>
                           </Card>
-                        ))}
+                          );
+                        })}
                       </div>
                     ) : (
                       <div className="rounded-lg border border-dashed border-border p-6 text-center text-sm text-muted-foreground">

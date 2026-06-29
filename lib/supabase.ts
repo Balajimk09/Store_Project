@@ -81,6 +81,8 @@ export interface ProductRow {
   category: string | null;
   department: string | null;
   sku: string | null;
+  plu: string | null;
+  product_code: string | null;
   brand: string | null;
   cost_price: number;
   selling_price: number;
@@ -96,6 +98,9 @@ export interface ProductRow {
   units_per_case: number;
   cases_on_hand: number;
   loose_units: number;
+  age_verification: boolean | null;
+  minimum_age: number | null;
+  age_restriction_type: string | null;
   created_at: string;
   updated_at: string;
 }

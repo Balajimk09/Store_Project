@@ -436,6 +436,16 @@ const TABS: Array<{ key: Tab; label: string }> = [
   { key: 'history', label: 'History' },
 ];
 
+function tabFromQueryValue(value: string | null): Tab | null {
+  if (value === 'overview') return 'overview';
+  if (value === 'products') return 'products';
+  if (value === 'new-products') return 'newProducts';
+  if (value === 'receiving') return 'receiving';
+  if (value === 'reorder') return 'reorder';
+  if (value === 'history') return 'history';
+  return null;
+}
+
 function safeNumber(value: string | number | undefined, fallback = 0) {
   const parsed = Number(String(value ?? '').replace(/[$,]/g, '').trim());
   return Number.isFinite(parsed) ? parsed : fallback;
@@ -1113,6 +1123,14 @@ export default function ProductsPage() {
   const [vendorProductSearch, setVendorProductSearch] = useState('');
   const [orderUnitOverrides, setOrderUnitOverrides] = useState<Record<string, string>>({});
   const [todayVendorNoticeDismissed, setTodayVendorNoticeDismissed] = useState(false);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+
+    const requestedTab = tabFromQueryValue(new URLSearchParams(window.location.search).get('tab'));
+    if (requestedTab) setActiveTab(requestedTab);
+  }, []);
+
   const productsWriteBlocked = Boolean(user && (storeScope === 'all' || !activeStoreId));
   const selectedStoreId = activeStoreId ?? store?.id ?? null;
   const requireSelectedStoreForWrite = useCallback(

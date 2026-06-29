@@ -1,5 +1,6 @@
 'use client';
 
+import Link from 'next/link';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AlertCircle, CheckCircle2, Download, FileArchive, FileText, Loader2, RefreshCcw, UploadCloud } from 'lucide-react';
 import { DashboardShell, PageHeader } from '@/components/layout/sidebar';
@@ -531,7 +532,14 @@ function Metric({ label, value }: { label: string; value: number }) {
   );
 }
 
+function isProductsDiscoverySection(section: DiscoverySection) {
+  return section.key === 'products' || section.title.toLowerCase().includes('product');
+}
+
 function DiscoveryCard({ section }: { section: DiscoverySection }) {
+  const isProductsSection = isProductsDiscoverySection(section);
+  const showNewProductsAction = isProductsSection && section.totalDiscovered > 0;
+
   return (
     <div className="rounded-xl border border-border bg-secondary/20 p-4">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
@@ -547,6 +555,24 @@ function DiscoveryCard({ section }: { section: DiscoverySection }) {
           <MiniMetric label="Exists" value={section.alreadyExistsCount} />
         </div>
       </div>
+
+      {isProductsSection ? (
+        <div className="mt-4 rounded-lg border border-border bg-background p-3">
+          <p className="text-sm text-muted-foreground">
+            {showNewProductsAction
+              ? 'Review POS-discovered products in the New Products tab before adding them to your pricebook.'
+              : 'No POS-discovered products are ready to review yet. Import PLU reports to populate New Products.'}
+          </p>
+          {showNewProductsAction ? (
+            <Link
+              href="/app/products?tab=new-products"
+              className="mt-3 inline-flex h-9 items-center justify-center rounded-md bg-primary px-3 text-sm font-medium text-primary-foreground shadow transition-colors hover:bg-primary/90"
+            >
+              Review in New Products
+            </Link>
+          ) : null}
+        </div>
+      ) : null}
 
       {section.error ? (
         <div className="mt-4 rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs text-amber-800">

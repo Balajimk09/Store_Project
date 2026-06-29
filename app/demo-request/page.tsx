@@ -190,7 +190,7 @@ export default function DemoRequestPage() {
                   id="city"
                   value={city}
                   onChange={(e) => setCity(e.target.value)}
-                  placeholder="Oklahoma City"
+                  placeholder="City"
                 />
               </div>
 
@@ -200,7 +200,7 @@ export default function DemoRequestPage() {
                   id="state"
                   value={stateValue}
                   onChange={(e) => setStateValue(e.target.value)}
-                  placeholder="OK"
+                  placeholder="State"
                 />
               </div>
             </div>

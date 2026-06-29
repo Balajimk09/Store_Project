@@ -228,7 +228,7 @@ export default function SetupPage() {
                   id="city"
                   value={city}
                   onChange={(event) => setCity(event.target.value)}
-                  placeholder="Oklahoma City"
+                  placeholder="City"
                 />
               </div>
 
@@ -238,7 +238,7 @@ export default function SetupPage() {
                   id="state"
                   value={stateValue}
                   onChange={(event) => setStateValue(event.target.value)}
-                  placeholder="OK"
+                  placeholder="State"
                 />
               </div>
 

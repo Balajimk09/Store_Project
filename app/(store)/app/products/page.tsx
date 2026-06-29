@@ -208,6 +208,8 @@ type StoreVendorData = {
 const RECEIVING_HISTORY_KEY = 'storepulse_receiving_history_v1';
 const INVOICE_BUCKET = 'inventory-invoices';
 const PRODUCTS_MANAGE_STORE_MESSAGE = 'Select a specific store to manage products.';
+const PRODUCTS_ALL_STORES_READONLY_MESSAGE =
+  'All Stores product aggregation is not available yet. Select a specific store to view and manage products.';
 const PRESET_AGE_TYPES = ['Tobacco', 'Alcohol', 'Lottery', 'Vape'];
 
 const EMPTY_PRODUCT_FORM: ProductFormState = {
@@ -2621,10 +2623,15 @@ const nextBreakdown = getCaseBreakdown(nextStock, unitsPerCase);
       </PageHeader>
 
       {productsWriteBlocked && (
-        <div className="mb-5 flex items-start gap-3 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
-          <CircleAlert className="mt-0.5 h-4 w-4 shrink-0" />
-          <span>{PRODUCTS_MANAGE_STORE_MESSAGE}</span>
-        </div>
+        <Card className="mb-5 border-amber-200 bg-amber-50 p-4 text-amber-950">
+          <div className="flex items-start gap-3">
+            <CircleAlert className="mt-0.5 h-4 w-4 shrink-0 text-amber-700" />
+            <div>
+              <h2 className="font-semibold">All Stores product view</h2>
+              <p className="mt-1 text-sm text-amber-900">{PRODUCTS_ALL_STORES_READONLY_MESSAGE}</p>
+            </div>
+          </div>
+        </Card>
       )}
 
       {(cloudError || receivingMessage || purchaseOrderMessage) && (

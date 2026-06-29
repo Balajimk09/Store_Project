@@ -11,9 +11,22 @@ import { Button } from '@/components/ui/button';
 
 type GuardState = 'loading' | 'ready' | 'denied' | 'error';
 
+const PUBLIC_ADMIN_PATHS = [
+  '/admin/login',
+  '/admin/forgot-password',
+];
+
+function normalizePathname(pathname: string) {
+  return pathname !== '/' && pathname.endsWith('/')
+    ? pathname.slice(0, -1)
+    : pathname;
+}
+
 export default function AdminLayout({ children }: { children: ReactNode }) {
   const router = useRouter();
   const pathname = usePathname();
+  const normalizedPathname = normalizePathname(pathname || '/admin');
+  const isPublicAdminPath = PUBLIC_ADMIN_PATHS.includes(normalizedPathname);
   const [state, setState] = useState<GuardState>('loading');
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
@@ -27,7 +40,7 @@ export default function AdminLayout({ children }: { children: ReactNode }) {
 
       if (!session) {
         const redirect = encodeURIComponent(pathname || '/admin');
-        router.replace(`/login?redirect=${redirect}`);
+        router.replace(`/admin/login?redirect=${redirect}`);
         return;
       }
 
@@ -46,8 +59,13 @@ export default function AdminLayout({ children }: { children: ReactNode }) {
   };
 
   useEffect(() => {
+    if (isPublicAdminPath) return;
     checkAccess();
-  }, [pathname]);
+  }, [isPublicAdminPath, pathname]);
+
+  if (isPublicAdminPath) {
+    return <>{children}</>;
+  }
 
   if (state === 'loading') {
     return (

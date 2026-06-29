@@ -4,6 +4,21 @@ import { NextRequest, NextResponse } from 'next/server';
 type CookieResponse = NextResponse<unknown>;
 
 const INACTIVE_STAFF_STATUSES = new Set(['inactive', 'suspended', 'disabled', 'removed']);
+const PUBLIC_AUTH_PATHS = new Set([
+  '/login',
+  '/signup',
+  '/admin/login',
+  '/admin/forgot-password',
+  '/superadmin/login',
+  '/superadmin/forgot-password',
+  '/forgot-password',
+  '/reset-password',
+]);
+
+function normalizePathname(pathname: string) {
+  const trimmedPathname = pathname !== '/' ? pathname.replace(/\/+$/, '') : pathname;
+  return trimmedPathname.toLowerCase();
+}
 
 function copyCookies(from: CookieResponse, to: CookieResponse) {
   from.cookies.getAll().forEach((cookie) => {
@@ -123,12 +138,17 @@ async function hasAdminAccess(supabase: ReturnType<typeof createServerClient>, u
 
 export async function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
+  const normalizedPathname = normalizePathname(pathname);
 
   let response = NextResponse.next({
     request: {
       headers: request.headers,
     },
   });
+
+  if (PUBLIC_AUTH_PATHS.has(normalizedPathname)) {
+    return response;
+  }
 
   const supabase = createServerClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -255,5 +275,7 @@ export const config = {
     '/app/:path*',
     '/login',
     '/signup',
+    '/forgot-password',
+    '/reset-password',
   ],
 };

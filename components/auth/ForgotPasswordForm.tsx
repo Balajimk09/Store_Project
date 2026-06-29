@@ -98,7 +98,7 @@ export function ForgotPasswordForm({ portal }: { portal: ForgotPasswordPortal })
                 required
                 value={email}
                 onChange={(event) => setEmail(event.target.value)}
-                placeholder="you@store.com"
+                placeholder="Email address"
                 className="pl-9"
               />
             </div>

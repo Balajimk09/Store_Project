@@ -155,7 +155,7 @@ export default function DemoRequestPage() {
                   type="email"
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
-                  placeholder="owner@store.com"
+                  placeholder="Email address"
                   required
                 />
               </div>
@@ -168,7 +168,7 @@ export default function DemoRequestPage() {
                   id="phoneNumber"
                   value={phoneNumber}
                   onChange={(e) => setPhoneNumber(e.target.value)}
-                  placeholder="(555) 123-4567"
+                  placeholder="Phone number"
                 />
               </div>
 

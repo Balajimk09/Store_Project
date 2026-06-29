@@ -785,7 +785,7 @@ export default function AdminUsersPage() {
                 <Input
                   value={phone}
                   onChange={(event) => setPhone(event.target.value)}
-                  placeholder="405-123-4567"
+                  placeholder="Phone number"
                 />
               </div>
 
@@ -805,7 +805,7 @@ export default function AdminUsersPage() {
                   required
                   value={email}
                   onChange={(event) => setEmail(event.target.value)}
-                  placeholder="user@store.com"
+                  placeholder="Email address"
                 />
               </div>
 

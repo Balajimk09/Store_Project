@@ -70,7 +70,7 @@ export default function SignupPage() {
                 required
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
-                placeholder="you@store.com"
+                placeholder="Email address"
                 className="pl-9"
               />
             </div>

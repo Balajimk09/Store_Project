@@ -317,7 +317,7 @@ export function LoginForm({ portal }: { portal: LoginPortal }) {
                 required
                 value={email}
                 onChange={(event) => setEmail(event.target.value)}
-                placeholder="you@store.com"
+                placeholder="Email address"
                 className="pl-9"
               />
             </div>

@@ -1025,7 +1025,7 @@ export function StoreProfileForm({
               type="email"
               value={values.primary_owner_email || ''}
               onChange={(event) => setField('primary_owner_email', event.target.value)}
-              placeholder="owner@example.com"
+              placeholder="Email address"
             />
             <p className="mt-1 text-xs text-slate-500">
               If blank, the first Owner contact email is used when saving.

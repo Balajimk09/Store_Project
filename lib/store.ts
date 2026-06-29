@@ -875,12 +875,54 @@ export async function saveUploadedProducts(
     if (batchErr) return { mode: 'cloud', error: `Could not create upload record: ${batchErr.message}` };
 
     const rows = products.map((product) => productToDbInsert(product, storeId, batch.id));
+    const rowsWithUpc = rows.filter((row) => row.upc);
+    const rowsWithoutUpc = rows.filter((row) => !row.upc);
 
-    const { error: upsertErr } = await supabase
-      .from('products')
-      .upsert(rows, { onConflict: 'store_id,upc' });
+    for (const row of rowsWithoutUpc) {
+      const duplicateChecks: Array<['plu' | 'product_code', string | null]> = [
+        ['plu', row.plu],
+        ['product_code', row.product_code],
+      ];
 
-    if (upsertErr) return { mode: 'cloud', error: `Product upsert failed: ${upsertErr.message}` };
+      for (const [column, value] of duplicateChecks) {
+        if (!value) continue;
+
+        const { data: existingProduct, error: duplicateError } = await supabase
+          .from('products')
+          .select('id')
+          .eq('store_id', storeId)
+          .eq(column, value)
+          .limit(1)
+          .maybeSingle();
+
+        if (duplicateError) {
+          return { mode: 'cloud', error: `Product duplicate check failed: ${duplicateError.message}` };
+        }
+
+        if (existingProduct) {
+          return { mode: 'cloud', error: duplicateIdentifierMessage(column) };
+        }
+      }
+    }
+
+    if (rowsWithUpc.length > 0) {
+      const { error: upsertErr } = await supabase
+        .from('products')
+        .upsert(rowsWithUpc, { onConflict: 'store_id,upc' });
+
+      if (upsertErr) return { mode: 'cloud', error: `Product upsert failed: ${upsertErr.message}` };
+    }
+
+    for (const row of rowsWithoutUpc) {
+      const { error: insertErr } = await supabase.from('products').insert(row);
+
+      if (insertErr) {
+        const duplicateKind = duplicateIdentifierFromError(insertErr.message);
+        const errorMessage = duplicateKind ? duplicateIdentifierMessage(duplicateKind) : insertErr.message;
+
+        return { mode: 'cloud', error: `Product insert failed: ${errorMessage}` };
+      }
+    }
 
     const meta: ProductMeta = {
       source: 'upload',

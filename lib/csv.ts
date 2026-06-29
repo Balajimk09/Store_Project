@@ -395,7 +395,6 @@ export function downloadSampleCsv() {
 }
 
 export const PRODUCT_REQUIRED_COLUMNS = [
-  'upc',
   'item_name',
   'category',
   'brand',
@@ -404,6 +403,7 @@ export const PRODUCT_REQUIRED_COLUMNS = [
 ] as const;
 
 export const PRODUCT_OPTIONAL_COLUMNS = [
+  'upc',
   'stock',
   'reorder_level',
   'vendor',
@@ -587,17 +587,14 @@ export function parseProductsCsv(text: string, options: ProductParseOptions = {}
     const productCode = (raw['product_code'] || '').trim() || undefined;
     const sku = (raw['sku'] || '').trim() || undefined;
     const upcRaw = (raw['upc'] || '').trim();
-    const upc =
-      upcRaw ||
-      (mode === 'add_update' && plu ? plu : '') ||
-      (mode === 'add_update' && sku ? sku : '') ||
-      (mode === 'add_update' && productCode ? productCode : '') ||
-      (mode === 'add_update' ? `PLU-${Date.now()}-${i}` : '');
+    const upc = upcRaw;
     const name = (raw['item_name'] || '').trim();
 
     if (mode === 'add_update') {
       if (!name) errors.push('Missing item_name');
-      if (!upcRaw && !plu && !productCode && !sku) errors.push('Missing identifier');
+      if (!upc && !plu && !productCode) {
+        errors.push('Missing identifier: UPC, PLU, or Product Code is required.');
+      }
     }
 
     if (mode === 'update_by_upc' && !upcRaw) errors.push('Missing UPC');

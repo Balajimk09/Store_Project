@@ -58,8 +58,17 @@ type ProductImportSummary = {
   failed: number;
   duplicates: number;
   unmatched: number;
+  posMatched: number;
   errorRows: number;
 } | null;
+
+type ImportedPosProductReference = {
+  plu_raw: string | null;
+  plu_normalized: string | null;
+  upc_normalized: string | null;
+  description: string | null;
+  unit_price: number | string | null;
+};
 
 type NewProductStatus = 'ready_to_add' | 'missing_upc' | 'duplicate_found' | 'price_conflict';
 
@@ -591,6 +600,59 @@ function findProductDuplicate(products: Product[], product: Product) {
     if (productCode && normalizeText(current.productCode) === productCode) return true;
     return false;
   }) || null;
+}
+
+function isSameProductIdentity(left: Product, right: Product) {
+  if (left.id && right.id) return left.id === right.id;
+  if (left.upc && right.upc && normalizeText(left.upc) === normalizeText(right.upc)) return true;
+  if (left.plu && right.plu && normalizeText(left.plu) === normalizeText(right.plu)) return true;
+  if (left.productCode && right.productCode && normalizeText(left.productCode) === normalizeText(right.productCode)) {
+    return true;
+  }
+  return false;
+}
+
+function replaceProductInList(products: Product[], target: Product, replacement: Product) {
+  return products.map((current) => (isSameProductIdentity(current, target) ? replacement : current));
+}
+
+function findImportedPosProductMatch(product: Product, references: ImportedPosProductReference[]) {
+  const upc = normalizeText(product.upc);
+  const plu = normalizeText(product.plu);
+  const productCode = normalizeText(product.productCode);
+
+  if (!upc && !plu && !productCode) return null;
+
+  return references.find((reference) => {
+    const posUpc = normalizeText(reference.upc_normalized);
+    const posPluRaw = normalizeText(reference.plu_raw);
+    const posPluNormalized = normalizeText(reference.plu_normalized);
+
+    if (upc && posUpc && upc === posUpc) return true;
+    if (plu && ((posPluRaw && plu === posPluRaw) || (posPluNormalized && plu === posPluNormalized))) return true;
+    if (
+      productCode &&
+      ((posPluRaw && productCode === posPluRaw) || (posPluNormalized && productCode === posPluNormalized))
+    ) {
+      return true;
+    }
+
+    return false;
+  }) || null;
+}
+
+async function loadImportedPosProductReferences(storeId: string) {
+  const { data, error } = await supabase
+    .from('pos_plu_sales')
+    .select('plu_raw, plu_normalized, upc_normalized, description, unit_price')
+    .eq('store_id', storeId)
+    .limit(10000);
+
+  if (error) {
+    throw new Error(`Could not validate imported Commander/POS data: ${error.message}`);
+  }
+
+  return (data || []) as ImportedPosProductReference[];
 }
 
 function dateOnly(value: string) {
@@ -2415,105 +2477,116 @@ export default function ProductsPage() {
 
   const importParsedProducts = async () => {
     if (!requireSelectedStoreForWrite(setProductImportError)) return;
+    if (!activeStoreId) return;
     if (!productImportResult || productImportResult.products.length === 0) return;
 
     setImportingProducts(true);
     setProductImportError(null);
 
-    const summary: NonNullable<ProductImportSummary> = {
-      inserted: 0,
-      updated: 0,
-      skipped: 0,
-      failed: 0,
-      duplicates: 0,
-      unmatched: 0,
-      errorRows: productImportResult.invalidRows,
-    };
+    try {
+      const importedPosReferences = await loadImportedPosProductReferences(activeStoreId);
+      const summary: NonNullable<ProductImportSummary> = {
+        inserted: 0,
+        updated: 0,
+        skipped: 0,
+        failed: 0,
+        duplicates: 0,
+        unmatched: 0,
+        posMatched: 0,
+        errorRows: productImportResult.invalidRows,
+      };
 
-    let workingProducts = [...items];
-    const updateMode = productImportMode !== 'add_update';
-    const validRows = productImportResult.rows.filter((row) => row.valid && row.product);
+      let workingProducts = [...items];
+      const updateMode = productImportMode !== 'add_update';
+      const validRows = productImportResult.rows.filter((row) => row.valid && row.product);
 
-    for (const row of validRows) {
-      const product = row.product as Product;
-      const duplicate =
-        productImportMode === 'update_by_upc'
-          ? workingProducts.find((current) => normalizeText(current.upc) === normalizeText(product.upc)) || null
-          : productImportMode === 'update_by_plu'
-            ? workingProducts.find((current) => normalizeText(current.plu) === normalizeText(product.plu)) || null
-            : productImportMode === 'update_by_product_code'
-              ? workingProducts.find((current) => normalizeText(current.productCode) === normalizeText(product.productCode)) || null
-              : findProductDuplicate(workingProducts, product);
+      for (const row of validRows) {
+        const product = row.product as Product;
+        const duplicate =
+          productImportMode === 'update_by_upc'
+            ? workingProducts.find((current) => normalizeText(current.upc) === normalizeText(product.upc)) || null
+            : productImportMode === 'update_by_plu'
+              ? workingProducts.find((current) => normalizeText(current.plu) === normalizeText(product.plu)) || null
+              : productImportMode === 'update_by_product_code'
+                ? workingProducts.find((current) => normalizeText(current.productCode) === normalizeText(product.productCode)) || null
+                : findProductDuplicate(workingProducts, product);
 
-      try {
-        if (updateMode) {
-          if (!duplicate) {
-            summary.unmatched += 1;
+        if (findImportedPosProductMatch(product, importedPosReferences)) {
+          summary.posMatched += 1;
+        }
+
+        try {
+          if (updateMode) {
+            if (!duplicate) {
+              summary.unmatched += 1;
+              continue;
+            }
+
+            const present = new Set(row.presentFields || []);
+            const patch: Partial<Product> = {};
+            if (present.has('upc')) patch.upc = product.upc;
+            if (present.has('item_name')) patch.name = product.name;
+            if (present.has('category')) patch.category = product.category;
+            if (present.has('department')) patch.department = product.department;
+            if (present.has('brand')) patch.brand = product.brand;
+            if (present.has('vendor')) patch.vendor = product.vendor;
+            if (present.has('sku')) patch.sku = product.sku;
+            if (present.has('plu')) patch.plu = product.plu;
+            if (present.has('product_code')) patch.productCode = product.productCode;
+            if (present.has('cost_price')) patch.costPrice = product.costPrice;
+            if (present.has('selling_price')) patch.sellPrice = product.sellPrice;
+            if (present.has('stock')) patch.stock = product.stock;
+            if (present.has('reorder_level')) patch.reorderLevel = product.reorderLevel;
+            if (present.has('tax_rate')) patch.taxRate = product.taxRate;
+            if (present.has('tax_category')) patch.taxCategory = product.taxCategory;
+            if (present.has('taxable')) patch.taxable = product.taxable;
+            if (present.has('ebt_eligible')) patch.ebtEligible = product.ebtEligible;
+            if (present.has('age_verification')) patch.ageVerification = product.ageVerification;
+            if (present.has('minimum_age')) patch.minimumAge = product.minimumAge;
+            if (present.has('age_restriction_type')) patch.ageRestrictionType = product.ageRestrictionType;
+            if (present.has('is_active')) patch.isActive = product.isActive;
+            if (present.has('notes')) patch.notes = product.notes;
+
+            const updatedProduct = { ...duplicate, ...patch };
+            const result = await updateProduct(updatedProduct);
+            if (result.error) throw new Error(result.error);
+            workingProducts = replaceProductInList(workingProducts, duplicate, updatedProduct);
+            summary.updated += 1;
             continue;
           }
 
-          const present = new Set(row.presentFields || []);
-          const patch: Partial<Product> = {};
-          if (present.has('item_name')) patch.name = product.name;
-          if (present.has('category')) patch.category = product.category;
-          if (present.has('department')) patch.department = product.department;
-          if (present.has('brand')) patch.brand = product.brand;
-          if (present.has('vendor')) patch.vendor = product.vendor;
-          if (present.has('sku')) patch.sku = product.sku;
-          if (present.has('plu')) patch.plu = product.plu;
-          if (present.has('product_code')) patch.productCode = product.productCode;
-          if (present.has('cost_price')) patch.costPrice = product.costPrice;
-          if (present.has('selling_price')) patch.sellPrice = product.sellPrice;
-          if (present.has('stock')) patch.stock = product.stock;
-          if (present.has('reorder_level')) patch.reorderLevel = product.reorderLevel;
-          if (present.has('tax_rate')) patch.taxRate = product.taxRate;
-          if (present.has('tax_category')) patch.taxCategory = product.taxCategory;
-          if (present.has('taxable')) patch.taxable = product.taxable;
-          if (present.has('ebt_eligible')) patch.ebtEligible = product.ebtEligible;
-          if (present.has('age_verification')) patch.ageVerification = product.ageVerification;
-          if (present.has('minimum_age')) patch.minimumAge = product.minimumAge;
-          if (present.has('age_restriction_type')) patch.ageRestrictionType = product.ageRestrictionType;
-          if (present.has('is_active')) patch.isActive = product.isActive;
-          if (present.has('notes')) patch.notes = product.notes;
+          if (duplicate) {
+            summary.duplicates += 1;
 
-          const updatedProduct = { ...duplicate, ...patch, upc: duplicate.upc };
-          const result = await updateProduct(updatedProduct);
-          if (result.error) throw new Error(result.error);
-          workingProducts = workingProducts.map((current) =>
-            current.upc === duplicate.upc ? updatedProduct : current
-          );
-          summary.updated += 1;
-          continue;
-        }
-
-        if (duplicate) {
-          summary.duplicates += 1;
-
-          if (duplicateImportMode === 'update') {
-            const updatedProduct = { ...duplicate, ...product, upc: duplicate.upc };
-            const result = await updateProduct(updatedProduct);
-            if (result.error) throw new Error(result.error);
-            workingProducts = workingProducts.map((current) =>
-              current.upc === duplicate.upc ? updatedProduct : current
-            );
-            summary.updated += 1;
+            if (duplicateImportMode === 'update') {
+              const updatedProduct = { ...duplicate, ...product, id: duplicate.id, upc: product.upc || duplicate.upc };
+              const result = await updateProduct(updatedProduct);
+              if (result.error) throw new Error(result.error);
+              workingProducts = replaceProductInList(workingProducts, duplicate, updatedProduct);
+              summary.updated += 1;
+            } else {
+              summary.skipped += 1;
+            }
           } else {
-            summary.skipped += 1;
+            const result = await createProduct(product);
+            if (result.error) throw new Error(result.error);
+            workingProducts = [product, ...workingProducts];
+            summary.inserted += 1;
           }
-        } else {
-          const result = await createProduct(product);
-          if (result.error) throw new Error(result.error);
-          workingProducts = [product, ...workingProducts];
-          summary.inserted += 1;
+        } catch (error) {
+          console.error('[Product Import Row Error]', error);
+          summary.failed += 1;
         }
-      } catch {
-        summary.failed += 1;
       }
-    }
 
-    setItems(workingProducts);
-    setProductImportSummary(summary);
-    setImportingProducts(false);
+      setItems(workingProducts);
+      setProductImportSummary(summary);
+    } catch (error) {
+      console.error('[Product Import Error]', error);
+      setProductImportError(error instanceof Error ? error.message : 'Product import failed.');
+    } finally {
+      setImportingProducts(false);
+    }
   };
 
   const resetBulkFields = () => {
@@ -3302,6 +3375,9 @@ const nextBreakdown = getCaseBreakdown(nextStock, unitsPerCase);
                   <p className="mt-1 text-muted-foreground">
                     Duplicate matches use UPC first, then PLU, then Product Code.
                   </p>
+                  <p className="mt-1 text-muted-foreground">
+                    Product rows must include UPC, PLU, or Product Code.
+                  </p>
 
                   <div className="mt-3">
                     <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Import Mode</p>
@@ -3362,6 +3438,7 @@ const nextBreakdown = getCaseBreakdown(nextStock, unitsPerCase);
                     <span>Failed: {productImportSummary.failed}</span>
                     <span>Duplicates found: {productImportSummary.duplicates}</span>
                     <span>Unmatched: {productImportSummary.unmatched}</span>
+                    <span>Matched imported Commander/POS data: {productImportSummary.posMatched}</span>
                     <span>Error rows: {productImportSummary.errorRows}</span>
                   </div>
                   <Button variant="outline" size="sm" onClick={() => setProductImportSummary(null)}>

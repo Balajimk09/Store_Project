@@ -212,10 +212,10 @@ export default function UploadPage() {
     p.result?.rows
       .filter((row) => row.valid && row.product)
       .slice(0, 10)
-      .map((row) => ({
-        id: row.product!.upc,
+      .map((row, index) => ({
+        id: row.product!.upc || row.product!.plu || row.product!.productCode || `product-${row.row}-${index}`,
         cells: [
-          { label: 'UPC', value: row.product!.upc },
+          { label: 'Identifier', value: row.product!.upc || row.product!.plu || row.product!.productCode || '-' },
           { label: 'Item', value: row.product!.name },
           { label: 'Department', value: row.product!.department || row.product!.category },
           { label: 'Sell', value: formatCurrency(row.product!.sellPrice) },
@@ -324,7 +324,7 @@ export default function UploadPage() {
               validRows={p.result?.validRows || 0}
               invalidRows={p.result?.invalidRows || 0}
               previewRows={pPreviewRows}
-              previewColumns={['UPC', 'Item', 'Department', 'Sell', 'Stock']}
+              previewColumns={['Identifier', 'Item', 'Department', 'Sell', 'Stock']}
               onImport={importProducts}
               imported={p.imported}
               importedCount={p.importedCount}
@@ -339,6 +339,7 @@ export default function UploadPage() {
                 sampleFn: downloadSampleProductsCsv,
                 sampleLabel: 'Download pricebook sample',
                 rules: [
+                  { label: 'Identifier', value: 'Product rows must include UPC, PLU, or Product Code.' },
                   { label: 'Tip', value: 'Products can also be added one by one from Pricebook.' },
                 ],
               }}

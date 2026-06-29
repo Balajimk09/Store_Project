@@ -178,7 +178,7 @@ export default function DemoRequestPage() {
                   id="storeName"
                   value={storeName}
                   onChange={(e) => setStoreName(e.target.value)}
-                  placeholder="Meridian Mart"
+                  placeholder="Store name"
                 />
               </div>
             </div>

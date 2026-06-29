@@ -208,7 +208,7 @@ export default function SetupPage() {
                   required
                   value={storeName}
                   onChange={(event) => setStoreName(event.target.value)}
-                  placeholder="Meridian Mart"
+                  placeholder="Store name"
                 />
               </div>
 
@@ -218,7 +218,7 @@ export default function SetupPage() {
                   id="storeAddress"
                   value={storeAddress}
                   onChange={(event) => setStoreAddress(event.target.value)}
-                  placeholder="700 S Meridian Ave"
+                  placeholder="Street address"
                 />
               </div>
 
@@ -248,7 +248,7 @@ export default function SetupPage() {
                   id="zipCode"
                   value={zipCode}
                   onChange={(event) => setZipCode(event.target.value)}
-                  placeholder="73127"
+                  placeholder="ZIP code"
                 />
               </div>
 
@@ -260,7 +260,7 @@ export default function SetupPage() {
                     id="phoneNumber"
                     value={phoneNumber}
                     onChange={(event) => setPhoneNumber(event.target.value)}
-                    placeholder="405-555-1234"
+                    placeholder="Store phone"
                     className="pl-9"
                   />
                 </div>

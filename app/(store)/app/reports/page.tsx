@@ -16,13 +16,13 @@ import {
   CircleAlert,
   CreditCard,
   Download,
-  FileUp,
   Fuel,
   Receipt,
   RefreshCw,
   Search,
   ShoppingBasket,
   TrendingUp,
+  Upload,
   UserRound,
   X,
 } from 'lucide-react';
@@ -936,10 +936,18 @@ export default function ReportsPage() {
         title="Reports"
         description="Review day close, merchandise, fuel, payments, cashier activity, and exceptions."
       >
-        <Button variant="outline" size="sm" onClick={handleExport}>
-          <Download className="mr-2 h-4 w-4" />
-          Export CSV
-        </Button>
+        <div className="flex flex-wrap items-center gap-2">
+          <Button variant="outline" size="sm" onClick={handleExport}>
+            <Upload className="mr-2 h-4 w-4" />
+            Export CSV
+          </Button>
+          <Button asChild variant="outline" size="sm">
+            <Link href="/app/reports/pos-import">
+              <Download className="mr-2 h-4 w-4" />
+              Import POS
+            </Link>
+          </Button>
+        </div>
       </PageHeader>
 
       {showAllStoresReportsMessage && (
@@ -1024,25 +1032,6 @@ export default function ReportsPage() {
               </Button>
             </div>
           </div>
-        </div>
-      </Card>
-
-      <Card className="mb-5 p-5">
-        <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-          <div className="flex gap-3">
-            <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-primary/10 text-primary">
-              <FileUp className="h-5 w-5" />
-            </div>
-            <div>
-              <h2 className="font-semibold text-foreground">POS Imports</h2>
-              <p className="mt-1 text-sm text-muted-foreground">
-                Upload POS report files and import PLU, department, category, tax, deal, payment, fuel, and cashier summaries.
-              </p>
-            </div>
-          </div>
-          <Button asChild>
-            <Link href="/app/reports/pos-import">Open POS Imports</Link>
-          </Button>
         </div>
       </Card>
 

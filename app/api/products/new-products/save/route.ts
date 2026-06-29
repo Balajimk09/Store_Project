@@ -32,11 +32,11 @@ type ProductInsert = {
   reorder_level: number;
   vendor: string | null;
   department: string | null;
-  sku: null;
+  sku: string | null;
   tax_rate: number;
   tax_category: string;
   taxable: boolean;
-  is_active: true;
+  is_active: boolean;
   notes: string;
   ebt_eligible: boolean;
   units_per_case: number;
@@ -269,11 +269,11 @@ export async function POST(request: NextRequest) {
       reorder_level: toNumber(product.reorder_level, 10),
       vendor: toNullableString(product.vendor),
       department: toNullableString(product.department),
-      sku: null,
+      sku: toNullableString(product.sku),
       tax_rate: toNumber(product.tax_rate, 0),
       tax_category: toTrimmedString(product.tax_category) || 'standard',
       taxable: toBoolean(product.taxable, true),
-      is_active: true,
+      is_active: toBoolean(product.is_active, true),
       notes: toTrimmedString(product.notes) || 'Discovered from POS PLU report',
       ebt_eligible: toBoolean(product.ebt_eligible, false),
       units_per_case: toNumber(product.units_per_case, 1),

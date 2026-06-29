@@ -6,6 +6,7 @@ import { DashboardShell, PageHeader, PageLoading } from '@/components/layout/sid
 import { Card } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { useAuth } from '@/lib/auth';
 import { useStoreData } from '@/lib/store';
 import type { Product, Transaction } from '@/lib/mock-data';
 import { exportToCsv, formatCurrency, formatNumber } from '@/lib/format';
@@ -487,6 +488,8 @@ export default function ReportsPage() {
     dataMode,
     isDemo,
   } = useStoreData();
+  const { user, activeStoreId, storeScope } = useAuth();
+  const showAllStoresReportsMessage = Boolean(user && (storeScope === 'all' || !activeStoreId));
 
   const [activeTab, setActiveTab] = useState<ReportTab>('dayClose');
   const [selectedCashierId, setSelectedCashierId] = useState<string | null>(null);
@@ -939,6 +942,20 @@ export default function ReportsPage() {
         </Button>
       </PageHeader>
 
+      {showAllStoresReportsMessage && (
+        <Card className="mb-5 border-amber-200 bg-amber-50 p-4 text-amber-950">
+          <div className="flex items-start gap-3">
+            <CircleAlert className="mt-0.5 h-4 w-4 shrink-0 text-amber-700" />
+            <div>
+              <h2 className="font-semibold">All Stores reports view</h2>
+              <p className="mt-1 text-sm text-amber-900">
+                All Stores reports aggregation is not available yet. Select a specific store to view detailed reports.
+              </p>
+            </div>
+          </div>
+        </Card>
+      )}
+
       {cloudError && (
         <div className="mb-5 flex items-start gap-3 rounded-lg border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive">
           <CircleAlert className="mt-0.5 h-4 w-4 shrink-0" />
@@ -1029,7 +1046,7 @@ export default function ReportsPage() {
         </div>
       </Card>
 
-      {filteredTransactions.length === 0 ? (
+      {showAllStoresReportsMessage ? null : filteredTransactions.length === 0 ? (
         <EmptyState
           title="No transactions found"
           description="Try changing the date range or upload transaction data first."

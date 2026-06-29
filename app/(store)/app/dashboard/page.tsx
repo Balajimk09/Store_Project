@@ -4,6 +4,7 @@ import { DashboardShell, PageHeader, PageLoading } from '@/components/layout/sid
 import { Card } from '@/components/ui/card';
 import { TrendingUp, TrendingDown, DollarSign, Receipt, RotateCcw, Ban, CircleSlash, Sigma, TriangleAlert as AlertTriangle, Boxes, ArrowRight, Sparkles, Lightbulb } from 'lucide-react';
 import { CHART_COLORS } from '@/lib/mock-data';
+import { useAuth } from '@/lib/auth';
 import { useStoreData } from '@/lib/store';
 import { generateInsights, type Severity } from '@/lib/insights';
 import { formatCurrency, formatNumber } from '@/lib/format';
@@ -91,6 +92,8 @@ function buildCards(stats: Stats) {
 
 export default function DashboardPage() {
   const { stats, categoryData, hourData, productData, paymentData, dailyData, meta, isDemo, lowStockProducts, isDemoProducts, productsMeta, loaded } = useStoreData();
+  const { user, activeStoreId, storeScope } = useAuth();
+  const showAllStoresDashboardMessage = Boolean(user && (storeScope === 'all' || !activeStoreId));
   const cards = buildCards(stats);
 
   return (
@@ -105,6 +108,20 @@ export default function DashboardPage() {
           <span className="text-muted-foreground">{isDemo ? 'Demo mode' : 'Live upload'} Â· {meta.rowCount.toLocaleString()} txns</span>
         </div>
       </PageHeader>
+
+      {showAllStoresDashboardMessage && (
+        <Card className="mb-6 border-amber-200 bg-amber-50 p-4 text-amber-950">
+          <div className="flex items-start gap-3">
+            <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-700" />
+            <div>
+              <h2 className="font-semibold">All Stores dashboard view</h2>
+              <p className="mt-1 text-sm text-amber-900">
+                All Stores dashboard aggregation is not available yet. Select a specific store to view detailed dashboard metrics.
+              </p>
+            </div>
+          </div>
+        </Card>
+      )}
 
       {/* Stat cards */}
       <div className="grid grid-cols-2 gap-4 lg:grid-cols-3 xl:grid-cols-6">

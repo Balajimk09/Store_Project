@@ -76,7 +76,7 @@ export interface ProductRow {
   id: string;
   store_id: string;
   batch_id: string | null;
-  upc: string;
+  upc: string | null;
   item_name: string | null;
   category: string | null;
   department: string | null;

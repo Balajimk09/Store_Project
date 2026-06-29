@@ -152,9 +152,7 @@ export function ProductForm({
       : mode === 'new_product_review'
         ? 'Save Product'
         : mode === 'add'
-        ? upcDuplicate
-          ? 'Update Existing Product'
-          : 'Add Product'
+        ? 'Add Product'
         : 'Save Changes');
   const updateField = <K extends keyof ProductFormState>(field: K, value: ProductFormState[K]) => {
     setForm((current) => ({ ...current, [field]: value }));
@@ -176,7 +174,7 @@ export function ProductForm({
         <div className="grid gap-3">
           <div className="grid gap-2 sm:grid-cols-2">
             <label className={labelClass}>
-              <span className={labelTextClass}>UPC *</span>
+              <span className={labelTextClass}>UPC</span>
               <Input
                 ref={upcInputRef}
                 className={fieldClass}
@@ -195,7 +193,7 @@ export function ProductForm({
               {fieldErrors?.upc && <span className="text-xs font-medium text-destructive">{fieldErrors.upc}</span>}
               {upcDuplicate && mode === 'add' && (
                 <p className="rounded border border-amber-200 bg-amber-50 px-2 py-1 text-xs text-amber-800">
-                  This UPC already exists: {upcDuplicate.name}. Saving will update it.
+                  This UPC already exists: {upcDuplicate.name}.
                 </p>
               )}
             </label>

@@ -150,7 +150,7 @@ type SaveNewProductResponse =
       ok: true;
       inserted: {
         id: string;
-        upc: string;
+        upc: string | null;
         item_name: string | null;
       };
     }
@@ -159,7 +159,9 @@ type SaveNewProductResponse =
       reason:
         | 'unauthorized'
         | 'duplicate_upc'
-        | 'missing_upc'
+        | 'duplicate_plu'
+        | 'duplicate_product_code'
+        | 'missing_identifier'
         | 'missing_item_name'
         | 'invalid_store'
         | 'invalid_source'
@@ -167,7 +169,7 @@ type SaveNewProductResponse =
       message: string;
       existingProduct?: {
         id: string;
-        upc: string;
+        upc: string | null;
         item_name: string | null;
       };
     };
@@ -574,6 +576,10 @@ function getProductIdentity(product: Product) {
   return product.id || product.upc || product.productCode || product.plu || '';
 }
 
+function hasProductFormIdentifier(form: ProductFormState) {
+  return Boolean(form.upc.trim() || form.plu.trim() || form.productCode.trim());
+}
+
 function findProductDuplicate(products: Product[], product: Product) {
   const upc = normalizeText(product.upc);
   const plu = normalizeText(product.plu);
@@ -758,7 +764,7 @@ function formToProduct(form: ProductFormState): Product {
 }
 
 function validateProductForm(form: ProductFormState) {
-  if (!form.upc.trim()) return 'UPC is required.';
+  if (!hasProductFormIdentifier(form)) return 'Enter a UPC, PLU, or Product Code.';
   if (!form.name.trim()) return 'Product name is required.';
   if (form.department === '__other__' && !form.customDepartment.trim()) return 'Department is required.';
   if (!form.department.trim()) return 'Department is required.';
@@ -937,9 +943,7 @@ function ProductModal({
             saving
               ? 'Saving...'
               : mode === 'add'
-                ? upcDuplicate
-                  ? 'Update Existing Product'
-                  : 'Add Product'
+                ? 'Add Product'
                 : 'Save Changes'
           }
         />
@@ -1108,7 +1112,7 @@ export default function ProductsPage() {
 
   const handleNewProductReviewUpcChange = (value: string) => {
     setNewProductReviewForm((current) => ({ ...current, upc: value }));
-    if (value.trim()) {
+    if (value.trim() || newProductReviewForm.plu.trim() || newProductReviewForm.productCode.trim()) {
       setNewProductReviewFieldErrors((current) => ({ ...current, upc: undefined }));
     }
     setNewProductReviewError(null);
@@ -1125,8 +1129,8 @@ export default function ProductsPage() {
     if (!activeStoreId || !reviewingNewProduct) return;
 
     const fieldErrors: NewProductReviewFieldErrors = {};
-    if (!newProductReviewForm.upc.trim()) {
-      fieldErrors.upc = 'UPC is required before saving this product.';
+    if (!hasProductFormIdentifier(newProductReviewForm)) {
+      fieldErrors.upc = 'Enter a UPC, PLU, or Product Code.';
     }
     if (!newProductReviewForm.name.trim()) {
       fieldErrors.name = 'Item name is required before saving this product.';
@@ -1162,7 +1166,7 @@ export default function ProductsPage() {
       }
 
       if (!payload.ok) {
-        if (payload.reason === 'missing_upc') {
+        if (payload.reason === 'missing_identifier') {
           setNewProductReviewFieldErrors({ upc: payload.message });
           return;
         }
@@ -1174,6 +1178,16 @@ export default function ProductsPage() {
 
         if (payload.reason === 'duplicate_upc') {
           setNewProductReviewError('A product with this UPC already exists for this store. No changes were made.');
+          return;
+        }
+
+        if (payload.reason === 'duplicate_plu') {
+          setNewProductReviewError('A product with this PLU already exists for this store. No changes were made.');
+          return;
+        }
+
+        if (payload.reason === 'duplicate_product_code') {
+          setNewProductReviewError('A product with this Product Code already exists for this store. No changes were made.');
           return;
         }
 
@@ -2251,18 +2265,24 @@ export default function ProductsPage() {
   const checkPluDuplicate = () => {
     if (modalMode !== 'add') return;
     const trimmed = form.plu.trim();
+    if (trimmed && formError === 'Enter a UPC, PLU, or Product Code.') {
+      setFormError(null);
+    }
     setPluDuplicate(trimmed ? items.find((product) => product.plu?.trim() === trimmed) || null : null);
   };
 
   const checkProductCodeDuplicate = () => {
     if (modalMode !== 'add') return;
     const trimmed = form.productCode.trim();
+    if (trimmed && formError === 'Enter a UPC, PLU, or Product Code.') {
+      setFormError(null);
+    }
     setProductCodeDuplicate(trimmed ? items.find((product) => product.productCode?.trim() === trimmed) || null : null);
   };
 
   const handleProductUpcChange = (value: string) => {
     setForm((current) => ({ ...current, upc: value }));
-    if (value.trim() && formError === 'UPC is required.') {
+    if (value.trim() && formError === 'Enter a UPC, PLU, or Product Code.') {
       setFormError(null);
     }
     if (modalMode === 'add') checkUpcDuplicate(value);
@@ -2284,17 +2304,45 @@ export default function ProductsPage() {
       return;
     }
 
+    if (modalMode === 'add') {
+      const upc = form.upc.trim();
+      const plu = form.plu.trim();
+      const productCode = form.productCode.trim();
+      const duplicateUpc = upc ? items.find((product) => product.upc.trim() === upc) || null : null;
+      const duplicatePlu = plu ? items.find((product) => product.plu?.trim() === plu) || null : null;
+      const duplicateProductCode = productCode
+        ? items.find((product) => product.productCode?.trim() === productCode) || null
+        : null;
+
+      setUpcDuplicate(duplicateUpc);
+      setPluDuplicate(duplicatePlu);
+      setProductCodeDuplicate(duplicateProductCode);
+
+      if (duplicateUpc) {
+        setFormError('A product with this UPC already exists for this store.');
+        return;
+      }
+
+      if (duplicatePlu) {
+        setFormError('A product with this PLU already exists for this store.');
+        return;
+      }
+
+      if (duplicateProductCode) {
+        setFormError('A product with this Product Code already exists for this store.');
+        return;
+      }
+    }
+
     setSaving(true);
     setFormError(null);
 
     const product = formToProduct(form);
     const productToSave =
-      modalMode === 'add' && upcDuplicate
-        ? { ...upcDuplicate, ...product, upc: upcDuplicate.upc }
-        : modalMode === 'edit' && editingProduct
+      modalMode === 'edit' && editingProduct
           ? { ...editingProduct, ...product, id: editingProduct.id, upc: editingProduct.upc }
           : product;
-    const result = modalMode === 'add' && !upcDuplicate ? await createProduct(productToSave) : await updateProduct(productToSave);
+    const result = modalMode === 'add' ? await createProduct(productToSave) : await updateProduct(productToSave);
 
     setSaving(false);
 
@@ -4898,7 +4946,7 @@ const nextBreakdown = getCaseBreakdown(nextStock, unitsPerCase);
                     upcInputRef={newProductUpcInputRef}
                     upcHelperText={
                       reviewingNewProduct.status === 'missing_upc'
-                        ? 'This product has no UPC from the POS report. Enter a UPC to save it to your store.'
+                        ? 'This product has no UPC from the POS report. Enter a UPC, PLU, or Product Code to save it to your store.'
                         : undefined
                     }
                   />

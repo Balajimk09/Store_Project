@@ -8,21 +8,27 @@ type SaveFailureReason =
   | 'unauthorized'
   | 'invalid_store'
   | 'invalid_source'
-  | 'missing_upc'
+  | 'missing_identifier'
   | 'missing_item_name'
   | 'duplicate_upc'
+  | 'duplicate_plu'
+  | 'duplicate_product_code'
   | 'insert_failed';
+
+type IdentifierKind = 'upc' | 'plu' | 'product_code';
 
 type ExistingProductSummary = {
   id: string;
-  upc: string;
+  upc: string | null;
+  plu: string | null;
+  product_code: string | null;
   item_name: string | null;
 };
 
 type ProductInsert = {
   store_id: string;
   batch_id: null;
-  upc: string;
+  upc: string | null;
   item_name: string;
   category: string;
   brand: string;
@@ -147,9 +153,26 @@ function postgresCode(error: unknown) {
   return null;
 }
 
-function isDuplicateUpcError(error: unknown) {
-  if (postgresCode(error) === '23505') return true;
-  return formatError(error).toLowerCase().includes('products_store_id_upc_unique');
+function duplicateReasonForIdentifier(identifier: IdentifierKind): SaveFailureReason {
+  if (identifier === 'plu') return 'duplicate_plu';
+  if (identifier === 'product_code') return 'duplicate_product_code';
+  return 'duplicate_upc';
+}
+
+function duplicateMessageForIdentifier(identifier: IdentifierKind) {
+  if (identifier === 'plu') return 'A product with this PLU already exists for this store.';
+  if (identifier === 'product_code') return 'A product with this Product Code already exists for this store.';
+  return 'A product with this UPC already exists for this store.';
+}
+
+function duplicateIdentifierFromError(error: unknown): IdentifierKind | null {
+  if (postgresCode(error) !== '23505') return null;
+
+  const formatted = formatError(error).toLowerCase();
+  if (formatted.includes('products_store_plu_unique')) return 'plu';
+  if (formatted.includes('products_store_product_code_unique')) return 'product_code';
+  if (formatted.includes('products_store_id_upc_unique') || formatted.includes('products_store_upc_unique')) return 'upc';
+  return null;
 }
 
 async function requireOwnedStore(client: SupabaseRouteClient, storeId: string, userId: string) {
@@ -162,6 +185,24 @@ async function requireOwnedStore(client: SupabaseRouteClient, storeId: string, u
 
   if (error) throw error;
   return Boolean(data);
+}
+
+async function findExistingProductByIdentifier(
+  client: SupabaseRouteClient,
+  storeId: string,
+  identifier: IdentifierKind,
+  value: string
+) {
+  const { data, error } = await client
+    .from('products')
+    .select('id, upc, plu, product_code, item_name')
+    .eq('store_id', storeId)
+    .eq(identifier, value)
+    .limit(1)
+    .maybeSingle();
+
+  if (error) throw error;
+  return (data as ExistingProductSummary | null) ?? null;
 }
 
 function sourceIdsFrom(sourceRef: Record<string, unknown>) {
@@ -229,30 +270,34 @@ export async function POST(request: NextRequest) {
       return jsonFailure('invalid_source', 'Invalid POS source.');
     }
 
-    const upc = toTrimmedString(product.upc);
+    const upc = toNullableString(product.upc);
+    const plu = toNullableString(product.plu);
+    const productCode = toNullableString(product.product_code);
     const itemName = toTrimmedString(product.item_name);
 
-    if (!upc) {
-      return jsonFailure('missing_upc', 'UPC is required before saving this product.');
+    if (!upc && !plu && !productCode) {
+      return jsonFailure('missing_identifier', 'Enter a UPC, PLU, or Product Code.');
     }
 
     if (!itemName) {
       return jsonFailure('missing_item_name', 'Item name is required before saving this product.');
     }
 
-    const { data: existingProduct, error: duplicateError } = await client
-      .from('products')
-      .select('id, upc, item_name')
-      .eq('store_id', storeId)
-      .eq('upc', upc)
-      .limit(1)
-      .maybeSingle();
+    const duplicateChecks: Array<[IdentifierKind, string | null]> = [
+      ['upc', upc],
+      ['plu', plu],
+      ['product_code', productCode],
+    ];
 
-    if (duplicateError) throw duplicateError;
-    if (existingProduct) {
-      return jsonFailure('duplicate_upc', 'A product with this UPC already exists for this store.', 409, {
-        existingProduct: existingProduct as ExistingProductSummary,
-      });
+    for (const [identifier, value] of duplicateChecks) {
+      if (!value) continue;
+
+      const existingProduct = await findExistingProductByIdentifier(client, storeId, identifier, value);
+      if (existingProduct) {
+        return jsonFailure(duplicateReasonForIdentifier(identifier), duplicateMessageForIdentifier(identifier), 409, {
+          existingProduct,
+        });
+      }
     }
 
     const ageVerification = toBoolean(product.age_verification, false);
@@ -279,8 +324,8 @@ export async function POST(request: NextRequest) {
       units_per_case: toNumber(product.units_per_case, 1),
       cases_on_hand: toNumber(product.cases_on_hand, 0),
       loose_units: toNumber(product.loose_units, 0),
-      plu: toNullableString(product.plu),
-      product_code: toNullableString(product.product_code),
+      plu,
+      product_code: productCode,
       age_verification: ageVerification,
       minimum_age: ageVerification ? toNullableInteger(product.minimum_age) : null,
       age_restriction_type: ageVerification ? toNullableString(product.age_restriction_type) : null,
@@ -290,12 +335,17 @@ export async function POST(request: NextRequest) {
     const { data: insertedProduct, error: insertError } = await client
       .from('products')
       .insert(insertRow)
-      .select('id, upc, item_name')
+      .select('id, upc, plu, product_code, item_name')
       .single();
 
     if (insertError) {
-      if (isDuplicateUpcError(insertError)) {
-        return jsonFailure('duplicate_upc', 'A product with this UPC already exists for this store.', 409);
+      const duplicateIdentifier = duplicateIdentifierFromError(insertError);
+      if (duplicateIdentifier) {
+        return jsonFailure(
+          duplicateReasonForIdentifier(duplicateIdentifier),
+          duplicateMessageForIdentifier(duplicateIdentifier),
+          409
+        );
       }
 
       throw insertError;

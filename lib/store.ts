@@ -58,7 +58,7 @@ function mapDbProduct(row: ProductRow): Product {
 
   return {
     id: row.id,
-    upc: row.upc,
+    upc: row.upc ?? '',
     name: row.item_name ?? '',
     category,
     department: row.department ?? category,
@@ -228,10 +228,29 @@ function productIdentity(product: Product) {
   return product.id || product.upc || product.productCode || product.plu || '';
 }
 
+function hasProductIdentifier(product: Product) {
+  return Boolean(product.upc || product.plu || product.productCode);
+}
+
+function duplicateIdentifierMessage(kind: 'upc' | 'plu' | 'product_code') {
+  if (kind === 'plu') return 'A product with this PLU already exists for this store.';
+  if (kind === 'product_code') return 'A product with this Product Code already exists for this store.';
+  return 'A product with this UPC already exists for this store.';
+}
+
+function duplicateIdentifierFromError(message: string) {
+  const lower = message.toLowerCase();
+  if (lower.includes('products_store_plu_unique')) return 'plu';
+  if (lower.includes('products_store_product_code_unique')) return 'product_code';
+  if (lower.includes('products_store_id_upc_unique') || lower.includes('products_store_upc_unique')) return 'upc';
+  return null;
+}
+
 function productToDbFields(product: Product) {
   const normalized = normalizeProduct(product);
 
   return {
+    upc: normalized.upc || null,
     item_name: normalized.name,
     category: normalized.category,
     department: normalized.department ?? normalized.category,
@@ -266,7 +285,6 @@ function productToDbInsert(product: Product, storeId: string, batchId: string | 
   return {
     store_id: storeId,
     batch_id: batchId,
-    upc: normalized.upc,
     ...productToDbFields(normalized),
   };
 }
@@ -499,7 +517,9 @@ export function useStoreData(): StoreData & {
     async (product: Product): Promise<SaveResult> => {
       const nextProduct = normalizeProduct(product);
 
-      if (!nextProduct.upc) return { mode: data.dataMode, error: 'UPC is required.' };
+      if (!hasProductIdentifier(nextProduct)) {
+        return { mode: data.dataMode, error: 'Enter a UPC, PLU, or Product Code.' };
+      }
       if (!nextProduct.name) return { mode: data.dataMode, error: 'Product name is required.' };
 
       const previousProducts = data.products;
@@ -540,9 +560,15 @@ export function useStoreData(): StoreData & {
           .update(productToDbFields(nextProduct))
           .eq('store_id', authStore.id);
 
-        updateQuery = nextProduct.id
-          ? updateQuery.eq('id', nextProduct.id)
-          : updateQuery.eq('upc', nextProduct.upc);
+        if (nextProduct.id) {
+          updateQuery = updateQuery.eq('id', nextProduct.id);
+        } else if (nextProduct.upc) {
+          updateQuery = updateQuery.eq('upc', nextProduct.upc);
+        } else if (nextProduct.plu) {
+          updateQuery = updateQuery.eq('plu', nextProduct.plu);
+        } else if (nextProduct.productCode) {
+          updateQuery = updateQuery.eq('product_code', nextProduct.productCode);
+        }
 
         const { error } = await updateQuery;
 
@@ -571,7 +597,9 @@ export function useStoreData(): StoreData & {
     async (product: Product): Promise<SaveResult> => {
       const nextProduct = normalizeProduct(product);
 
-      if (!nextProduct.upc) return { mode: data.dataMode, error: 'UPC is required.' };
+      if (!hasProductIdentifier(nextProduct)) {
+        return { mode: data.dataMode, error: 'Enter a UPC, PLU, or Product Code.' };
+      }
       if (!nextProduct.name) return { mode: data.dataMode, error: 'Product name is required.' };
 
       const previousProducts = data.products;
@@ -607,19 +635,70 @@ export function useStoreData(): StoreData & {
       });
 
       if (user && authStore && data.dataMode === 'cloud') {
-        const { error } = await supabase
-          .from('products')
-          .upsert(productToDbInsert(nextProduct, authStore.id), { onConflict: 'store_id,upc' });
+        if (!nextProduct.upc) {
+          const duplicateChecks: Array<['plu' | 'product_code', string | undefined]> = [
+            ['plu', nextProduct.plu],
+            ['product_code', nextProduct.productCode],
+          ];
+
+          for (const [column, value] of duplicateChecks) {
+            if (!value) continue;
+
+            const { data: existingProduct, error: duplicateError } = await supabase
+              .from('products')
+              .select('id')
+              .eq('store_id', authStore.id)
+              .eq(column, value)
+              .limit(1)
+              .maybeSingle();
+
+            if (duplicateError) {
+              setData((previous) => ({
+                ...previous,
+                products: previousProducts,
+                lowStockProducts: computeLowStock(previousProducts),
+                cloudError: `Product create failed: ${duplicateError.message}`,
+              }));
+
+              return { mode: 'cloud', error: duplicateError.message };
+            }
+
+            if (existingProduct) {
+              const message = duplicateIdentifierMessage(column);
+              setData((previous) => ({
+                ...previous,
+                products: previousProducts,
+                lowStockProducts: computeLowStock(previousProducts),
+                cloudError: `Product create failed: ${message}`,
+              }));
+
+              return { mode: 'cloud', error: message };
+            }
+          }
+        }
+
+        const writeQuery = nextProduct.upc
+          ? supabase
+              .from('products')
+              .upsert(productToDbInsert(nextProduct, authStore.id), { onConflict: 'store_id,upc' })
+          : supabase
+              .from('products')
+              .insert(productToDbInsert(nextProduct, authStore.id));
+
+        const { error } = await writeQuery;
 
         if (error) {
+          const duplicateKind = duplicateIdentifierFromError(error.message);
+          const errorMessage = duplicateKind ? duplicateIdentifierMessage(duplicateKind) : error.message;
+
           setData((previous) => ({
             ...previous,
             products: previousProducts,
             lowStockProducts: computeLowStock(previousProducts),
-            cloudError: `Product create failed: ${error.message}`,
+            cloudError: `Product create failed: ${errorMessage}`,
           }));
 
-          return { mode: 'cloud', error: error.message };
+          return { mode: 'cloud', error: errorMessage };
         }
 
         window.dispatchEvent(new Event('storepulse:data-updated'));

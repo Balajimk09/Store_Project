@@ -42,6 +42,7 @@ type ImportSummary = {
   failedFiles: number;
   ignoredUnsupportedFiles: number;
   rowsInsertedByReportType: Record<string, number>;
+  zeroRowReports: Array<{ fileName: string; reportType: PosReportType }>;
   skipped: Array<{ fileName: string; message: string }>;
   errors: ImportSummaryError[];
 };
@@ -618,6 +619,11 @@ function addSkipped(summary: ImportSummary, fileName: string, message: string) {
   summary.skipped.push({ fileName, message });
 }
 
+function addZeroRowReport(summary: ImportSummary, fileName: string, reportType: PosReportType, rowsInserted: number) {
+  if (rowsInserted !== 0 || reportType === 'unknown') return;
+  summary.zeroRowReports.push({ fileName, reportType });
+}
+
 function isNetworkJournalReport(fileName: string, html: string) {
   const text = `${fileName} ${html.slice(0, 4000)}`
     .replace(/<[^>]+>/g, ' ')
@@ -706,6 +712,7 @@ export async function POST(request: NextRequest) {
     failedFiles: 0,
     ignoredUnsupportedFiles: extracted.ignoredUnsupportedFiles,
     rowsInsertedByReportType: {},
+    zeroRowReports: [],
     skipped: [],
     errors: [],
   };
@@ -846,6 +853,7 @@ export async function POST(request: NextRequest) {
 
         summary.parsedFiles += 1;
         summary.rowsInsertedByReportType[parsed.reportType] = (summary.rowsInsertedByReportType[parsed.reportType] || 0) + inserted;
+        addZeroRowReport(summary, uploadItem.fileName, parsed.reportType, inserted);
         continue;
       }
 
@@ -922,6 +930,7 @@ export async function POST(request: NextRequest) {
 
       summary.parsedFiles += 1;
       summary.rowsInsertedByReportType[manualParsed.template.reportType] = (summary.rowsInsertedByReportType[manualParsed.template.reportType] || 0) + inserted;
+      addZeroRowReport(summary, uploadItem.fileName, manualParsed.template.reportType, inserted);
     } catch (error) {
       console.error('[POS Import File Error]', uploadItem.fileName, error);
 

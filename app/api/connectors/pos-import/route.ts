@@ -809,7 +809,7 @@ async function processUploadItem(client: ConnectorSupabaseClient, input: {
         reportType: parsed.reportType,
         status: 'success',
         rowsInserted,
-        message: null,
+        message: rowsInserted === 0 ? '0 rows found in recognized report.' : null,
       };
     }
 
@@ -894,7 +894,7 @@ async function processUploadItem(client: ConnectorSupabaseClient, input: {
       reportType: manualParsed.template.reportType,
       status: 'success',
       rowsInserted,
-      message: null,
+      message: rowsInserted === 0 ? '0 rows found in recognized report.' : null,
     };
   } catch (error) {
     console.error('[Connector POS Import File Error]', item.fileName, error);

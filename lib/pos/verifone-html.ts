@@ -94,7 +94,7 @@ export function detectReportType(title: string, html = ''): PosReportType {
   const text = `${title} ${stripTags(html).slice(0, 800)}`.toLowerCase();
   if (text.includes('plu report all cashiers')) return 'plu_sales';
   if (text.includes('department report all cashiers') || text.includes('department report by cashier')) return 'department_sales';
-  if (text.includes('category report by cashier')) return 'category_sales';
+  if (text.includes('category report by cashier') || text.includes('category report all cashiers')) return 'category_sales';
   if (text.includes('tax report by register')) return 'tax_summary';
   if (text.includes('deal report')) return 'deal_sales';
   if (text.includes('network report by register') || text.includes('mobile payment report')) return 'payment_summary';

@@ -17,6 +17,7 @@ type ImportSummary = {
   failedFiles: number;
   ignoredUnsupportedFiles?: number;
   rowsInsertedByReportType: Record<string, number>;
+  zeroRowReports?: Array<{ fileName: string; reportType: string }>;
   skipped?: Array<{ fileName: string; message: string }>;
   errors: Array<{ fileName: string; message: string }>;
 };
@@ -583,10 +584,23 @@ export default function PosImportPage() {
                 ) : Object.entries(summary.rowsInsertedByReportType).map(([type, count]) => (
                   <div key={type} className="rounded-lg border border-border px-3 py-2 text-sm">
                     <span className="font-medium">{type}</span>: {count}
+                    {count === 0 ? <span className="ml-2 text-xs text-muted-foreground">0 rows found</span> : null}
                   </div>
                 ))}
               </div>
             </div>
+            {summary.zeroRowReports && summary.zeroRowReports.length > 0 ? (
+              <div className="mt-5 rounded-xl border border-border bg-secondary/30 p-4">
+                <h3 className="text-sm font-semibold text-foreground">Recognized reports with 0 rows found</h3>
+                <ul className="mt-2 space-y-1 text-sm text-muted-foreground">
+                  {summary.zeroRowReports.map((item) => (
+                    <li key={`${item.fileName}-${item.reportType}`}>
+                      {item.fileName}: {item.reportType}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
             {summary.skipped && summary.skipped.length > 0 ? (
               <div className="mt-5 rounded-xl border border-amber-200 bg-amber-50 p-4">
                 <h3 className="text-sm font-semibold text-amber-900">Accepted but skipped</h3>

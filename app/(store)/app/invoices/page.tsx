@@ -21,6 +21,7 @@ import { DashboardShell, PageHeader, PageLoading } from '@/components/layout/sid
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
+import { ProductForm, type ProductFormState } from '@/components/products/ProductForm';
 import { useAuth } from '@/lib/auth';
 import { formatCurrency } from '@/lib/format';
 import {
@@ -30,6 +31,7 @@ import {
   type ReceivingLine,
   type ReceivingLineStatus,
 } from '@/lib/invoices';
+import type { Product } from '@/lib/mock-data';
 import { useStoreData } from '@/lib/store';
 import { cn } from '@/lib/utils';
 
@@ -51,7 +53,47 @@ type ExtractInvoiceResponse = {
   lines?: ExtractedInvoiceLine[];
 };
 
+type InvoicePreviewLine = ReceivingLine & {
+  receivedCases: number;
+  looseUnits: number;
+  unitsPerCase: number;
+  caseCost: number;
+  totalUnits: number;
+  matchedProductId?: string;
+};
+
 const SELECT_STORE_MESSAGE = 'Select a specific store to upload and review invoices.';
+
+const EMPTY_PRODUCT_FORM: ProductFormState = {
+  upc: '',
+  plu: '',
+  productCode: '',
+  sku: '',
+  name: '',
+  department: '',
+  customDepartment: '',
+  category: '',
+  brand: '',
+  vendor: '',
+  customVendor: '',
+  costPrice: '0.00',
+  sellPrice: '0.00',
+  stock: '0',
+  reorderLevel: '10',
+  unitsPerCase: '1',
+  casesOnHand: '0',
+  looseUnits: '0',
+  taxCategory: 'standard',
+  taxRate: '0',
+  taxable: true,
+  ebtEligible: false,
+  ageVerification: false,
+  minimumAge: '',
+  ageRestrictionType: '',
+  customAgeRestrictionType: '',
+  isActive: true,
+  notes: '',
+};
 
 const invoiceTabs: Array<{
   id: InvoiceTab;
@@ -110,17 +152,127 @@ function getStatus(upc: string, name: string, products: ReturnType<typeof useSto
   return matched ? 'Matched' : upc || name ? 'New Product' : 'Needs Review';
 }
 
+function getUnitsPerCase(product: Product | undefined) {
+  return Math.max(1, safeNumber(product?.unitsPerCase, 1));
+}
+
+function calculateLineTotals(line: Pick<InvoicePreviewLine, 'receivedCases' | 'looseUnits' | 'unitsPerCase' | 'unitCost'>) {
+  const receivedCases = Math.max(0, safeNumber(line.receivedCases));
+  const looseUnits = Math.max(0, safeNumber(line.looseUnits));
+  const unitsPerCase = Math.max(1, safeNumber(line.unitsPerCase, 1));
+  const unitCost = Math.max(0, safeNumber(line.unitCost));
+  const totalUnits = receivedCases * unitsPerCase + looseUnits;
+
+  return {
+    receivedCases,
+    looseUnits,
+    unitsPerCase,
+    unitCost,
+    caseCost: unitCost * unitsPerCase,
+    totalUnits,
+    totalCost: totalUnits * unitCost,
+  };
+}
+
+function productToForm(product: Product): ProductFormState {
+  const unitsPerCase = getUnitsPerCase(product);
+  const casesOnHand =
+    product.casesOnHand !== undefined
+      ? safeNumber(product.casesOnHand)
+      : Math.floor(safeNumber(product.stock) / unitsPerCase);
+  const looseUnits =
+    product.looseUnits !== undefined
+      ? safeNumber(product.looseUnits)
+      : safeNumber(product.stock) % unitsPerCase;
+
+  return {
+    ...EMPTY_PRODUCT_FORM,
+    upc: product.upc || '',
+    plu: product.plu || '',
+    productCode: product.productCode || '',
+    sku: product.sku || '',
+    name: product.name || '',
+    department: product.department || product.category || '',
+    category: product.category || product.department || '',
+    brand: product.brand || '',
+    vendor: product.vendor || '',
+    costPrice: safeNumber(product.costPrice).toFixed(2),
+    sellPrice: safeNumber(product.sellPrice).toFixed(2),
+    stock: String(safeNumber(product.stock)),
+    reorderLevel: String(safeNumber(product.reorderLevel, 10)),
+    unitsPerCase: String(unitsPerCase),
+    casesOnHand: String(casesOnHand),
+    looseUnits: String(looseUnits),
+    taxCategory: product.taxCategory || ((product.taxable ?? true) ? 'standard' : 'non-taxable'),
+    taxRate: String(product.taxRate ?? 0),
+    taxable: product.taxable ?? true,
+    ebtEligible: product.ebtEligible ?? false,
+    ageVerification: product.ageVerification ?? false,
+    minimumAge: product.minimumAge ? String(product.minimumAge) : '',
+    ageRestrictionType: product.ageRestrictionType || '',
+    isActive: product.isActive ?? true,
+    notes: product.notes || '',
+  };
+}
+
+function formToProduct(form: ProductFormState, original: Product): Product {
+  const department =
+    form.department === '__other__'
+      ? form.customDepartment.trim() || 'General Merchandise'
+      : form.department.trim() || 'General Merchandise';
+  const category = form.category.trim() || department;
+  const unitsPerCase = Math.max(1, safeNumber(form.unitsPerCase, 1));
+  const casesOnHand = Math.max(0, safeNumber(form.casesOnHand));
+  const looseUnits = Math.max(0, safeNumber(form.looseUnits));
+
+  return {
+    ...original,
+    upc: form.upc.trim(),
+    plu: form.plu.trim() || undefined,
+    productCode: form.productCode.trim() || undefined,
+    sku: form.sku.trim() || undefined,
+    name: form.name.trim(),
+    department,
+    category,
+    brand: form.brand.trim() || 'Unknown',
+    vendor:
+      form.vendor === '__other__'
+        ? form.customVendor.trim() || undefined
+        : form.vendor.trim() || undefined,
+    costPrice: safeNumber(form.costPrice),
+    sellPrice: safeNumber(form.sellPrice),
+    stock: casesOnHand * unitsPerCase + looseUnits,
+    reorderLevel: safeNumber(form.reorderLevel, 10),
+    unitsPerCase,
+    casesOnHand,
+    looseUnits,
+    taxCategory: form.taxable ? form.taxCategory.trim() || 'standard' : 'non-taxable',
+    taxRate: form.taxable ? safeNumber(form.taxRate) : 0,
+    taxable: form.taxable,
+    ebtEligible: form.ebtEligible,
+    ageVerification: form.ageVerification,
+    minimumAge: form.ageVerification ? safeNumber(form.minimumAge) || 21 : undefined,
+    ageRestrictionType: form.ageVerification ? form.ageRestrictionType || undefined : undefined,
+    isActive: form.isActive,
+    notes: form.notes.trim() || undefined,
+  };
+}
+
 export default function InvoicesPage() {
   const { activeStore, activeStoreId, storeScope, user } = useAuth();
-  const { products, loaded } = useStoreData();
+  const { products, loaded, updateProduct, refresh } = useStoreData();
   const [activeTab, setActiveTab] = useState<InvoiceTab>('upload');
   const [invoiceFile, setInvoiceFile] = useState<File | null>(null);
   const [invoiceFileName, setInvoiceFileName] = useState('');
   const [invoiceSourceKind, setInvoiceSourceKind] = useState<InvoiceSourceKind>('unknown');
-  const [receivingLines, setReceivingLines] = useState<ReceivingLine[]>([]);
+  const [receivingLines, setReceivingLines] = useState<InvoicePreviewLine[]>([]);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [extractingInvoice, setExtractingInvoice] = useState(false);
+  const [editingProductDefaults, setEditingProductDefaults] = useState<Product | null>(null);
+  const [productDefaultsForm, setProductDefaultsForm] = useState<ProductFormState>(EMPTY_PRODUCT_FORM);
+  const [savingProductDefaults, setSavingProductDefaults] = useState(false);
+  const [productDefaultsError, setProductDefaultsError] = useState<string | null>(null);
 
   const uploadBlocked = Boolean(user && (storeScope === 'all' || !activeStoreId));
   const selectedStoreName = activeStore?.store_name || 'Selected store';
@@ -168,6 +320,43 @@ export default function InvoicesPage() {
     return Array.from(values).sort((a, b) => a.localeCompare(b));
   }, [products, receivingLines]);
 
+  const buildPreviewLine = (line: ReceivingLine, index: number): InvoicePreviewLine => {
+    const matched = findProductMatch(products, line.upc, line.name);
+    const unitsPerCase = getUnitsPerCase(matched);
+    const importedUnits = Math.max(0, safeNumber(line.quantity));
+    const importedUnitCost =
+      safeNumber(line.unitCost) ||
+      (importedUnits > 0 ? safeNumber(line.totalCost) / importedUnits : 0) ||
+      safeNumber(matched?.costPrice);
+    const totals = calculateLineTotals({
+      receivedCases: 0,
+      looseUnits: importedUnits,
+      unitsPerCase,
+      unitCost: importedUnitCost,
+    });
+
+    return {
+      ...line,
+      id: line.id || `INVOICE-${Date.now()}-${index}`,
+      name: line.name || matched?.name || '',
+      department: line.department || matched?.department || matched?.category || 'General Merchandise',
+      vendor: line.vendor || matched?.vendor || '',
+      ...totals,
+      quantity: totals.totalUnits,
+      status: matched ? 'Matched' : line.name || line.upc ? 'New Product' : 'Needs Review',
+      matchedProductId: matched?.id,
+    };
+  };
+
+  const findMatchedProductForLine = (line: InvoicePreviewLine) => {
+    if (line.matchedProductId) {
+      const byId = products.find((product) => product.id === line.matchedProductId);
+      if (byId) return byId;
+    }
+
+    return findProductMatch(products, line.upc, line.name);
+  };
+
   useEffect(() => {
     setInvoiceFile(null);
     setInvoiceFileName('');
@@ -213,7 +402,7 @@ export default function InvoicesPage() {
     try {
       if (invoiceSourceKind === 'csv') {
         const text = await invoiceFile.text();
-        const rows = parseReceivingCsv(text, products);
+        const rows = parseReceivingCsv(text, products).map(buildPreviewLine);
 
         setReceivingLines(rows);
         setMessage(rows.length ? `${rows.length} invoice lines extracted for review.` : 'No invoice lines found in this CSV.');
@@ -234,7 +423,7 @@ export default function InvoicesPage() {
         throw new Error(payload?.error || 'Invoice extraction failed.');
       }
 
-      const rows: ReceivingLine[] = (payload?.lines || []).map((line, index) => {
+      const rows: InvoicePreviewLine[] = (payload?.lines || []).map((line, index) => {
         const upc = line.upc || '';
         const name = line.name || '';
         const quantity = safeNumber(line.quantity);
@@ -243,7 +432,7 @@ export default function InvoicesPage() {
         const matched = findProductMatch(products, upc, name);
         const status: ReceivingLineStatus = matched ? 'Matched' : name || upc ? 'New Product' : 'Needs Review';
 
-        return {
+        return buildPreviewLine({
           id: `INVOICE-${Date.now()}-${index}`,
           upc,
           name: name || matched?.name || '',
@@ -253,7 +442,7 @@ export default function InvoicesPage() {
           unitCost: unitCost || matched?.costPrice || 0,
           totalCost,
           status,
-        };
+        }, index);
       });
 
       setReceivingLines(rows);
@@ -269,23 +458,36 @@ export default function InvoicesPage() {
     }
   };
 
-  const updateReceivingLine = (id: string, changes: Partial<ReceivingLine>) => {
+  const updateReceivingLine = (id: string, changes: Partial<InvoicePreviewLine>) => {
     setReceivingLines((previous) =>
       previous.map((line) => {
         if (line.id !== id) return line;
 
         const next = { ...line, ...changes };
-        const recalculated =
-          'quantity' in changes || 'unitCost' in changes
-            ? {
-                ...next,
-                totalCost: safeNumber(next.quantity) * safeNumber(next.unitCost),
-              }
-            : next;
+        const matched = findProductMatch(products, next.upc, next.name);
+        const unitsPerCase = Math.max(1, safeNumber(next.unitsPerCase, getUnitsPerCase(matched)));
+        const receivedCases = Math.max(0, safeNumber(next.receivedCases));
+        const looseUnits = Math.max(0, safeNumber(next.looseUnits));
+        let unitCost = Math.max(0, safeNumber(next.unitCost));
+
+        if ('caseCost' in changes) {
+          unitCost = unitsPerCase > 0 ? Math.max(0, safeNumber(next.caseCost)) / unitsPerCase : 0;
+        }
+
+        const totals = calculateLineTotals({
+          receivedCases,
+          looseUnits,
+          unitsPerCase,
+          unitCost,
+        });
 
         return {
-          ...recalculated,
-          status: getStatus(recalculated.upc, recalculated.name, products),
+          ...next,
+          ...totals,
+          quantity: totals.totalUnits,
+          totalCost: totals.totalCost,
+          matchedProductId: matched?.id,
+          status: getStatus(next.upc, next.name, products),
         };
       })
     );
@@ -305,8 +507,13 @@ export default function InvoicesPage() {
         name: '',
         department: 'General Merchandise',
         vendor: '',
+        receivedCases: 0,
+        looseUnits: 1,
+        unitsPerCase: 1,
         quantity: 1,
+        caseCost: 0,
         unitCost: 0,
+        totalUnits: 1,
         totalCost: 0,
         status: 'Needs Review',
       },
@@ -317,6 +524,83 @@ export default function InvoicesPage() {
 
   const removeReceivingLine = (id: string) => {
     setReceivingLines((previous) => previous.filter((line) => line.id !== id));
+  };
+
+  const openProductDefaults = (product: Product) => {
+    setEditingProductDefaults(product);
+    setProductDefaultsForm(productToForm(product));
+    setProductDefaultsError(null);
+  };
+
+  const closeProductDefaults = () => {
+    if (savingProductDefaults) return;
+    setEditingProductDefaults(null);
+    setProductDefaultsForm(EMPTY_PRODUCT_FORM);
+    setProductDefaultsError(null);
+  };
+
+  const saveProductDefaults = async () => {
+    if (!editingProductDefaults) return;
+
+    if (!productDefaultsForm.name.trim()) {
+      setProductDefaultsError('Product name is required.');
+      return;
+    }
+
+    if (safeNumber(productDefaultsForm.unitsPerCase, 1) <= 0) {
+      setProductDefaultsError('Units per case must be at least 1.');
+      return;
+    }
+
+    setSavingProductDefaults(true);
+    setProductDefaultsError(null);
+
+    const nextProduct = formToProduct(productDefaultsForm, editingProductDefaults);
+    const result = await updateProduct(nextProduct);
+
+    setSavingProductDefaults(false);
+
+    if (result.error) {
+      setProductDefaultsError(result.error);
+      return;
+    }
+
+    const unitsPerCase = getUnitsPerCase(nextProduct);
+
+    setReceivingLines((previous) =>
+      previous.map((line) => {
+        const sameProduct =
+          (nextProduct.id && line.matchedProductId === nextProduct.id) ||
+          (nextProduct.upc && line.upc === nextProduct.upc) ||
+          (nextProduct.name && line.name.toLowerCase() === nextProduct.name.toLowerCase());
+
+        if (!sameProduct) return line;
+
+        const unitCost = line.caseCost > 0 ? line.caseCost / unitsPerCase : line.unitCost;
+        const totals = calculateLineTotals({
+          receivedCases: line.receivedCases,
+          looseUnits: line.looseUnits,
+          unitsPerCase,
+          unitCost,
+        });
+
+        return {
+          ...line,
+          name: line.name || nextProduct.name,
+          department: line.department || nextProduct.department || nextProduct.category || 'General Merchandise',
+          vendor: line.vendor || nextProduct.vendor || '',
+          matchedProductId: nextProduct.id,
+          ...totals,
+          quantity: totals.totalUnits,
+          totalCost: totals.totalCost,
+          status: 'Matched',
+        };
+      })
+    );
+
+    refresh();
+    setMessage('Product defaults updated. Invoice preview math now uses the latest units per case.');
+    closeProductDefaults();
   };
 
   if (!loaded && !uploadBlocked) {
@@ -571,6 +855,20 @@ export default function InvoicesPage() {
                           {line.status}
                         </span>
 
+                        {findMatchedProductForLine(line) && (
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() => {
+                              const product = findMatchedProductForLine(line);
+                              if (product) openProductDefaults(product);
+                            }}
+                            disabled={uploadBlocked}
+                          >
+                            Edit Product Defaults
+                          </Button>
+                        )}
+
                         <Button variant="outline" size="sm" onClick={() => removeReceivingLine(line.id)} disabled={uploadBlocked}>
                           <X className="mr-2 h-4 w-4" />
                           Remove
@@ -634,13 +932,51 @@ export default function InvoicesPage() {
                       </label>
 
                       <label className="space-y-1.5">
-                        <span className="text-xs font-medium text-muted-foreground">Quantity</span>
+                        <span className="text-xs font-medium text-muted-foreground">Received Cases</span>
                         <Input
                           type="number"
                           min="0"
                           step="1"
-                          value={line.quantity}
-                          onChange={(event) => updateReceivingLine(line.id, { quantity: safeNumber(event.target.value) })}
+                          value={line.receivedCases}
+                          onChange={(event) => updateReceivingLine(line.id, { receivedCases: safeNumber(event.target.value) })}
+                          disabled={uploadBlocked}
+                        />
+                      </label>
+
+                      <label className="space-y-1.5">
+                        <span className="text-xs font-medium text-muted-foreground">Loose Units</span>
+                        <Input
+                          type="number"
+                          min="0"
+                          step="1"
+                          value={line.looseUnits}
+                          onChange={(event) => updateReceivingLine(line.id, { looseUnits: safeNumber(event.target.value) })}
+                          disabled={uploadBlocked}
+                        />
+                      </label>
+
+                      <label className="space-y-1.5">
+                        <span className="text-xs font-medium text-muted-foreground">Units Per Case</span>
+                        <Input
+                          type="number"
+                          min="1"
+                          value={line.unitsPerCase}
+                          readOnly
+                          disabled={uploadBlocked}
+                        />
+                        <span className="text-xs text-muted-foreground">
+                          Units Per Case comes from the product master. Edit the product once and future invoices will use the updated case pack.
+                        </span>
+                      </label>
+
+                      <label className="space-y-1.5">
+                        <span className="text-xs font-medium text-muted-foreground">Case Cost</span>
+                        <Input
+                          type="number"
+                          min="0"
+                          step="0.01"
+                          value={line.caseCost}
+                          onChange={(event) => updateReceivingLine(line.id, { caseCost: safeNumber(event.target.value) })}
                           disabled={uploadBlocked}
                         />
                       </label>
@@ -658,13 +994,24 @@ export default function InvoicesPage() {
                       </label>
 
                       <label className="space-y-1.5">
+                        <span className="text-xs font-medium text-muted-foreground">Total Units</span>
+                        <Input
+                          type="number"
+                          min="0"
+                          value={line.totalUnits}
+                          readOnly
+                          disabled={uploadBlocked}
+                        />
+                      </label>
+
+                      <label className="space-y-1.5">
                         <span className="text-xs font-medium text-muted-foreground">Total Cost</span>
                         <Input
                           type="number"
                           min="0"
                           step="0.01"
                           value={line.totalCost}
-                          onChange={(event) => updateReceivingLine(line.id, { totalCost: safeNumber(event.target.value) })}
+                          readOnly
                           className="font-semibold"
                           disabled={uploadBlocked}
                         />
@@ -695,6 +1042,48 @@ export default function InvoicesPage() {
               </Button>
             </div>
           </Card>
+        </div>
+      )}
+
+      {editingProductDefaults && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-background/80 p-4 backdrop-blur-sm">
+          <div className="flex max-h-[90vh] w-full max-w-2xl flex-col overflow-hidden rounded-lg border border-border bg-background shadow-xl">
+            <div className="flex items-start justify-between border-b border-border px-4 py-3">
+              <div>
+                <h2 className="text-lg font-semibold text-foreground">Edit Product Defaults</h2>
+                <p className="text-xs text-muted-foreground">
+                  Update the product master record. Invoice receiving remains preview-only.
+                </p>
+              </div>
+              <Button variant="ghost" size="icon" onClick={closeProductDefaults} disabled={savingProductDefaults}>
+                <X className="h-4 w-4" />
+              </Button>
+            </div>
+
+            <ProductForm
+              mode="edit"
+              form={productDefaultsForm}
+              setForm={setProductDefaultsForm}
+              onSubmit={() => void saveProductDefaults()}
+              onCancel={closeProductDefaults}
+              saving={savingProductDefaults}
+              error={productDefaultsError}
+              departmentOptions={departmentOptions}
+              vendorOptions={vendorOptions}
+              taxCategoryOptions={[]}
+              ageRestrictionOptions={[]}
+              upcDuplicate={null}
+              pluDuplicate={null}
+              productCodeDuplicate={null}
+              onUpcChange={() => undefined}
+              onNameChange={() => setProductDefaultsError(null)}
+              onUpcBlur={() => undefined}
+              onPluBlur={() => undefined}
+              onProductCodeBlur={() => undefined}
+              submitLabel={savingProductDefaults ? 'Saving...' : 'Save Product Defaults'}
+              writeBlocked={uploadBlocked}
+            />
+          </div>
         </div>
       )}
     </DashboardShell>

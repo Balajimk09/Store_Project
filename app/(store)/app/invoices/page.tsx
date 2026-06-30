@@ -504,6 +504,29 @@ export default function InvoicesPage() {
     }));
   };
 
+  const normalizeVendorOrderDraft = (
+    productKey: string,
+    field: 'orderedCases' | 'looseUnits' | 'expectedUnitCost'
+  ) => {
+    setVendorOrderDrafts((previous) => {
+      const current = previous[productKey];
+      const rawValue = current?.[field] ?? '';
+      const numericValue = Math.max(0, safeNumber(rawValue));
+      const normalizedValue =
+        field === 'expectedUnitCost'
+          ? numericValue.toFixed(2)
+          : String(Math.floor(numericValue));
+
+      return {
+        ...previous,
+        [productKey]: {
+          ...current,
+          [field]: normalizedValue,
+        },
+      };
+    });
+  };
+
   const handleInvoiceFile = (file: File | null) => {
     if (!file) return;
 
@@ -999,6 +1022,7 @@ export default function InvoicesPage() {
                                 onChange={(event) =>
                                   updateVendorOrderDraft(suggestion.productKey, 'orderedCases', event.target.value)
                                 }
+                                onBlur={() => normalizeVendorOrderDraft(suggestion.productKey, 'orderedCases')}
                               />
                             </label>
 
@@ -1012,6 +1036,7 @@ export default function InvoicesPage() {
                                 onChange={(event) =>
                                   updateVendorOrderDraft(suggestion.productKey, 'looseUnits', event.target.value)
                                 }
+                                onBlur={() => normalizeVendorOrderDraft(suggestion.productKey, 'looseUnits')}
                               />
                             </label>
 
@@ -1028,6 +1053,7 @@ export default function InvoicesPage() {
                                 onChange={(event) =>
                                   updateVendorOrderDraft(suggestion.productKey, 'expectedUnitCost', event.target.value)
                                 }
+                                onBlur={() => normalizeVendorOrderDraft(suggestion.productKey, 'expectedUnitCost')}
                               />
                             </label>
 

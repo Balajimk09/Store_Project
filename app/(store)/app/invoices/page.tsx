@@ -63,6 +63,7 @@ type InvoicePreviewLine = ReceivingLine & {
 };
 
 const SELECT_STORE_MESSAGE = 'Select a specific store to upload and review invoices.';
+const SELECT_VENDOR_STORE_MESSAGE = 'Select a specific store to build vendor orders.';
 
 const EMPTY_PRODUCT_FORM: ProductFormState = {
   upc: '',
@@ -136,6 +137,14 @@ const invoiceTabs: Array<{
 function safeNumber(value: string | number | undefined, fallback = 0) {
   const parsed = Number(String(value ?? '').replace(/[$,]/g, '').trim());
   return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function formatNumber(value: number) {
+  return new Intl.NumberFormat('en-US', { maximumFractionDigits: 2 }).format(value);
+}
+
+function getProductIdentity(product: Product) {
+  return product.id || product.upc || product.productCode || product.plu || product.sku || product.name;
 }
 
 function getInvoiceSourceKind(file: File): InvoiceSourceKind {
@@ -273,8 +282,13 @@ export default function InvoicesPage() {
   const [productDefaultsForm, setProductDefaultsForm] = useState<ProductFormState>(EMPTY_PRODUCT_FORM);
   const [savingProductDefaults, setSavingProductDefaults] = useState(false);
   const [productDefaultsError, setProductDefaultsError] = useState<string | null>(null);
+  const [vendorFilter, setVendorFilter] = useState('all');
+  const [vendorOrderDrafts, setVendorOrderDrafts] = useState<
+    Record<string, { orderedCases?: string; looseUnits?: string; expectedUnitCost?: string }>
+  >({});
 
   const uploadBlocked = Boolean(user && (storeScope === 'all' || !activeStoreId));
+  const storeBlockedMessage = activeTab === 'vendors' ? SELECT_VENDOR_STORE_MESSAGE : SELECT_STORE_MESSAGE;
   const selectedStoreName = activeStore?.store_name || 'Selected store';
 
   const invoiceTotal = useMemo(
@@ -289,6 +303,113 @@ export default function InvoicesPage() {
       review: receivingLines.filter((line) => line.status === 'Needs Review').length,
     }),
     [receivingLines]
+  );
+
+  const vendorOrderSuggestions = useMemo(() => {
+    return products
+      .filter((product) => {
+        const active = product.isActive ?? true;
+        const stock = safeNumber(product.stock);
+        const reorderLevel = safeNumber(product.reorderLevel, 10);
+        return active && stock <= reorderLevel;
+      })
+      .map((product) => {
+        const productKey = getProductIdentity(product);
+        const stock = Math.max(0, safeNumber(product.stock));
+        const reorderLevel = Math.max(0, safeNumber(product.reorderLevel, 10));
+        const unitsPerCase = Math.max(1, safeNumber(product.unitsPerCase, 1));
+        const costPrice = Math.max(0, safeNumber(product.costPrice));
+        const suggestedUnits = Math.max(reorderLevel * 2 - stock, reorderLevel);
+        const suggestedCases = Math.floor(suggestedUnits / unitsPerCase);
+        const suggestedLooseUnits = suggestedUnits % unitsPerCase;
+        const draft = vendorOrderDrafts[productKey] || {};
+        const orderedCases = Math.max(0, safeNumber(draft.orderedCases, suggestedCases));
+        const looseUnits = Math.max(0, safeNumber(draft.looseUnits, suggestedLooseUnits));
+        const expectedUnitCost = Math.max(0, safeNumber(draft.expectedUnitCost, costPrice));
+        const totalOrderedUnits = orderedCases * unitsPerCase + looseUnits;
+        const expectedCaseCost = expectedUnitCost * unitsPerCase;
+        const estimatedTotal = totalOrderedUnits * expectedUnitCost;
+
+        return {
+          product,
+          productKey,
+          vendor: product.vendor || 'No vendor',
+          stock,
+          reorderLevel,
+          unitsPerCase,
+          suggestedUnits,
+          suggestedCases,
+          suggestedLooseUnits,
+          orderedCases,
+          looseUnits,
+          expectedUnitCost,
+          totalOrderedUnits,
+          expectedCaseCost,
+          estimatedTotal,
+        };
+      })
+      .sort((a, b) => {
+        const vendorSort = a.vendor.localeCompare(b.vendor);
+        if (vendorSort !== 0) return vendorSort;
+        return a.product.name.localeCompare(b.product.name);
+      });
+  }, [products, vendorOrderDrafts]);
+
+  const vendorOrderVendorOptions = useMemo(() => {
+    return Array.from(new Set(vendorOrderSuggestions.map((suggestion) => suggestion.vendor))).sort((a, b) =>
+      a.localeCompare(b)
+    );
+  }, [vendorOrderSuggestions]);
+
+  const filteredVendorOrderSuggestions = useMemo(() => {
+    if (vendorFilter === 'all') return vendorOrderSuggestions;
+    return vendorOrderSuggestions.filter((suggestion) => suggestion.vendor === vendorFilter);
+  }, [vendorFilter, vendorOrderSuggestions]);
+
+  const vendorOrderGroups = useMemo(() => {
+    const map = new Map<
+      string,
+      {
+        vendor: string;
+        products: typeof vendorOrderSuggestions;
+        productCount: number;
+        totalSuggestedUnits: number;
+        totalOrderedUnits: number;
+        estimatedTotal: number;
+      }
+    >();
+
+    filteredVendorOrderSuggestions.forEach((suggestion) => {
+      const current = map.get(suggestion.vendor) || {
+        vendor: suggestion.vendor,
+        products: [],
+        productCount: 0,
+        totalSuggestedUnits: 0,
+        totalOrderedUnits: 0,
+        estimatedTotal: 0,
+      };
+
+      current.products.push(suggestion);
+      current.productCount += 1;
+      current.totalSuggestedUnits += suggestion.suggestedUnits;
+      current.totalOrderedUnits += suggestion.totalOrderedUnits;
+      current.estimatedTotal += suggestion.estimatedTotal;
+
+      map.set(suggestion.vendor, current);
+    });
+
+    return Array.from(map.values()).sort((a, b) => b.estimatedTotal - a.estimatedTotal);
+  }, [filteredVendorOrderSuggestions, vendorOrderSuggestions]);
+
+  const vendorOrderSummary = useMemo(
+    () => ({
+      vendors: vendorOrderGroups.length,
+      products: filteredVendorOrderSuggestions.length,
+      suggestedUnits: filteredVendorOrderSuggestions.reduce((sum, suggestion) => sum + suggestion.suggestedUnits, 0),
+      orderedUnits: filteredVendorOrderSuggestions.reduce((sum, suggestion) => sum + suggestion.totalOrderedUnits, 0),
+      estimatedTotal: filteredVendorOrderSuggestions.reduce((sum, suggestion) => sum + suggestion.estimatedTotal, 0),
+    }),
+    [filteredVendorOrderSuggestions, vendorOrderGroups.length]
   );
 
   const departmentOptions = useMemo(() => {
@@ -362,10 +483,26 @@ export default function InvoicesPage() {
     setInvoiceFileName('');
     setInvoiceSourceKind('unknown');
     setReceivingLines([]);
+    setVendorFilter('all');
+    setVendorOrderDrafts({});
     setMessage(null);
     setError(null);
     setExtractingInvoice(false);
   }, [activeStoreId]);
+
+  const updateVendorOrderDraft = (
+    productKey: string,
+    field: 'orderedCases' | 'looseUnits' | 'expectedUnitCost',
+    value: string
+  ) => {
+    setVendorOrderDrafts((previous) => ({
+      ...previous,
+      [productKey]: {
+        ...previous[productKey],
+        [field]: value,
+      },
+    }));
+  };
 
   const handleInvoiceFile = (file: File | null) => {
     if (!file) return;
@@ -631,7 +768,7 @@ export default function InvoicesPage() {
             <AlertCircle className="mt-0.5 h-5 w-5 shrink-0 text-amber-700" />
             <div>
               <h2 className="font-semibold">Select a store</h2>
-              <p className="mt-1 text-sm text-amber-900">{SELECT_STORE_MESSAGE}</p>
+              <p className="mt-1 text-sm text-amber-900">{storeBlockedMessage}</p>
             </div>
           </div>
         </Card>
@@ -673,10 +810,10 @@ export default function InvoicesPage() {
         })}
       </div>
 
-      {activeTab !== 'upload' && (
+      {activeTab !== 'upload' && activeTab !== 'vendors' && (
         <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
           {invoiceTabs
-            .filter((section) => section.id !== 'upload')
+            .filter((section) => section.id !== 'upload' && section.id !== 'vendors')
             .map((section) => {
               const Icon = section.icon;
 
@@ -693,6 +830,236 @@ export default function InvoicesPage() {
                 </Card>
               );
             })}
+        </div>
+      )}
+
+      {activeTab === 'vendors' && (
+        <div className="space-y-5">
+          <Card className="p-5">
+            <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+              <div>
+                <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">{selectedStoreName}</p>
+                <h2 className="mt-1 text-lg font-semibold text-foreground">Vendor Order Suggestions</h2>
+                <p className="mt-1 text-sm text-muted-foreground">
+                  Build vendor orders from low-stock products before matching invoices. This is a preview only and does
+                  not save purchase orders yet.
+                </p>
+              </div>
+
+              {!uploadBlocked && (
+                <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+                  <select
+                    value={vendorFilter}
+                    onChange={(event) => setVendorFilter(event.target.value)}
+                    className="h-10 rounded-md border border-input bg-background px-3 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+                    disabled={vendorOrderVendorOptions.length === 0}
+                  >
+                    <option value="all">All vendors</option>
+                    {vendorOrderVendorOptions.map((vendor) => (
+                      <option key={vendor} value={vendor}>
+                        {vendor}
+                      </option>
+                    ))}
+                  </select>
+
+                  <Button disabled>
+                    <Truck className="mr-2 h-4 w-4" />
+                    Create Draft Order coming next
+                  </Button>
+                </div>
+              )}
+            </div>
+
+            {!uploadBlocked && (
+              <div className="mt-5 grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
+                <div className="rounded-lg bg-secondary/40 p-3">
+                  <p className="text-xs text-muted-foreground">Vendors</p>
+                  <p className="mt-1 text-2xl font-bold text-foreground">{formatNumber(vendorOrderSummary.vendors)}</p>
+                </div>
+
+                <div className="rounded-lg bg-secondary/40 p-3">
+                  <p className="text-xs text-muted-foreground">Products</p>
+                  <p className="mt-1 text-2xl font-bold text-foreground">{formatNumber(vendorOrderSummary.products)}</p>
+                </div>
+
+                <div className="rounded-lg bg-secondary/40 p-3">
+                  <p className="text-xs text-muted-foreground">Suggested Units</p>
+                  <p className="mt-1 text-2xl font-bold text-foreground">
+                    {formatNumber(vendorOrderSummary.suggestedUnits)}
+                  </p>
+                </div>
+
+                <div className="rounded-lg bg-secondary/40 p-3">
+                  <p className="text-xs text-muted-foreground">Draft Units</p>
+                  <p className="mt-1 text-2xl font-bold text-foreground">{formatNumber(vendorOrderSummary.orderedUnits)}</p>
+                </div>
+
+                <div className="rounded-lg bg-secondary/40 p-3">
+                  <p className="text-xs text-muted-foreground">Estimated Total</p>
+                  <p className="mt-1 text-2xl font-bold text-foreground">
+                    {formatCurrency(vendorOrderSummary.estimatedTotal)}
+                  </p>
+                </div>
+              </div>
+            )}
+
+            {!uploadBlocked && (
+              <div className="mt-4 rounded-lg border border-dashed border-border bg-secondary/30 p-3 text-sm text-muted-foreground">
+                Draft saving will be enabled after this preview is verified.
+              </div>
+            )}
+          </Card>
+
+          {uploadBlocked ? (
+            <Card className="p-6">
+              <div className="rounded-lg border border-dashed border-border bg-secondary/30 p-6 text-center">
+                <AlertCircle className="mx-auto h-8 w-8 text-muted-foreground" />
+                <h3 className="mt-3 font-semibold text-foreground">Select a specific store</h3>
+                <p className="mt-1 text-sm text-muted-foreground">{SELECT_VENDOR_STORE_MESSAGE}</p>
+              </div>
+            </Card>
+          ) : vendorOrderGroups.length === 0 ? (
+            <Card className="p-6">
+              <div className="rounded-lg border border-dashed border-border bg-secondary/30 p-6 text-center">
+                <PackageCheck className="mx-auto h-8 w-8 text-muted-foreground" />
+                <h3 className="mt-3 font-semibold text-foreground">No low-stock products need ordering right now.</h3>
+                <p className="mt-1 text-sm text-muted-foreground">
+                  Low-stock active products will appear here grouped by vendor when stock reaches reorder level.
+                </p>
+              </div>
+            </Card>
+          ) : (
+            <div className="space-y-4">
+              {vendorOrderGroups.map((group) => (
+                <Card key={group.vendor} className="overflow-hidden">
+                  <div className="border-b border-border p-4">
+                    <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+                      <div>
+                        <h3 className="text-lg font-semibold text-foreground">{group.vendor}</h3>
+                        <p className="mt-1 text-sm text-muted-foreground">
+                          {formatNumber(group.productCount)} product(s) · {formatNumber(group.totalSuggestedUnits)} suggested units ·{' '}
+                          {formatCurrency(group.estimatedTotal)} estimated total
+                        </p>
+                      </div>
+
+                      <Button disabled variant="outline" size="sm">
+                        Create Draft Order coming next
+                      </Button>
+                    </div>
+                  </div>
+
+                  <div className="grid gap-3 p-4">
+                    {group.products.map((suggestion) => {
+                      const product = suggestion.product;
+                      const identifier = product.upc || product.plu || product.productCode || product.sku || 'No identifier';
+
+                      return (
+                        <Card key={suggestion.productKey} className="p-4">
+                          <div className="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
+                            <div className="min-w-0">
+                              <h4 className="font-semibold text-foreground">{product.name}</h4>
+                              <p className="mt-1 font-mono text-xs text-muted-foreground">{identifier}</p>
+                              <p className="mt-1 text-sm text-muted-foreground">
+                                {product.department || product.category || 'No department'} · Stock{' '}
+                                {formatNumber(suggestion.stock)} / Reorder {formatNumber(suggestion.reorderLevel)}
+                              </p>
+                            </div>
+
+                            <div className="grid gap-2 text-sm sm:grid-cols-3 xl:min-w-[420px]">
+                              <div className="rounded-lg bg-secondary/40 p-3">
+                                <p className="text-xs text-muted-foreground">Units per case</p>
+                                <p className="font-semibold text-foreground">{formatNumber(suggestion.unitsPerCase)}</p>
+                              </div>
+
+                              <div className="rounded-lg bg-secondary/40 p-3">
+                                <p className="text-xs text-muted-foreground">Suggested</p>
+                                <p className="font-semibold text-foreground">
+                                  {formatNumber(suggestion.suggestedCases)} cases +{' '}
+                                  {formatNumber(suggestion.suggestedLooseUnits)} loose
+                                </p>
+                              </div>
+
+                              <div className="rounded-lg bg-secondary/40 p-3">
+                                <p className="text-xs text-muted-foreground">Estimated total</p>
+                                <p className="font-semibold text-foreground">{formatCurrency(suggestion.estimatedTotal)}</p>
+                              </div>
+                            </div>
+                          </div>
+
+                          <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-6">
+                            <label className="space-y-1.5">
+                              <span className="text-xs font-medium text-muted-foreground">Ordered Cases</span>
+                              <Input
+                                type="number"
+                                min="0"
+                                step="1"
+                                value={
+                                  vendorOrderDrafts[suggestion.productKey]?.orderedCases ?? String(suggestion.orderedCases)
+                                }
+                                onChange={(event) =>
+                                  updateVendorOrderDraft(suggestion.productKey, 'orderedCases', event.target.value)
+                                }
+                              />
+                            </label>
+
+                            <label className="space-y-1.5">
+                              <span className="text-xs font-medium text-muted-foreground">Loose Units</span>
+                              <Input
+                                type="number"
+                                min="0"
+                                step="1"
+                                value={vendorOrderDrafts[suggestion.productKey]?.looseUnits ?? String(suggestion.looseUnits)}
+                                onChange={(event) =>
+                                  updateVendorOrderDraft(suggestion.productKey, 'looseUnits', event.target.value)
+                                }
+                              />
+                            </label>
+
+                            <label className="space-y-1.5">
+                              <span className="text-xs font-medium text-muted-foreground">Expected Unit Cost</span>
+                              <Input
+                                type="number"
+                                min="0"
+                                step="0.01"
+                                value={
+                                  vendorOrderDrafts[suggestion.productKey]?.expectedUnitCost ??
+                                  String(suggestion.expectedUnitCost)
+                                }
+                                onChange={(event) =>
+                                  updateVendorOrderDraft(suggestion.productKey, 'expectedUnitCost', event.target.value)
+                                }
+                              />
+                            </label>
+
+                            <div className="rounded-lg bg-secondary/40 p-3">
+                              <p className="text-xs text-muted-foreground">Ordered Units</p>
+                              <p className="mt-1 font-semibold text-foreground">
+                                {formatNumber(suggestion.totalOrderedUnits)}
+                              </p>
+                            </div>
+
+                            <div className="rounded-lg bg-secondary/40 p-3">
+                              <p className="text-xs text-muted-foreground">Expected Case Cost</p>
+                              <p className="mt-1 font-semibold text-foreground">
+                                {formatCurrency(suggestion.expectedCaseCost)}
+                              </p>
+                            </div>
+
+                            <div className="rounded-lg bg-secondary/40 p-3">
+                              <p className="text-xs text-muted-foreground">Estimated Total</p>
+                              <p className="mt-1 font-semibold text-foreground">
+                                {formatCurrency(suggestion.estimatedTotal)}
+                              </p>
+                            </div>
+                          </div>
+                        </Card>
+                      );
+                    })}
+                  </div>
+                </Card>
+              ))}
+            </div>
+          )}
         </div>
       )}
 

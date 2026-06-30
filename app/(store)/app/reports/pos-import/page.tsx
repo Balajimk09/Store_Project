@@ -7,6 +7,7 @@ import { DashboardShell, PageHeader } from '@/components/layout/sidebar';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { useAuth } from '@/lib/auth';
+import { supabase } from '@/lib/supabase';
 
 type ImportSummary = {
   totalFiles: number;
@@ -87,6 +88,18 @@ type DiscoveryResponse = {
   error?: string;
 };
 
+type ConnectorStatusRow = {
+  id: string;
+  connector_name: string;
+  source_system: string;
+  status: 'active' | 'disabled' | string;
+  last_seen_at: string | null;
+  last_upload_at: string | null;
+  last_error: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+};
+
 const TEMPLATE_LINKS = [
   { href: '/templates/pos-import/plu-sales-sample.csv', label: 'Download PLU Sales CSV' },
   { href: '/templates/pos-import/department-sales-sample.csv', label: 'Download Department Sales CSV' },
@@ -121,6 +134,35 @@ function formatDate(value: string | null) {
   return new Date(value).toLocaleString();
 }
 
+function truncateText(value: string, maxLength = 150) {
+  return value.length > maxLength ? `${value.slice(0, maxLength - 1)}...` : value;
+}
+
+function formatSourceSystem(value: string) {
+  return value
+    .split('_')
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(' ');
+}
+
+function getConnectorStatusLabel(connector: ConnectorStatusRow) {
+  if (connector.status === 'disabled') return 'Disabled';
+  if (!connector.last_seen_at) return 'Never connected';
+
+  const lastSeen = new Date(connector.last_seen_at).getTime();
+  if (Number.isNaN(lastSeen)) return 'Never connected';
+
+  const fifteenMinutes = 15 * 60 * 1000;
+  return Date.now() - lastSeen <= fifteenMinutes ? 'Online recently' : 'Not seen recently';
+}
+
+function getConnectorStatusClass(label: string) {
+  if (label === 'Disabled') return 'bg-destructive/10 text-destructive';
+  if (label === 'Online recently') return 'bg-emerald-100 text-emerald-700';
+  return 'bg-secondary text-muted-foreground';
+}
+
 function fileIcon(fileName: string) {
   return fileName.toLowerCase().endsWith('.zip') ? FileArchive : FileText;
 }
@@ -137,11 +179,51 @@ export default function PosImportPage() {
   const [loadingDiscovery, setLoadingDiscovery] = useState(false);
   const [discoveryError, setDiscoveryError] = useState<string | null>(null);
   const [discoverySections, setDiscoverySections] = useState<DiscoverySection[]>([]);
+  const [loadingConnectors, setLoadingConnectors] = useState(false);
+  const [connectorError, setConnectorError] = useState<string | null>(null);
+  const [connectors, setConnectors] = useState<ConnectorStatusRow[]>([]);
 
   const blocked = storeScope === 'all' || !activeStoreId;
   const selectedStoreName = storeScope === 'all' ? 'All Stores' : activeStore?.store_name || 'Selected Store';
 
   const selectedFileNames = useMemo(() => files.map((file) => file.name).join(', '), [files]);
+
+  const loadConnectorStatus = useCallback(async () => {
+    if (!activeStoreId) {
+      setConnectors([]);
+      setConnectorError(null);
+      return;
+    }
+
+    setLoadingConnectors(true);
+    setConnectorError(null);
+    try {
+      const { data, error: connectorLoadError } = await supabase
+        .from('store_pos_connectors')
+        .select(`
+          id,
+          connector_name,
+          source_system,
+          status,
+          last_seen_at,
+          last_upload_at,
+          last_error,
+          created_at,
+          updated_at
+        `)
+        .eq('store_id', activeStoreId)
+        .order('created_at', { ascending: false });
+
+      if (connectorLoadError) throw connectorLoadError;
+      setConnectors((data || []) as ConnectorStatusRow[]);
+    } catch (loadError) {
+      console.error('[POS Connector Status Load Error]', loadError);
+      setConnectorError('Could not load POS connector status.');
+      setConnectors([]);
+    } finally {
+      setLoadingConnectors(false);
+    }
+  }, [activeStoreId]);
 
   const loadDiscovery = useCallback(async () => {
     if (!activeStoreId) {
@@ -197,6 +279,10 @@ export default function PosImportPage() {
   useEffect(() => {
     void loadDiscovery();
   }, [loadDiscovery]);
+
+  useEffect(() => {
+    void loadConnectorStatus();
+  }, [loadConnectorStatus]);
 
   const handleFiles = (fileList: FileList | null) => {
     setError(null);
@@ -268,10 +354,11 @@ export default function PosImportPage() {
           onClick={() => {
             void loadRecent();
             void loadDiscovery();
+            void loadConnectorStatus();
           }}
-          disabled={(loadingRecent && loadingDiscovery) || !activeStoreId}
+          disabled={(loadingRecent && loadingDiscovery && loadingConnectors) || !activeStoreId}
         >
-          {loadingRecent || loadingDiscovery ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <RefreshCcw className="mr-2 h-4 w-4" />}
+          {loadingRecent || loadingDiscovery || loadingConnectors ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <RefreshCcw className="mr-2 h-4 w-4" />}
           Refresh
         </Button>
       </PageHeader>
@@ -298,6 +385,81 @@ export default function PosImportPage() {
               Select a specific store to import POS reports.
             </div>
           ) : null}
+        </Card>
+
+        <Card className="p-5">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+            <div>
+              <h2 className="text-lg font-semibold text-foreground">POS Connector Status</h2>
+              <p className="mt-1 text-sm text-muted-foreground">
+                View the local connector configured to upload Commander report exports for this store.
+              </p>
+            </div>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => void loadConnectorStatus()}
+              disabled={blocked || loadingConnectors}
+            >
+              {loadingConnectors ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <RefreshCcw className="mr-2 h-4 w-4" />}
+              Refresh
+            </Button>
+          </div>
+
+          {blocked ? (
+            <div className="mt-4 rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-800">
+              Select a specific store to view connector status.
+            </div>
+          ) : connectorError ? (
+            <div className="mt-4 flex items-start gap-2 rounded-xl border border-destructive/30 bg-destructive/10 p-4 text-sm text-destructive">
+              <AlertCircle className="mt-0.5 h-4 w-4 flex-shrink-0" />
+              <span>{connectorError}</span>
+            </div>
+          ) : loadingConnectors ? (
+            <div className="mt-5 flex items-center gap-2 text-sm text-muted-foreground">
+              <Loader2 className="h-4 w-4 animate-spin" />
+              Loading connector status...
+            </div>
+          ) : connectors.length === 0 ? (
+            <div className="mt-4 rounded-xl border border-border bg-secondary/30 p-4">
+              <p className="text-sm font-medium text-foreground">No POS connector is configured for this store yet.</p>
+              <p className="mt-1 text-sm text-muted-foreground">
+                Install the StorePulse connector on the store laptop to automatically upload Commander report exports.
+              </p>
+            </div>
+          ) : (
+            <div className="mt-5 space-y-3">
+              {connectors.map((connector) => {
+                const statusLabel = getConnectorStatusLabel(connector);
+                return (
+                  <div key={connector.id} className="rounded-xl border border-border bg-background p-4">
+                    <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                      <div>
+                        <h3 className="font-semibold text-foreground">{connector.connector_name}</h3>
+                        <p className="text-sm text-muted-foreground">{formatSourceSystem(connector.source_system)}</p>
+                      </div>
+                      <span className={`inline-flex w-fit rounded-full px-3 py-1 text-xs font-medium ${getConnectorStatusClass(statusLabel)}`}>
+                        {statusLabel}
+                      </span>
+                    </div>
+                    <div className="mt-4 grid gap-3 text-sm sm:grid-cols-2 lg:grid-cols-4">
+                      <ConnectorDetail label="Status" value={connector.status || 'Unknown'} />
+                      <ConnectorDetail label="Last seen" value={formatDate(connector.last_seen_at)} />
+                      <ConnectorDetail label="Last upload" value={formatDate(connector.last_upload_at)} />
+                      <ConnectorDetail label="Created" value={formatDate(connector.created_at)} />
+                    </div>
+                    {connector.last_error ? (
+                      <div className="mt-4 rounded-lg border border-border bg-secondary/30 p-3 text-sm">
+                        <p className="font-medium text-foreground">Last error</p>
+                        <p className="mt-1 break-words text-muted-foreground">{truncateText(connector.last_error)}</p>
+                      </div>
+                    ) : null}
+                  </div>
+                );
+              })}
+            </div>
+          )}
         </Card>
 
         <Card className="p-6">
@@ -528,6 +690,15 @@ function Metric({ label, value }: { label: string; value: number }) {
     <div className="rounded-xl border border-border bg-background p-4">
       <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">{label}</p>
       <p className="mt-2 text-2xl font-semibold text-foreground">{value}</p>
+    </div>
+  );
+}
+
+function ConnectorDetail({ label, value }: { label: string; value: string }) {
+  return (
+    <div>
+      <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">{label}</p>
+      <p className="mt-1 font-medium text-foreground">{value}</p>
     </div>
   );
 }

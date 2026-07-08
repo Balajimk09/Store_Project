@@ -2701,10 +2701,29 @@ const nextBreakdown = getCaseBreakdown(nextStock, unitsPerCase);
           status: 'Matched',
         });
       } else if (mode === 'add') {
-        const newProductUpc = line.upc || `INV-${Date.now()}-${Math.round(Math.random() * 10000)}`;
+        const lineIdentifiers = line as ReceivingLine & {
+          plu?: string | null;
+          productCode?: string | null;
+          product_code?: string | null;
+        };
+        const newProductUpc = line.upc.trim();
+        const newProductPlu = (lineIdentifiers.plu || '').trim();
+        const newProductCode = (lineIdentifiers.productCode || lineIdentifiers.product_code || '').trim();
+
+        if (!newProductUpc && !newProductPlu && !newProductCode) {
+          savedLines.push({
+            ...line,
+            upc: '',
+            status: 'Needs Review',
+            vendor: line.vendor || receiptVendor,
+          });
+          continue;
+        }
 
         const newProduct: Product = {
         upc: newProductUpc,
+        plu: newProductPlu || undefined,
+        productCode: newProductCode || undefined,
         name: line.name,
         category: line.department || 'General Merchandise',
         department: line.department || 'General Merchandise',

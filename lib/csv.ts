@@ -318,7 +318,7 @@ export function parseTransactionsCsv(text: string): ParseResult {
     const cashierNameBase = cashierId;
     const item = (raw['item_name'] || '').trim() || 'Unknown Item';
     const category = (raw['category'] || '').trim() || 'Unknown';
-    const upc = normalizeUpc(raw['upc']) || '0000000000000';
+    const upc = normalizeUpc(raw['upc']) || undefined;
     const txnId = (raw['transaction_id'] || '').trim() || `TX${String(i).padStart(6, '0')}`;
     const register = parseInt(raw['register_id'] || '1', 10) || 1;
 

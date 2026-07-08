@@ -144,3 +144,28 @@ If Commander is still writing the file, the connector skips it for that cycle an
 ### Upload works once, then old files are skipped
 
 That is expected when `STOREPULSE_ARCHIVE_FOLDER` is not configured. The local state file records uploaded hashes so the connector does not keep making unnecessary network calls for files StorePulse has already seen.
+
+## Windows Launcher
+
+`connector/start-connector.bat` starts the connector from the connector folder and automatically restarts it if the Node process exits.
+
+To run it manually, double-click:
+
+```text
+connector/start-connector.bat
+```
+
+The console window stays open so recent connector logs are visible for troubleshooting.
+
+To start the connector automatically when Windows boots:
+
+1. Press `Win + R`.
+2. Type `shell:startup`.
+3. Press `Enter`.
+4. Right-click `start-connector.bat`.
+5. Choose `Create shortcut`.
+6. Move the shortcut into the Startup folder.
+
+Windows Task Scheduler is a more robust future option for production store laptops, but Task Scheduler setup is not built here.
+
+Before using the launcher on a real store laptop, make sure `connector/.env` exists and contains real connector values. Never commit `connector/.env` to git.

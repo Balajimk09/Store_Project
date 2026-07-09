@@ -117,18 +117,44 @@ function fileExtension(filePath) {
 }
 
 async function listCandidateFiles(watchFolder) {
-  let entries;
+  const files = [];
+
+  async function walk(folderPath) {
+    let entries;
+    try {
+      entries = await readdir(folderPath, { withFileTypes: true });
+    } catch (error) {
+      console.error(`Could not read folder ${folderPath}: ${error instanceof Error ? error.message : String(error)}`);
+      return;
+    }
+
+    for (const entry of entries) {
+      const entryPath = path.join(folderPath, entry.name);
+      if (entry.isDirectory()) {
+        await walk(entryPath);
+        continue;
+      }
+
+      if (!entry.isFile()) continue;
+      if (SUPPORTED_EXTENSIONS.has(fileExtension(entryPath))) {
+        files.push(entryPath);
+      }
+    }
+  }
+
   try {
-    entries = await readdir(watchFolder, { withFileTypes: true });
+    const rootStats = await stat(watchFolder);
+    if (!rootStats.isDirectory()) {
+      console.error(`Watch folder is not a directory: ${watchFolder}`);
+      return [];
+    }
   } catch (error) {
     console.error(`Could not read watch folder: ${error instanceof Error ? error.message : String(error)}`);
     return [];
   }
 
-  return entries
-    .filter((entry) => entry.isFile())
-    .map((entry) => path.join(watchFolder, entry.name))
-    .filter((filePath) => SUPPORTED_EXTENSIONS.has(fileExtension(filePath)));
+  await walk(watchFolder);
+  return files;
 }
 
 async function stableFileStats(filePath) {
@@ -320,6 +346,7 @@ async function main() {
 
   console.log('StorePulse POS connector started.');
   console.log(`Watch folder: ${config.watchFolder}`);
+  console.log(`Recursive scan enabled — watching all subfolders under: ${config.watchFolder}`);
   console.log(`API URL: ${config.apiUrl}`);
   console.log(`Poll interval: ${config.pollSeconds} seconds`);
   console.log(`Dry run: ${config.dryRun ? 'true' : 'false'}`);

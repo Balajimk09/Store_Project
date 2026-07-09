@@ -1,10 +1,12 @@
 import { createHash } from 'crypto';
 import { NextResponse } from 'next/server';
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
+import { XMLParser } from 'fast-xml-parser';
 import JSZip from 'jszip';
 import * as XLSX from 'xlsx';
 import { parseCsvText } from '@/lib/csv';
 import { detectPeriod, type DetectedPeriod } from '@/lib/pos/period-detect';
+import { parseTransSet } from '@/lib/pos/transsetz-parser';
 import { normalizeUpc } from '@/lib/pos/upc-normalize';
 import { parseVerifoneHtml, type PosReportType } from '@/lib/pos/verifone-html';
 
@@ -16,10 +18,12 @@ const NETWORK_JOURNAL_SKIP_MESSAGE =
 
 type SourceSystem = typeof VERIFONE_SOURCE_SYSTEM;
 type ConnectorStatus = 'active' | 'disabled';
-type ParsedStatus = 'success' | 'failed' | 'skipped';
+type ParsedStatus = 'pending' | 'success' | 'failed' | 'skipped';
 type FileResultStatus = 'success' | 'skipped' | 'duplicate' | 'failed';
+type ConnectorReportType = PosReportType | 'transsetz';
 type CellValue = string | number | null;
 type ParsedRow = Record<string, CellValue>;
+type XmlRecord = Record<string, unknown>;
 type ConnectorSupabaseClient = SupabaseClient;
 
 type ConnectorRow = {
@@ -43,7 +47,7 @@ type UploadItem = {
 
 type FileResult = {
   fileName: string;
-  reportType: PosReportType | null;
+  reportType: ConnectorReportType | null;
   status: FileResultStatus;
   rowsInserted: number | null;
   message: string | null;
@@ -70,6 +74,7 @@ class DuplicateRowConflictError extends Error {
 }
 
 const SUPPORTED_EXTENSIONS = new Set(['html', 'htm', 'xml', 'csv', 'xlsx', 'xls']);
+const TRANSSET_REPORT_TYPE = 'transsetz' as const;
 
 const REPORT_TABLES: Partial<Record<PosReportType, string>> = {
   plu_sales: 'pos_plu_sales',
@@ -125,6 +130,14 @@ function safeMessage(message: string) {
 
 function fileExtension(fileName: string) {
   return fileName.split('.').pop()?.toLowerCase() || '';
+}
+
+function hasSupportedExtension(extension: string) {
+  return SUPPORTED_EXTENSIONS.has(extension);
+}
+
+function isTransSetNameCandidate(extension: string) {
+  return extension === '' || /^\d+$/.test(extension);
 }
 
 function getBearerToken(request: Request) {
@@ -335,7 +348,8 @@ async function extractUploadItems(files: File[]): Promise<ExtractedUploadItems> 
       const entries = Object.values(zip.files).filter((entry) => !entry.dir);
       for (const entry of entries) {
         const entryExtension = fileExtension(entry.name);
-        if (!SUPPORTED_EXTENSIONS.has(entryExtension)) {
+        const normalizedExtension = hasSupportedExtension(entryExtension) ? entryExtension : '';
+        if (!hasSupportedExtension(entryExtension) && !isTransSetNameCandidate(entryExtension)) {
           skippedFiles.push({
             fileName: entry.name,
             reportType: null,
@@ -348,14 +362,15 @@ async function extractUploadItems(files: File[]): Promise<ExtractedUploadItems> 
 
         uploadItems.push({
           fileName: entry.name,
-          extension: entryExtension,
-          content: ['xlsx', 'xls'].includes(entryExtension) ? Buffer.from(await entry.async('uint8array')) : await entry.async('text'),
+          extension: normalizedExtension,
+          content: ['xlsx', 'xls'].includes(normalizedExtension) ? Buffer.from(await entry.async('uint8array')) : await entry.async('text'),
         });
       }
       continue;
     }
 
-    if (!SUPPORTED_EXTENSIONS.has(extension)) {
+    const normalizedExtension = hasSupportedExtension(extension) ? extension : '';
+    if (!hasSupportedExtension(extension) && !isTransSetNameCandidate(extension)) {
       skippedFiles.push({
         fileName: file.name,
         reportType: null,
@@ -368,8 +383,8 @@ async function extractUploadItems(files: File[]): Promise<ExtractedUploadItems> 
 
     uploadItems.push({
       fileName: file.name,
-      extension,
-      content: ['xlsx', 'xls'].includes(extension) ? Buffer.from(await file.arrayBuffer()) : await file.text(),
+      extension: normalizedExtension,
+      content: ['xlsx', 'xls'].includes(normalizedExtension) ? Buffer.from(await file.arrayBuffer()) : await file.text(),
     });
   }
 
@@ -459,7 +474,7 @@ async function createReportFile(client: ConnectorSupabaseClient, input: {
   fileName: string;
   fileHash: string;
   reportTitle: string;
-  reportType: PosReportType;
+  reportType: ConnectorReportType;
   rawContent: string;
   parsedStatus: ParsedStatus;
   errorMessage?: string | null;
@@ -489,12 +504,12 @@ async function createReportFile(client: ConnectorSupabaseClient, input: {
   return id;
 }
 
-async function updateReportFileStatus(client: ConnectorSupabaseClient, reportFileId: string, parsedStatus: ParsedStatus, errorMessage: string) {
+async function updateReportFileStatus(client: ConnectorSupabaseClient, reportFileId: string, parsedStatus: ParsedStatus, errorMessage: string | null) {
   const { error } = await client
     .from('pos_report_files')
     .update({
       parsed_status: parsedStatus,
-      error_message: errorMessage,
+      error_message: errorMessage || null,
     })
     .eq('id', reportFileId);
 
@@ -521,6 +536,29 @@ async function insertRowsForReport(client: ConnectorSupabaseClient, tableName: s
     report_file_id: input.reportFileId,
     source_system: VERIFONE_SOURCE_SYSTEM,
     source_store_number: input.sourceStoreNumber,
+    period_open: input.periodOpen,
+    period_close: input.periodClose,
+  }));
+
+  const { error } = await client.from(tableName).insert(rows);
+  if (error) {
+    if (errorCode(error) === '23505') {
+      throw new DuplicateRowConflictError(safeMessage(String(error.message || 'Duplicate rows.')));
+    }
+    throw error;
+  }
+  return rows.length;
+}
+
+async function insertTransSetRows(client: ConnectorSupabaseClient, tableName: string, input: {
+  rows: ReadonlyArray<object>;
+  periodOpen: string | null;
+  periodClose: string | null;
+}) {
+  if (input.rows.length === 0) return 0;
+
+  const rows = input.rows.map((row) => ({
+    ...row,
     period_open: input.periodOpen,
     period_close: input.periodClose,
   }));
@@ -640,6 +678,101 @@ function isNetworkJournalReport(fileName: string, html: string) {
   return text.includes('network journal');
 }
 
+function isRecord(value: unknown): value is XmlRecord {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function textValue(value: unknown): string | null {
+  if (value === undefined || value === null) return null;
+  if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+    const text = String(value).trim();
+    return text || null;
+  }
+  if (isRecord(value)) return textValue(value['#text']);
+  return null;
+}
+
+function attrText(node: XmlRecord | null, key: string): string | null {
+  if (!node) return null;
+  return textValue(node[`@_${key}`]);
+}
+
+function childText(node: XmlRecord | null, key: string): string | null {
+  if (!node) return null;
+  return textValue(node[key]);
+}
+
+function isTransSetUpload(item: UploadItem, rawContent: string) {
+  if (item.extension !== '') return false;
+  const trimmed = rawContent.trimStart();
+  return (trimmed.startsWith('<?xml') || trimmed.startsWith('<transSet')) && trimmed.slice(0, 500).includes('<transSet');
+}
+
+function transSetPeriodType(periodName: string | null): DetectedPeriod['periodType'] {
+  const normalized = String(periodName || '').trim().toLowerCase();
+  if (normalized === 'shift' || normalized === 'day' || normalized === 'month' || normalized === 'year') return normalized;
+  return 'unknown';
+}
+
+function parseTransSetMetadata(rawXml: string) {
+  const parser = new XMLParser({
+    ignoreAttributes: false,
+    attributeNamePrefix: '@_',
+    textNodeName: '#text',
+    trimValues: true,
+    parseTagValue: false,
+    parseAttributeValue: false,
+  });
+  const parsed = parser.parse(rawXml) as unknown;
+  const root = isRecord(parsed) && isRecord(parsed.transSet) ? parsed.transSet : null;
+  if (!root) throw new Error('Could not read transSet period metadata.');
+
+  return {
+    periodType: attrText(root, 'periodname'),
+    periodId: attrText(root, 'periodID'),
+    periodShortId: attrText(root, 'shortId'),
+    periodLongId: attrText(root, 'longId'),
+    sourceStoreNumber: attrText(root, 'site'),
+    openedTime: childText(root, 'openedTime'),
+    closedTime: childText(root, 'closedTime'),
+  };
+}
+
+function transSetPeriodInput(storeId: string, ownerId: string, fileHash: string, metadata: ReturnType<typeof parseTransSetMetadata>) {
+  const periodType = transSetPeriodType(metadata.periodType);
+  const periodNumber = metadata.periodShortId || metadata.periodId || metadata.periodLongId;
+  const periodLabel = [
+    metadata.periodType || 'transSet',
+    periodNumber ? `#${periodNumber}` : null,
+    metadata.periodLongId,
+  ].filter(Boolean).join(' ');
+
+  return {
+    storeId,
+    ownerId,
+    sourceSystem: VERIFONE_SOURCE_SYSTEM,
+    sourceStoreNumber: metadata.sourceStoreNumber,
+    periodLabel: periodLabel || 'transSet',
+    periodType,
+    periodNumber,
+    periodOpen: metadata.openedTime,
+    periodClose: metadata.closedTime,
+    periodHash: hashText([
+      storeId,
+      VERIFONE_SOURCE_SYSTEM,
+      TRANSSET_REPORT_TYPE,
+      metadata.sourceStoreNumber || '',
+      metadata.periodType || '',
+      metadata.periodId || '',
+      metadata.periodShortId || '',
+      metadata.periodLongId || '',
+      metadata.openedTime || '',
+      metadata.closedTime || '',
+      metadata.periodId || metadata.periodShortId || metadata.periodLongId || metadata.openedTime || metadata.closedTime ? '' : fileHash,
+    ].join('|')),
+  };
+}
+
 async function duplicateExists(client: ConnectorSupabaseClient, storeId: string, fileHash: string) {
   const { data, error } = await client
     .from('pos_report_files')
@@ -673,6 +806,70 @@ async function processUploadItem(client: ConnectorSupabaseClient, input: {
         status: 'duplicate',
         rowsInserted: null,
         message: 'File already imported for this store.',
+      };
+    }
+
+    if (isTransSetUpload(item, rawContent)) {
+      const metadata = parseTransSetMetadata(rawContent);
+      const reportPeriodId = await resolvePeriod(client, transSetPeriodInput(storeId, ownerId, fileHash, metadata));
+      const reportFileId = await createReportFile(client, {
+        storeId,
+        ownerId,
+        uploadBatchId,
+        reportPeriodId,
+        fileName: item.fileName,
+        fileHash,
+        reportTitle: `transSet ${metadata.periodType || 'period'}`,
+        reportType: TRANSSET_REPORT_TYPE,
+        rawContent,
+        parsedStatus: 'pending',
+      });
+      currentReportFileId = reportFileId;
+
+      const parsed = parseTransSet(
+        rawContent,
+        storeId,
+        ownerId,
+        reportPeriodId,
+        reportFileId,
+        metadata.sourceStoreNumber || ''
+      );
+      const rowsInserted = [
+        await insertTransSetRows(client, 'pos_plu_sales', {
+          rows: parsed.pluSales,
+          periodOpen: parsed.openedTime,
+          periodClose: parsed.closedTime,
+        }),
+        await insertTransSetRows(client, 'pos_department_sales', {
+          rows: parsed.departmentSales,
+          periodOpen: parsed.openedTime,
+          periodClose: parsed.closedTime,
+        }),
+        await insertTransSetRows(client, 'pos_tax_summary', {
+          rows: parsed.taxSummary,
+          periodOpen: parsed.openedTime,
+          periodClose: parsed.closedTime,
+        }),
+        await insertTransSetRows(client, 'pos_payment_summary', {
+          rows: parsed.paymentSummary,
+          periodOpen: parsed.openedTime,
+          periodClose: parsed.closedTime,
+        }),
+        await insertTransSetRows(client, 'pos_cashier_summary', {
+          rows: parsed.cashierSummary,
+          periodOpen: parsed.openedTime,
+          periodClose: parsed.closedTime,
+        }),
+      ].reduce((sum, count) => sum + count, 0);
+
+      await updateReportFileStatus(client, reportFileId, 'success', rowsInserted === 0 ? '0 rows found in transSet file.' : null);
+
+      return {
+        fileName: item.fileName || `transSet-${metadata.periodShortId || metadata.periodId || fileHash.slice(0, 8)}`,
+        reportType: TRANSSET_REPORT_TYPE,
+        status: 'success',
+        rowsInserted,
+        message: rowsInserted === 0 ? '0 rows found in transSet file.' : `Imported transSet aggregates from ${parsed.stats.totalTransactions} transactions.`,
       };
     }
 

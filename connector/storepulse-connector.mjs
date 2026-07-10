@@ -5,8 +5,9 @@ import { existsSync } from 'node:fs';
 import { mkdir, readFile, readdir, rename, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { gunzipSync } from 'node:zlib';
 
-const SUPPORTED_EXTENSIONS = new Set(['.html', '.htm', '.xml', '.csv', '.xlsx', '.xls', '.zip']);
+const SUPPORTED_EXTENSIONS = new Set(['.html', '.htm', '.xml', '.csv', '.xlsx', '.xls', '.zip', '.gz']);
 const DEFAULT_POLL_SECONDS = 60;
 const STABILITY_WAIT_MS = 3000;
 const REQUEST_TIMEOUT_MS = 120000;
@@ -232,8 +233,12 @@ function logServerResults(results) {
 }
 
 async function uploadFile(config, filePath, fileHash) {
-  const fileName = path.basename(filePath);
-  const buffer = await readFile(filePath);
+  let fileName = path.basename(filePath);
+  let buffer = await readFile(filePath);
+  if (fileExtension(filePath) === '.gz') {
+    buffer = gunzipSync(buffer);
+    fileName = fileName.slice(0, -'.gz'.length);
+  }
   const formData = new FormData();
   appendFileToFormData(formData, buffer, fileName);
 

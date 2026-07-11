@@ -57,6 +57,24 @@ function nonNegativeInteger(value: unknown): number {
   return value
 }
 
+function isValidBusinessDate(value: unknown): boolean {
+  if (typeof value !== 'string') return false
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value)
+  if (!match) return false
+
+  const year = Number(match[1])
+  const month = Number(match[2])
+  const day = Number(match[3])
+  if (month < 1 || month > 12 || day < 1) return false
+
+  const date = new Date(Date.UTC(year, month - 1, day))
+  return (
+    date.getUTCFullYear() === year &&
+    date.getUTCMonth() === month - 1 &&
+    date.getUTCDate() === day
+  )
+}
+
 function getAdminKey(): string {
   const legacyKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')
   if (legacyKey) return legacyKey
@@ -226,6 +244,16 @@ Deno.serve(async (request: Request): Promise<Response> => {
       return jsonResponse(
         { error: 'transaction_store_mismatch', record_index: index, request_id: requestId },
         409,
+      )
+    }
+
+    if (
+      Object.prototype.hasOwnProperty.call(transaction, 'business_date') &&
+      !isValidBusinessDate(transaction.business_date)
+    ) {
+      return jsonResponse(
+        { error: 'invalid_business_date', record_index: index, request_id: requestId },
+        400,
       )
     }
   }

@@ -264,28 +264,183 @@ function Get-ValueByNames {
 
 function Get-ClosedDayCandidates {
     param([Parameter(Mandatory)][xml]$PeriodListXml)
-    if ($PeriodListXml.DocumentElement.LocalName -ne "periodList") {
+
+    if (
+        $null -eq $PeriodListXml.DocumentElement -or
+        $PeriodListXml.DocumentElement.LocalName -ne "periodList"
+    ) {
         throw "Commander period list root must be periodList."
     }
+
     $candidates = @()
-    $nodes = @($PeriodListXml.SelectNodes("//*"))
-    foreach ($node in $nodes) {
-        $filename = Get-ValueByNames -Node $node -Names @("filename", "fileName", "name")
-        $period = Get-ValueByNames -Node $node -Names @("period", "periodID", "periodId")
-        $isCurrent = (Get-ValueByNames -Node $node -Names @("current", "isCurrent", "iscurrent")).ToLowerInvariant()
-        if ($period -ne "2") { continue }
-        if ($filename -notmatch '^\d{4}-\d{2}-\d{2}\.(\d+)$') { continue }
-        if ($filename -match 'current' -or $isCurrent -in @("true", "1", "yes")) { continue }
-        $candidates += [PSCustomObject]@{
-            filename = $filename
-            period = $period
-            period_number = $Matches[1]
+
+    $periodInfoNodes = @(
+        $PeriodListXml.SelectNodes(
+            "/*[local-name()='periodList']/*[local-name()='periodInfo']"
+        )
+    )
+
+    foreach ($periodInfo in $periodInfoNodes) {
+        $parameterValues = @{}
+
+        $reportParameters = @(
+            $periodInfo.SelectNodes(
+                "./*[local-name()='reportParameters']/*[local-name()='reportParameter']"
+            )
+        )
+
+        foreach ($reportParameter in $reportParameters) {
+            $parameterName = $reportParameter.GetAttribute("name")
+
+            if ([string]::IsNullOrWhiteSpace($parameterName)) {
+                continue
+            }
+
+            $parameterName = $parameterName.Trim().ToLowerInvariant()
+            $parameterValues[$parameterName] = $reportParameter.InnerText.Trim()
+        }
+
+        $nameNode = $periodInfo.SelectSingleNode(
+            "./*[local-name()='name']"
+        )
+
+        $periodInfoName = ""
+
+        if ($null -ne $nameNode) {
+            $periodInfoName = $nameNode.InnerText.Trim()
+        }
+
+        $period = ""
+
+        if ($parameterValues.ContainsKey("period")) {
+            $period = [string]$parameterValues["period"]
+        }
+        else {
+            $period = [string](
+                Get-ValueByNames `
+                    -Node $periodInfo `
+                    -Names @("period", "periodID", "periodId")
+            )
+        }
+
+        $period = $period.Trim()
+
+        $filename = ""
+
+        if ($parameterValues.ContainsKey("filename")) {
+            $filename = [string]$parameterValues["filename"]
+        }
+        elseif (-not [string]::IsNullOrWhiteSpace($periodInfoName)) {
+            $filename = $periodInfoName
+        }
+        else {
+            $filename = [string](
+                Get-ValueByNames `
+                    -Node $periodInfo `
+                    -Names @("filename", "fileName")
+            )
+        }
+
+        $filename = $filename.Trim()
+
+        $isCurrent = [string](
+            Get-ValueByNames `
+                -Node $periodInfo `
+                -Names @("current", "isCurrent", "iscurrent")
+        )
+
+        $isCurrent = $isCurrent.Trim().ToLowerInvariant()
+
+        if ($period -ne "2") {
+            continue
+        }
+
+        if (
+            [string]::IsNullOrWhiteSpace($filename) -or
+            $filename.ToLowerInvariant() -eq "current" -or
+            $periodInfoName.ToLowerInvariant() -eq "current" -or
+            $isCurrent -in @("true", "1", "yes")
+        ) {
+            continue
+        }
+
+        $filenameMatch = [regex]::Match(
+            $filename,
+            '^\d{4}-\d{2}-\d{2}\.(\d+)$'
+        )
+
+        if (-not $filenameMatch.Success) {
+            continue
+        }
+
+        $candidates += [pscustomobject]@{
+            filename      = $filename
+            period        = $period
+            period_number = $filenameMatch.Groups[1].Value
         }
     }
-    $deduped = @($candidates | Sort-Object filename -Unique)
-    return @($deduped | Sort-Object filename)
-}
 
+    # Compatibility with the original synthetic and legacy period-list shape:
+    # <period period="2" filename="YYYY-MM-DD.number" />
+    $legacyNodes = @(
+        $PeriodListXml.SelectNodes("//*")
+    )
+
+    foreach ($legacyNode in $legacyNodes) {
+        $legacyFilename = [string](
+            Get-ValueByNames `
+                -Node $legacyNode `
+                -Names @("filename", "fileName")
+        )
+
+        $legacyPeriod = [string](
+            Get-ValueByNames `
+                -Node $legacyNode `
+                -Names @("period", "periodID", "periodId")
+        )
+
+        $legacyCurrent = [string](
+            Get-ValueByNames `
+                -Node $legacyNode `
+                -Names @("current", "isCurrent", "iscurrent")
+        )
+
+        $legacyFilename = $legacyFilename.Trim()
+        $legacyPeriod = $legacyPeriod.Trim()
+        $legacyCurrent = $legacyCurrent.Trim().ToLowerInvariant()
+
+        if ($legacyPeriod -ne "2") {
+            continue
+        }
+
+        if (
+            [string]::IsNullOrWhiteSpace($legacyFilename) -or
+            $legacyFilename.ToLowerInvariant() -eq "current" -or
+            $legacyCurrent -in @("true", "1", "yes")
+        ) {
+            continue
+        }
+
+        $legacyFilenameMatch = [regex]::Match(
+            $legacyFilename,
+            '^\d{4}-\d{2}-\d{2}\.(\d+)$'
+        )
+
+        if (-not $legacyFilenameMatch.Success) {
+            continue
+        }
+
+        $candidates += [pscustomobject]@{
+            filename      = $legacyFilename
+            period        = $legacyPeriod
+            period_number = $legacyFilenameMatch.Groups[1].Value
+        }
+    }
+    return @(
+        $candidates |
+            Sort-Object filename -Unique
+    )
+}
 function Select-ClosedDayPeriod {
     param(
         [Parameter(Mandatory)][array]$Candidates,
@@ -472,7 +627,14 @@ else {
     $periodListText = Invoke-Commander -Connection $connection -Command "vperiodlist" -Cookie $cookie
 }
 $periodListXml = [xml]$periodListText
-$candidate = Select-ClosedDayPeriod -Candidates (Get-ClosedDayCandidates -PeriodListXml $periodListXml) -PeriodFilename $PeriodFilename
+$candidates = @(
+    Get-ClosedDayCandidates `
+        -PeriodListXml $periodListXml
+)
+
+$candidate = Select-ClosedDayPeriod `
+    -Candidates $candidates `
+    -PeriodFilename $PeriodFilename
 Write-Host ("Selected closed Day period: {0}" -f $candidate.filename)
 
 if ($useSyntheticInputs) {

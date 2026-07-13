@@ -3,8 +3,8 @@
   "expected_relative_path": "runtime\\node",
   "executable_name": "node.exe",
   "architecture": "x64",
-  "sha256": "REPLACE_WITH_VETTED_NODE_EXE_SHA256",
-  "source": "Administrator-provided vetted private Node.js runtime",
-  "version": "20.x",
-  "notes": "Do not download automatically. Replace sha256 with the vetted node.exe SHA-256 before pilot installation."
+  "sha256": "56C1520EE33B801E8BDB92FB321CF2E98529735B6D12BD4A2A6DEC0AC0BAB937",
+  "source": "Official Node.js Windows x64 ZIP verified against SHASUMS256.txt",
+  "version": "20.20.2",
+  "notes": "Private StorePulse runtime. Do not fall back to globally installed Node."
 }

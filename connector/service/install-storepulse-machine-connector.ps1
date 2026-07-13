@@ -50,12 +50,21 @@ if ($ValidateOnly) {
 if ($PSCmdlet.ShouldProcess($resolvedInstallRoot, "Copy StorePulse connector files")) {
     New-Item -ItemType Directory -Path $resolvedInstallRoot -Force | Out-Null
     New-Item -ItemType Directory -Path $resolvedProgramDataRoot -Force | Out-Null
+    foreach ($dir in @("logs", "working", "archive", "state")) {
+        New-Item -ItemType Directory -Path (Join-Path $resolvedProgramDataRoot $dir) -Force | Out-Null
+    }
     foreach ($file in $requiredFiles) {
         Copy-Item -LiteralPath (Join-Path $resolvedSourceRoot $file) -Destination (Join-Path $resolvedInstallRoot $file)
     }
     $serviceSource = Join-Path $resolvedSourceRoot "service"
     if (Test-Path -LiteralPath $serviceSource -PathType Container) {
-        Copy-Item -LiteralPath $serviceSource -Destination (Join-Path $resolvedInstallRoot "service") -Recurse
+        $serviceDestination = Join-Path $resolvedInstallRoot "service"
+        if (-not (Test-Path -LiteralPath $serviceDestination -PathType Container)) {
+            New-Item -ItemType Directory -Path $serviceDestination -Force | Out-Null
+        }
+        foreach ($serviceFile in Get-ChildItem -LiteralPath $serviceSource -Filter "*.ps1" -File) {
+            Copy-Item -LiteralPath $serviceFile.FullName -Destination (Join-Path $serviceDestination $serviceFile.Name)
+        }
     }
     Write-Host "Files copied. Next step: create ProgramData config.json and encrypted secrets.json, then run service host -Mode Validate."
 }

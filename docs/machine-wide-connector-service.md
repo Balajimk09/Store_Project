@@ -85,6 +85,86 @@ The live worker remains the existing provisional/current-shift flow. Until a sup
 
 The closed-day worker remains the existing closed-day finalizer. The host can invoke it in future one-shot mode using machine-configured install, working, archive, endpoint, and store values. Validate mode never archives or finalizes anything.
 
+## Runtime Lifecycle
+
+Checkpoint 2 adds `storepulse-service-runtime.ps1`, a dot-sourceable runtime library that can later be hosted by a Windows Service wrapper. The runtime supports:
+
+- `Validate`: load config/secrets, validate required scripts, write initial status, and perform no upload/finalization.
+- `Once`: run each enabled worker once and exit.
+- `Run`: loop until a stop file is created or the process is terminated.
+
+The host script delegates to the runtime and prints only non-secret startup information.
+
+## Locking
+
+The runtime uses a machine-wide lock file under ProgramData state:
+
+```text
+C:\ProgramData\StorePulse\state\runtime.lock
+```
+
+The lock file is opened exclusively while the runtime is active. A second runtime instance fails rather than running duplicate live or closed-day workers.
+
+## Cancellation
+
+The control scaffold can request graceful cancellation by creating:
+
+```text
+C:\ProgramData\StorePulse\state\runtime.stop
+```
+
+Run mode checks the stop file between worker cycles. Process termination is also supported by the operating system or future service wrapper.
+
+## Heartbeat and Status
+
+The runtime writes a heartbeat/status file:
+
+```text
+C:\ProgramData\StorePulse\state\runtime-status.json
+```
+
+It contains:
+
+- runtime version
+- process ID
+- started timestamp
+- last heartbeat timestamp
+- live worker status
+- closed-day worker status
+- last success/failure timestamps
+- bounded non-secret error summaries
+
+Secrets are redacted before status is written.
+
+## Backoff
+
+Worker failures are isolated per worker. A live worker failure does not stop the closed-day worker, and a closed-day worker failure does not stop the live worker. Each worker tracks consecutive failures and receives bounded exponential backoff up to five minutes.
+
+## Runtime Logging
+
+Runtime logs are JSON lines under:
+
+```text
+C:\ProgramData\StorePulse\logs\runtime-YYYYMMDD.jsonl
+```
+
+Each event includes a timestamp, level, event name, and sanitized data object. Logs must not contain Commander passwords, connector tokens, session cookies, or service-role keys.
+
+## Local Control Scaffold
+
+`storepulse-service-control.ps1` provides local commands only:
+
+- `Status`: print the heartbeat/status JSON.
+- `Stop`: create the stop file.
+- `Validate`: run host Validate mode.
+- `RunForeground`: run host Run mode in the current console.
+
+It does not register or control a Windows Service in this checkpoint.
+
+## Future Windows Service Wrapper
+
+A future phase should wrap `storepulse-service-host.ps1 -Mode Run` in a real Windows Service with a recovery policy, service identity decision, Event Log integration, and a controlled installer/repair flow. This checkpoint intentionally stops before service registration.
+
 ## Logging
 
 Machine logs are written under:

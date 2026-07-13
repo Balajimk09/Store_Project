@@ -24,7 +24,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-$ScriptVersion = "2.0.0"
+$ScriptVersion = "2.0.1"
 $ScriptDirectory = Split-Path -Parent $MyInvocation.MyCommand.Path
 if ([string]::IsNullOrWhiteSpace($EnvPath)) {
     $EnvPath = Join-Path $ScriptDirectory ".env"
@@ -130,7 +130,7 @@ function Get-PropertyValue {
     if ($null -eq $Object) { return $DefaultValue }
     $property = $Object.PSObject.Properties[$Name]
     if ($null -eq $property) { return $DefaultValue }
-    return $property.Value
+    return ,$property.Value
 }
 
 function Assert-FinalizedBusinessDayRecords {

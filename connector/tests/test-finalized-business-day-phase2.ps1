@@ -299,6 +299,43 @@ try {
     . $uploaderPath -JsonPath $dummyJson -XmlPath $dummyXml -SourceStoreNumber "SYNTH" -BusinessDate "2026-01-05" -PeriodNumber "123" -SourcePeriodLabel "2026-01-06.123" -PeriodOpen "2026-01-05T22:00:00-05:00" -PeriodClose "2026-01-06T00:30:00-05:00" -DryRun
     [Environment]::SetEnvironmentVariable("STOREPULSE_PHASE2_DOT_SOURCE_ONLY", $previousDotSource, "Process")
 
+    $singleArrayHolder = [PSCustomObject]@{
+        values = [object[]]@(
+            [PSCustomObject]@{
+                id = "single"
+            }
+        )
+    }
+
+    $singleArrayValue = Get-PropertyValue `
+        -Object $singleArrayHolder `
+        -Name "values"
+
+    Assert-True `
+        -Condition ($singleArrayValue -is [array]) `
+        -Message "single-element property array remains an array"
+
+    Assert-Equal `
+        -Actual (@($singleArrayValue).Count) `
+        -Expected 1 `
+        -Message "single-element property array retains one element"
+
+    $emptyArrayHolder = [PSCustomObject]@{
+        values = [object[]]@()
+    }
+
+    $emptyArrayValue = Get-PropertyValue `
+        -Object $emptyArrayHolder `
+        -Name "values"
+
+    Assert-True `
+        -Condition ($emptyArrayValue -is [array]) `
+        -Message "empty property array remains an array"
+
+    Assert-Equal `
+        -Actual (@($emptyArrayValue).Count) `
+        -Expected 0 `
+        -Message "empty property array retains zero elements"
     $periodList = [xml]'<periodList><period period="1" filename="2026-01-06.1" /><period period="2" filename="current.2" current="true" /><period period="2" filename="bad-name" /><period period="2" filename="2026-01-05.122" /><period period="2" filename="2026-01-06.123" /></periodList>'
     $candidates = Get-ClosedDayCandidates -PeriodListXml $periodList
     Assert-Equal -Actual $candidates.Count -Expected 2 -Message "only closed Day filename candidates accepted"

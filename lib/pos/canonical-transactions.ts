@@ -6,6 +6,37 @@ export const CANONICAL_CHILD_ROW_PAGE_SIZE = 1000;
 
 export type CanonicalTransactionSource = 'canonical' | 'legacy' | 'legacy-fallback';
 
+export const CANONICAL_RECORD_LIFECYCLES = ['provisional', 'final', 'superseded'] as const;
+export type CanonicalRecordLifecycle = (typeof CANONICAL_RECORD_LIFECYCLES)[number];
+
+export const POS_BUSINESS_DAY_FINALIZATION_STATUSES = [
+  'uploading',
+  'uploaded',
+  'reconciling',
+  'finalized',
+  'failed',
+] as const;
+export type PosBusinessDayFinalizationStatus = (typeof POS_BUSINESS_DAY_FINALIZATION_STATUSES)[number];
+
+export const CANONICAL_CASH_EVENT_TYPES = [
+  'cashback',
+  'paid_out',
+  'safe_drop',
+  'lottery_payout',
+  'cash_refund',
+  'cash_in',
+  'drawer_adjustment',
+  'other_cash_adjustment',
+  'unknown_cash_event',
+] as const;
+export type CanonicalCashEventType = (typeof CANONICAL_CASH_EVENT_TYPES)[number];
+
+export const CANONICAL_CASH_EVENT_DIRECTIONS = ['in', 'out'] as const;
+export type CanonicalCashEventDirection = (typeof CANONICAL_CASH_EVENT_DIRECTIONS)[number];
+
+export const CANONICAL_CASH_EVENT_ORIGINS = ['generated', 'manual'] as const;
+export type CanonicalCashEventOrigin = (typeof CANONICAL_CASH_EVENT_ORIGINS)[number];
+
 export interface CanonicalPosTransactionHeader {
   id: string;
   store_id: string;
@@ -13,6 +44,13 @@ export interface CanonicalPosTransactionHeader {
   source_system: string;
   source_unique_id: string;
   canonical_record: boolean;
+  record_lifecycle?: CanonicalRecordLifecycle;
+  is_active?: boolean;
+  finalization_id?: string | null;
+  final_import_id?: string | null;
+  superseded_by_finalization_id?: string | null;
+  superseded_at?: string | null;
+  superseded_reason?: string | null;
   store_number: string | null;
   transaction_time: string;
   business_date: string | null;
@@ -94,6 +132,29 @@ export interface CanonicalPosTransactionPayment {
   updated_at: string;
 }
 
+export interface CanonicalPosTransactionCashEvent {
+  id: string;
+  store_id: string;
+  owner_id: string;
+  transaction_id: string;
+  payment_id: string | null;
+  event_origin: CanonicalCashEventOrigin;
+  event_number: number;
+  source_system: string;
+  source_event_type: string | null;
+  cash_event_type: CanonicalCashEventType;
+  direction: CanonicalCashEventDirection;
+  amount: number;
+  signed_amount: number;
+  affects_sales: boolean;
+  affects_drawer_cash: boolean;
+  affects_tender_mix: boolean;
+  requires_review: boolean;
+  metadata: Record<string, unknown> | null;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface CanonicalPosTransactionRelationship {
   id: string;
   transaction_id: string;
@@ -109,6 +170,7 @@ export interface CanonicalTransactionTicket {
   header: CanonicalPosTransactionHeader;
   lines: CanonicalPosTransactionLine[];
   payments: CanonicalPosTransactionPayment[];
+  cashEvents?: CanonicalPosTransactionCashEvent[];
   relationships: CanonicalPosTransactionRelationship[];
 }
 
@@ -134,9 +196,20 @@ export interface CanonicalTransactionPageResult {
 }
 
 export interface CanonicalCashEventSummary {
-  eventType: 'paid_out' | 'safe_drop' | 'no_sale';
+  eventType: CanonicalCashEventType | 'no_sale';
   label: string;
   amount: number;
+}
+
+export interface PosBusinessDayFinalizationResult {
+  finalizationId: string;
+  status: PosBusinessDayFinalizationStatus;
+  alreadyFinalized: boolean;
+  insertedCount: number;
+  updatedCount: number;
+  unchangedCount: number;
+  supersededRecordCount: number;
+  finalRecordCount: number;
 }
 
 type RawRecord = Record<string, unknown>;
@@ -607,7 +680,8 @@ export async function fetchCanonicalAvailability(client: SupabaseClient, storeId
     .from('pos_transactions')
     .select('id', { count: 'exact', head: true })
     .eq('store_id', storeId)
-    .eq('canonical_record', true);
+    .eq('canonical_record', true)
+    .eq('is_active', true);
   if (error) throw error;
   return (count ?? 0) > 0;
 }
@@ -634,6 +708,7 @@ export async function fetchCanonicalTransactionPage(
     .select(HEADER_SELECT, { count: 'exact' })
     .eq('store_id', params.storeId)
     .eq('canonical_record', true)
+    .eq('is_active', true)
     .order('transaction_time', { ascending: false })
     .range(from, to);
 

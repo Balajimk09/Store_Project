@@ -499,7 +499,7 @@ function CanonicalSummaryCards({ summary }: { summary: CanonicalReportSummary })
           label="Average Ticket"
           value={formatCurrency(summary.averageTicket)}
           icon={TrendingUp}
-          description="Net sales per completed sale"
+          description="Gross sales per completed sale"
         />
         <MetricCard
           label="Total POS Events"

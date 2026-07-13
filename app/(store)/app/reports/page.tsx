@@ -39,17 +39,18 @@ import {
   YAxis,
 } from 'recharts';
 import { cn } from '@/lib/utils';
+import type { CanonicalReportSourceMode, CanonicalReportSummary } from '@/lib/pos/canonical-reports';
+import { useCanonicalReports } from '@/lib/pos/use-canonical-reports';
+import {
+  getPresetBusinessDateRange,
+  isValidBusinessDateRange,
+  type ReportDatePreset,
+} from '@/lib/pos/report-date-range';
+import { resolveSafeTimeZone } from '@/lib/pos/canonical-transactions';
 
 type ReportTab = 'dayClose' | 'merchandise' | 'fuel' | 'payments' | 'cashiers';
 
-type DatePreset =
-  | 'today'
-  | 'yesterday'
-  | 'thisMonth'
-  | 'thisQuarter'
-  | 'thisYear'
-  | 'tillDate'
-  | 'custom';
+type DatePreset = ReportDatePreset;
 
 type CashierDetailFilter =
   | 'all'
@@ -154,65 +155,6 @@ function normalizedReason(value: string | undefined | null) {
     .replaceAll(' ', '_')
     .replaceAll('-', '_')
     .trim();
-}
-
-function toDateInputValue(date: Date) {
-  const year = date.getFullYear();
-  const month = String(date.getMonth() + 1).padStart(2, '0');
-  const day = String(date.getDate()).padStart(2, '0');
-
-  return `${year}-${month}-${day}`;
-}
-
-function getPresetRange(preset: DatePreset, minDate: string, maxDate: string) {
-  const realToday = toDateInputValue(new Date());
-  const anchorDate = maxDate && maxDate < realToday ? maxDate : realToday;
-  const anchor = parseLocalDate(anchorDate);
-
-  if (preset === 'today') {
-    return { start: anchorDate, end: anchorDate };
-  }
-
-  if (preset === 'yesterday') {
-    const yesterday = new Date(anchor);
-    yesterday.setDate(yesterday.getDate() - 1);
-    const value = toDateInputValue(yesterday);
-
-    return { start: value, end: value };
-  }
-
-  if (preset === 'thisMonth') {
-    const start = new Date(anchor.getFullYear(), anchor.getMonth(), 1);
-
-    return {
-      start: toDateInputValue(start),
-      end: anchorDate,
-    };
-  }
-
-  if (preset === 'thisQuarter') {
-    const currentQuarter = Math.floor(anchor.getMonth() / 3);
-    const start = new Date(anchor.getFullYear(), currentQuarter * 3, 1);
-
-    return {
-      start: toDateInputValue(start),
-      end: anchorDate,
-    };
-  }
-
-  if (preset === 'thisYear') {
-    const start = new Date(anchor.getFullYear(), 0, 1);
-
-    return {
-      start: toDateInputValue(start),
-      end: anchorDate,
-    };
-  }
-
-  return {
-    start: minDate,
-    end: anchorDate,
-  };
 }
 
 function getPaymentReportName(transaction: Transaction) {
@@ -447,6 +389,192 @@ function EmptyState({
   );
 }
 
+function SourceBadge({
+  sourceMode,
+  sourceLabel,
+}: {
+  sourceMode: CanonicalReportSourceMode;
+  sourceLabel: string;
+}) {
+  return (
+    <span
+      className={cn(
+        'inline-flex w-fit items-center rounded-full px-2.5 py-1 text-xs font-semibold',
+        sourceMode === 'canonical' && 'bg-success/10 text-success',
+        sourceMode === 'legacy' && 'bg-secondary text-muted-foreground',
+        sourceMode === 'coverage_conflict' && 'bg-amber-100 text-amber-900',
+        sourceMode === 'unavailable' && 'bg-secondary text-muted-foreground'
+      )}
+    >
+      {sourceLabel}
+    </span>
+  );
+}
+
+function MetricCard({
+  label,
+  value,
+  icon: Icon,
+  tone = 'primary',
+  description,
+}: {
+  label: string;
+  value: string;
+  icon: ElementType;
+  tone?: 'primary' | 'success' | 'warning' | 'muted' | 'destructive';
+  description?: string;
+}) {
+  const toneClass = {
+    primary: 'bg-primary/10 text-primary',
+    success: 'bg-success/10 text-success',
+    warning: 'bg-amber-100 text-amber-900',
+    muted: 'bg-secondary text-muted-foreground',
+    destructive: 'bg-destructive/10 text-destructive',
+  }[tone];
+
+  return (
+    <Card className="p-5">
+      <div className={cn('flex h-10 w-10 items-center justify-center rounded-xl', toneClass)}>
+        <Icon className="h-5 w-5" />
+      </div>
+      <p className="mt-3 text-2xl font-bold text-foreground">{value}</p>
+      <p className="text-xs text-muted-foreground">{label}</p>
+      {description && <p className="mt-2 text-xs text-muted-foreground">{description}</p>}
+    </Card>
+  );
+}
+
+function CanonicalSummaryLoading() {
+  return (
+    <div className="mb-5 grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+      {Array.from({ length: 8 }).map((_, index) => (
+        <Card key={index} className="p-5">
+          <div className="h-10 w-10 animate-pulse rounded-xl bg-secondary" />
+          <div className="mt-4 h-7 w-28 animate-pulse rounded bg-secondary" />
+          <div className="mt-3 h-3 w-36 animate-pulse rounded bg-secondary" />
+        </Card>
+      ))}
+    </div>
+  );
+}
+
+function CanonicalSummaryCards({ summary }: { summary: CanonicalReportSummary }) {
+  return (
+    <div className="space-y-5">
+      <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+        <MetricCard
+          label="Gross Sales"
+          value={formatCurrency(summary.grossSales)}
+          icon={TrendingUp}
+          description="Completed sales only"
+        />
+        <MetricCard
+          label="Refunds"
+          value={formatCurrency(summary.refundAmount, { compact: true })}
+          icon={Receipt}
+          tone="destructive"
+          description={`${formatNumber(summary.refundCount)} refund tickets`}
+        />
+        <MetricCard
+          label="Net Sales"
+          value={formatCurrency(summary.netSales)}
+          icon={ShoppingBasket}
+          tone="success"
+          description="Gross sales minus refunds"
+        />
+        <MetricCard
+          label="Net Tax"
+          value={formatCurrency(summary.netTax, { compact: true })}
+          icon={Receipt}
+          tone="muted"
+          description="Sales and refund tax only"
+        />
+        <MetricCard
+          label="Completed Sales"
+          value={formatNumber(summary.completedSaleCount)}
+          icon={Receipt}
+          description="One POS ticket per sale"
+        />
+        <MetricCard
+          label="Average Ticket"
+          value={formatCurrency(summary.averageTicket)}
+          icon={TrendingUp}
+          description="Net sales per completed sale"
+        />
+        <MetricCard
+          label="Total POS Events"
+          value={formatNumber(summary.totalHeaderCount)}
+          icon={CalendarDays}
+          tone="muted"
+          description="Includes non-sales events"
+        />
+        <MetricCard
+          label="Unclassified Events"
+          value={formatNumber(summary.unclassifiedEventCount)}
+          icon={CircleAlert}
+          tone="warning"
+          description="Review required, no sales impact"
+        />
+      </div>
+
+      <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+        <MetricCard
+          label="Paid Out"
+          value={`${formatNumber(summary.paidOutCount)} · ${formatCurrency(summary.paidOutAmount)}`}
+          icon={Receipt}
+          tone="warning"
+          description="Cash Management · not sales"
+        />
+        <MetricCard
+          label="Safe Drop"
+          value={`${formatNumber(summary.safeDropCount)} · ${formatCurrency(summary.safeDropAmount)}`}
+          icon={Download}
+          tone="muted"
+          description="Cash Management · not sales"
+        />
+        <MetricCard
+          label="No Sale"
+          value={formatNumber(summary.noSaleCount)}
+          icon={UserRound}
+          tone="warning"
+          description="Cashier Exception · no sales impact"
+        />
+        <MetricCard
+          label="Canonical Status"
+          value={summary.totalHeaderCount === 0 ? 'No events' : 'Loaded'}
+          icon={CalendarDays}
+          tone={summary.totalHeaderCount === 0 ? 'muted' : 'success'}
+          description={
+            summary.totalHeaderCount === 0
+              ? 'No canonical POS activity was recorded for this range'
+              : 'Canonical POS totals loaded for this business-date range'
+          }
+        />
+      </div>
+    </div>
+  );
+}
+
+function CanonicalPhaseNotice({ activeTab }: { activeTab: ReportTab }) {
+  return (
+    <Card className="p-6">
+      <div className="flex items-start gap-3">
+        <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-primary/10 text-primary">
+          <CalendarDays className="h-5 w-5" />
+        </div>
+        <div>
+          <h2 className="font-semibold text-foreground">
+            {activeTab === 'dayClose' ? 'Canonical Day Close summary connected' : 'Canonical detail report coming next'}
+          </h2>
+          <p className="mt-1 text-sm text-muted-foreground">
+            Detailed canonical merchandise, fuel, payment, and cashier reports are being connected in the next reporting phase.
+          </p>
+        </div>
+      </div>
+    </Card>
+  );
+}
+
 function PieLegend({
   data,
   formatter,
@@ -488,8 +616,9 @@ export default function ReportsPage() {
     dataMode,
     isDemo,
   } = useStoreData();
-  const { user, activeStoreId, storeScope } = useAuth();
+  const { user, activeStore, activeStoreId, storeScope } = useAuth();
   const showAllStoresReportsMessage = Boolean(user && (storeScope === 'all' || !activeStoreId));
+  const timeZone = resolveSafeTimeZone(activeStore?.timezone);
 
   const [activeTab, setActiveTab] = useState<ReportTab>('dayClose');
   const [selectedCashierId, setSelectedCashierId] = useState<string | null>(null);
@@ -508,13 +637,55 @@ export default function ReportsPage() {
     };
   }, [transactions]);
 
-  const presetRange = useMemo(
-    () => getPresetRange(datePreset, allDates.min, allDates.max),
-    [datePreset, allDates.min, allDates.max]
+  const storeLocalPresetRange = useMemo(
+    () => getPresetBusinessDateRange(datePreset, {
+      minDate: allDates.min,
+      timeZone,
+    }),
+    [datePreset, allDates.min, timeZone]
   );
 
-  const effectiveStart = datePreset === 'custom' ? customStartDate : presetRange.start;
-  const effectiveEnd = datePreset === 'custom' ? customEndDate : presetRange.end;
+  const requestedStart = datePreset === 'custom' ? customStartDate : storeLocalPresetRange.start;
+  const requestedEnd = datePreset === 'custom' ? customEndDate : storeLocalPresetRange.end;
+  const requestedDateRangeValid = isValidBusinessDateRange(requestedStart, requestedEnd);
+  const canonicalReports = useCanonicalReports({
+    storeId: activeStoreId,
+    enabled: Boolean(user && activeStoreId && storeScope === 'single'),
+    startBusinessDate: requestedStart,
+    endBusinessDate: requestedEnd,
+    validDateRange: requestedDateRangeValid,
+  });
+  const sourceMode = canonicalReports.sourceMode;
+  const isCanonicalMode = sourceMode === 'canonical';
+  const isLegacyMode = sourceMode === 'legacy';
+  const isCoverageConflict = sourceMode === 'coverage_conflict';
+  const isReportUnavailable = sourceMode === 'unavailable';
+  const showLegacyLimitationNote = isLegacyMode;
+  const useLegacyPresetAnchor = Boolean(
+    datePreset !== 'custom' &&
+      canonicalReports.coverage &&
+      !canonicalReports.coverage.hasData &&
+      allDates.max
+  );
+  const legacyAnchoredPresetRange = useMemo(
+    () => getPresetBusinessDateRange(datePreset, {
+      anchorDate: allDates.max,
+      minDate: allDates.min,
+      timeZone,
+    }),
+    [datePreset, allDates.max, allDates.min, timeZone]
+  );
+  const effectiveStart = datePreset === 'custom'
+    ? customStartDate
+    : useLegacyPresetAnchor
+      ? legacyAnchoredPresetRange.start
+      : storeLocalPresetRange.start;
+  const effectiveEnd = datePreset === 'custom'
+    ? customEndDate
+    : useLegacyPresetAnchor
+      ? legacyAnchoredPresetRange.end
+      : storeLocalPresetRange.end;
+  const validDateRange = isValidBusinessDateRange(effectiveStart, effectiveEnd);
 
   const filteredTransactions = useMemo(() => {
     return transactions.filter((transaction) =>
@@ -937,10 +1108,16 @@ export default function ReportsPage() {
         description="Review day close, merchandise, fuel, payments, cashier activity, and exceptions."
       >
         <div className="flex flex-wrap items-center gap-2">
-          <Button variant="outline" size="sm" onClick={handleExport}>
-            <Upload className="mr-2 h-4 w-4" />
-            Export CSV
-          </Button>
+          {isLegacyMode && (
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={handleExport}
+            >
+              <Upload className="mr-2 h-4 w-4" />
+              Export CSV
+            </Button>
+          )}
           <Button asChild variant="outline" size="sm">
             <Link href="/app/reports/pos-import">
               <Download className="mr-2 h-4 w-4" />
@@ -964,7 +1141,7 @@ export default function ReportsPage() {
         </Card>
       )}
 
-      {cloudError && (
+      {cloudError && isLegacyMode && (
         <div className="mb-5 flex items-start gap-3 rounded-lg border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive">
           <CircleAlert className="mt-0.5 h-4 w-4 shrink-0" />
           <span>{cloudError}</span>
@@ -974,13 +1151,52 @@ export default function ReportsPage() {
       <Card className="mb-5 p-4">
         <div className="flex flex-col gap-4 xl:flex-row xl:items-center xl:justify-between">
           <div>
-            <h2 className="font-semibold text-foreground">Report Range</h2>
+            <div className="flex flex-wrap items-center gap-2">
+              <h2 className="font-semibold text-foreground">Report Range</h2>
+              <SourceBadge
+                sourceMode={sourceMode}
+                sourceLabel={showAllStoresReportsMessage ? 'No Store Selected' : canonicalReports.sourceLabel}
+              />
+            </div>
+            {canonicalReports.canonicalStartDate && (
+              <p className="mt-1 text-xs text-muted-foreground">
+                Canonical coverage began {formatReportDate(canonicalReports.canonicalStartDate)}
+                {canonicalReports.canonicalLastObservedDate
+                  ? ` · Last observed ${formatReportDate(canonicalReports.canonicalLastObservedDate)}`
+                  : ''}
+              </p>
+            )}
             <p className="mt-1 text-sm text-muted-foreground">
               {effectiveStart && effectiveEnd
                 ? `${formatReportDate(effectiveStart)} to ${formatReportDate(effectiveEnd)}`
                 : 'All available transactions'}
               {isDemo ? ' · Demo data' : dataMode === 'cloud' ? ' · Store data' : ''}
             </p>
+            {showLegacyLimitationNote && (
+              <p className="mt-1 text-xs text-muted-foreground">
+                Legacy reports may be limited by the currently loaded historical records.
+              </p>
+            )}
+            {isCanonicalMode && (
+              <p className="mt-1 text-xs text-muted-foreground">
+                Canonical totals use POS business dates from verified transaction headers. Last observed is the latest POS business date seen, not a finalized close.
+              </p>
+            )}
+            {isCanonicalMode && (
+              <p className="mt-1 text-xs text-muted-foreground">
+                Canonical report export is coming in a later phase. Detailed tabs are intentionally guarded for now.
+              </p>
+            )}
+            {activeStore && timeZone === 'UTC' && activeStore.timezone !== 'UTC' && (
+              <p className="mt-1 text-xs text-muted-foreground">
+                Store timezone is missing or invalid, so report date presets are using UTC.
+              </p>
+            )}
+            {!validDateRange && (
+              <p className="mt-1 text-xs font-medium text-destructive">
+                Select a valid date range with the start date on or before the end date.
+              </p>
+            )}
           </div>
 
           <div className="grid gap-3 sm:grid-cols-[220px_1fr_1fr_auto]">
@@ -1006,8 +1222,7 @@ export default function ReportsPage() {
               <Input
                 type="date"
                 value={datePreset === 'custom' ? customStartDate : effectiveStart}
-                min={allDates.min}
-                max={allDates.max || undefined}
+                min={isLegacyMode ? allDates.min : undefined}
                 disabled={datePreset !== 'custom'}
                 onChange={(event) => setCustomStartDate(event.target.value)}
               />
@@ -1018,8 +1233,7 @@ export default function ReportsPage() {
               <Input
                 type="date"
                 value={datePreset === 'custom' ? customEndDate : effectiveEnd}
-                min={allDates.min}
-                max={allDates.max || undefined}
+                min={datePreset === 'custom' ? customStartDate || undefined : undefined}
                 disabled={datePreset !== 'custom'}
                 onChange={(event) => setCustomEndDate(event.target.value)}
               />
@@ -1035,7 +1249,99 @@ export default function ReportsPage() {
         </div>
       </Card>
 
-      {showAllStoresReportsMessage ? null : filteredTransactions.length === 0 ? (
+      {showAllStoresReportsMessage ? null : !validDateRange ? (
+        <EmptyState
+          title="Invalid report range"
+          description="Select a start date that is on or before the end date."
+        />
+      ) : canonicalReports.loadingCoverage ? (
+        <Card className="p-6">
+          <div className="flex items-center gap-3 text-sm text-muted-foreground">
+            <RefreshCw className="h-4 w-4 animate-spin" />
+            Checking report source for the selected store...
+          </div>
+        </Card>
+      ) : canonicalReports.error ? (
+        <Card className="border-destructive/30 bg-destructive/10 p-5 text-destructive">
+          <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+            <div className="flex items-start gap-3">
+              <CircleAlert className="mt-0.5 h-4 w-4 shrink-0" />
+              <div>
+                <h2 className="font-semibold">Canonical reporting could not be loaded</h2>
+                <p className="mt-1 text-sm">{canonicalReports.error}</p>
+              </div>
+            </div>
+            <Button variant="outline" size="sm" onClick={canonicalReports.refresh}>
+              <RefreshCw className="mr-2 h-4 w-4" />
+              Retry
+            </Button>
+          </div>
+        </Card>
+      ) : isCoverageConflict ? (
+        <Card className="border-amber-200 bg-amber-50 p-5 text-amber-950">
+          <div className="flex items-start gap-3">
+            <CircleAlert className="mt-0.5 h-4 w-4 shrink-0 text-amber-700" />
+            <div>
+              <h2 className="font-semibold">Selected range spans two reporting sources</h2>
+              <p className="mt-1 text-sm text-amber-900">
+                This range crosses the available reporting source boundary. Canonical POS reporting begins {canonicalReports.canonicalStartDate
+                  ? formatReportDate(canonicalReports.canonicalStartDate)
+                  : 'for this store'}
+                {canonicalReports.canonicalLastObservedDate
+                  ? ` and is currently observed through ${formatReportDate(canonicalReports.canonicalLastObservedDate)}`
+                  : ''}
+                . Choose a range entirely inside one source period before viewing totals.
+              </p>
+            </div>
+          </div>
+        </Card>
+      ) : isReportUnavailable ? (
+        <EmptyState
+          title="Reporting unavailable for this range"
+          description="The selected business-date range is not fully covered by canonical POS data and cannot be safely answered from legacy reports without mixing sources."
+        />
+      ) : isCanonicalMode ? (
+        <>
+          {canonicalReports.loadingSummary || !canonicalReports.summary ? (
+            <CanonicalSummaryLoading />
+          ) : (
+            <CanonicalSummaryCards summary={canonicalReports.summary} />
+          )}
+
+          {canonicalReports.summary?.totalHeaderCount === 0 && !canonicalReports.loadingSummary && (
+            <Card className="my-5 border-dashed p-5 text-sm text-muted-foreground">
+              No canonical POS events were found for this business-date range. This remains Canonical POS mode; legacy data is not mixed in.
+            </Card>
+          )}
+
+          <Card className="mb-5 mt-5 p-2">
+            <div className="grid gap-2 md:grid-cols-5">
+              {tabs.map((tab) => {
+                const Icon = tab.icon;
+                const active = activeTab === tab.key;
+
+                return (
+                  <button
+                    key={tab.key}
+                    onClick={() => setActiveTab(tab.key)}
+                    className={cn(
+                      'flex items-center justify-center gap-2 rounded-lg px-4 py-3 text-sm font-semibold transition-colors',
+                      active
+                        ? 'bg-primary text-primary-foreground'
+                        : 'text-muted-foreground hover:bg-secondary hover:text-foreground'
+                    )}
+                  >
+                    <Icon className="h-4 w-4" />
+                    {tab.label}
+                  </button>
+                );
+              })}
+            </div>
+          </Card>
+
+          <CanonicalPhaseNotice activeTab={activeTab} />
+        </>
+      ) : filteredTransactions.length === 0 ? (
         <EmptyState
           title="No transactions found"
           description="Try changing the date range or upload transaction data first."
@@ -1584,7 +1890,7 @@ export default function ReportsPage() {
         </>
       )}
 
-      {selectedCashier && (
+      {selectedCashier && isLegacyMode && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-background/80 p-4 backdrop-blur-sm">
           <Card className="max-h-[92vh] w-full max-w-6xl overflow-hidden">
             <div className="flex items-start justify-between border-b border-border p-5">

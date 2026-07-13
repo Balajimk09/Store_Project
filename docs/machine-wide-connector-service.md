@@ -1,6 +1,6 @@
 # StorePulse Machine-Wide Connector Service
 
-Phase 3 creates the foundation for a machine-wide Windows connector that can later run as LocalSystem or a dedicated service identity. This checkpoint does not install or register a Windows service.
+Phase 3 creates the foundation for a machine-wide Windows connector that can later run as LocalSystem or a dedicated service identity. Checkpoint 4 adds the offline/testable Windows Service installation layer, but the repository task does not install or register the service on any machine.
 
 ## Target Architecture
 
@@ -65,15 +65,24 @@ Values are protected with Windows DPAPI LocalMachine scope so they are not tied 
 
 ## LocalSystem Service Model
 
-The future service should run as LocalSystem or a dedicated service identity. It must not depend on `%USERPROFILE%`, employee credential stores, or user-specific scheduled tasks. Commander credentials and StorePulse tokens are read from machine secrets at runtime.
+The Windows Service is named `StorePulseConnector` with display name `StorePulse Connector Service`. It is designed to run as LocalSystem, start automatically, and use delayed automatic start where Windows supports it. It must not depend on `%USERPROFILE%`, employee credential stores, or user-specific scheduled tasks. Commander credentials and StorePulse tokens are read from machine secrets at runtime.
 
-This checkpoint intentionally does not:
+The configured service command launches:
+
+```text
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "C:\Program Files\StorePulse\Connector\service\storepulse-service-entrypoint.ps1"
+```
+
+The command line contains no connector token, Commander password, cookie, or service-role credential.
+
+This repository checkpoint intentionally does not:
 
 - create a service account
-- register a service
 - register a scheduled task
 - modify existing scheduled tasks
 - request employee Windows passwords
+
+Service registration is available only through the installer/control scripts when an administrator explicitly runs them outside tests.
 
 ## Workers
 
@@ -177,18 +186,32 @@ Each event includes a timestamp, level, event name, and sanitized data object. L
 
 `storepulse-service-control.ps1` provides local commands only:
 
+- `InstallStatus`: report whether the Windows Service registration exists.
 - `Status`: print the heartbeat/status JSON.
-- `Stop`: create the stop file.
+- `Start`: request Windows Service start.
+- `Stop`: create the stop file and, for service control flows, request service stop through the service helper.
+- `Restart`: request Windows Service restart.
 - `Validate`: run host Validate mode.
 - `RunForeground`: run host Run mode in the current console.
 
-It does not register or control a Windows Service in this checkpoint.
+It does not expose secrets and combines the Windows Service state with the runtime heartbeat where available.
 
-## Future Windows Service Wrapper
+## Windows Service Wrapper
 
-A future phase should wrap `storepulse-service-host.ps1 -Mode Run` in a real Windows Service with a recovery policy, service identity decision, Event Log integration, and a controlled installer/repair flow. This checkpoint intentionally stops before service registration.
+`storepulse-windows-service.ps1` is safe to dot-source and provides reusable functions for service install, status, start, stop, restart, removal, and recovery policy configuration. The recovery policy is:
 
-The installer scaffold does not install Node globally. Production packaging should either bundle a vetted Node runtime with the connector or provision a supported Node runtime through a managed installation step before service registration.
+- first failure: restart after 1 minute
+- second failure: restart after 5 minutes
+- subsequent failures: restart after 15 minutes
+- reset failure count after 1 day
+
+The helper uses explicit path quoting and rejects service entrypoints outside the expected install root.
+
+The installer does not install Node globally. Production packaging should bundle a vetted private Node runtime under:
+
+```text
+C:\Program Files\StorePulse\Connector\runtime\node
+```
 
 ## Logging
 
@@ -208,7 +231,7 @@ Logs must not include:
 
 ## Upgrades
 
-Upgrade should copy new connector binaries into Program Files while preserving ProgramData. Config, secrets, logs, working data, and archives are durable machine state and must survive binary replacement.
+Upgrade stops `StorePulseConnector`, backs up the existing Program Files connector tree, replaces binaries, restores the previous binaries on copy/registration failure, and restarts the service after a successful upgrade. ProgramData config, secrets, logs, working data, archives, and state are durable machine state and must survive binary replacement.
 
 ## Repair
 
@@ -218,12 +241,16 @@ Repair should validate:
 - `config.json` contains no secrets
 - `secrets.json` contains encrypted required values
 - logs, working, and archive directories exist or can be created
+- `StorePulseConnector` service registration exists and points to the Program Files entrypoint
+- the private Node runtime path exists or is prepared by the installer packaging
 
 Repair should not reset secrets unless an administrator explicitly performs secret rotation.
 
 ## Uninstall
 
-This checkpoint's uninstall scaffold removes installed binaries only. It preserves ProgramData config, secrets, logs, working data, and archives. A future purge flag may be added, but it must be explicit and visibly destructive.
+Uninstall stops and removes `StorePulseConnector`, then removes installed binaries. It preserves ProgramData config, secrets, logs, working data, archives, and state by default. `-PurgeData` is explicit, high-impact, and requires confirmation before ProgramData is removed.
+
+If any removal step fails, the administrator should stop and inspect the printed path/service state before retrying. ProgramData should not be manually deleted unless the store is intentionally decommissioned and audit evidence has been retained elsewhere.
 
 ## Security Boundaries
 
@@ -232,6 +259,22 @@ This checkpoint's uninstall scaffold removes installed binaries only. It preserv
 - DPAPI LocalMachine protects secrets for machine service use.
 - ProgramData ACLs should restrict `secrets.json` to SYSTEM and Administrators.
 - The service host does not perform database schema changes or Edge Function deployments.
+- The service installer never requests an employee Windows password.
+- The service command line is built only from Program Files paths and never includes store tokens or Commander credentials.
+- ProgramData is preserved across upgrades and uninstall unless `-PurgeData` is explicitly confirmed.
+
+## Pilot Installation Checklist
+
+1. Build or copy the connector package with a private Node runtime under `runtime\node`.
+2. Run installer `-ValidateOnly` and confirm the manifest, service command, Program Files path, and ProgramData path.
+3. Install on a non-production pilot machine using `-Install` from elevated PowerShell.
+4. Create `config.json` under ProgramData without secrets.
+5. Write DPAPI LocalMachine `secrets.json`.
+6. Run `storepulse-service-control.ps1 -Command Validate`.
+7. Run `RunForeground` against test endpoints and synthetic connector data.
+8. Start the Windows Service only after Validate/RunForeground results are clean.
+9. Monitor `runtime-status.json` and JSONL logs.
+10. Keep the legacy user-specific task disabled only after the service has proven stable for the pilot.
 
 ## Migration From User-Specific Prototype
 

@@ -120,6 +120,7 @@ try {
     . (Join-Path $serviceRoot "storepulse-machine-config.ps1")
     . (Join-Path $serviceRoot "storepulse-machine-secrets.ps1")
     . (Join-Path $serviceRoot "storepulse-service-runtime.ps1")
+    . (Join-Path $serviceRoot "storepulse-windows-service.ps1")
 
     [Environment]::SetEnvironmentVariable("STOREPULSE_PROGRAMDATA_ROOT", (Join-Path $tempRoot "ProgramData"), "Process")
     [Environment]::SetEnvironmentVariable("STOREPULSE_INSTALL_ROOT", (Join-Path $tempRoot "ProgramFiles\StorePulse\Connector"), "Process")
@@ -132,6 +133,13 @@ try {
     Assert-Equal -Actual (Get-StorePulseWorkingRoot) -Expected (Join-Path (Join-Path $tempRoot "ProgramData") "working") -Message "working path default"
     Assert-Equal -Actual (Get-StorePulseArchiveRoot) -Expected (Join-Path (Join-Path $tempRoot "ProgramData") "archive") -Message "archive path default"
 
+    $manifestPath = Join-Path $serviceRoot "install-manifest.json"
+    $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+    Assert-Equal -Actual $manifest.service_name -Expected "StorePulseConnector" -Message "manifest service name"
+    Assert-Equal -Actual $manifest.service_display_name -Expected "StorePulse Connector Service" -Message "manifest display name"
+    Assert-True -Condition (($manifest.required_files -contains "service\storepulse-windows-service.ps1") -and ($manifest.required_files -contains "service\storepulse-service-entrypoint.ps1")) -Message "manifest includes service files"
+    Assert-Equal -Actual $manifest.bundled_node_runtime_relative_path -Expected "runtime\node" -Message "manifest declares private Node runtime path"
+
     $programDataRoot = Get-StorePulseProgramDataRoot
     $installRoot = Get-StorePulseInstallRoot
     New-Item -ItemType Directory -Path $programDataRoot -Force | Out-Null
@@ -140,6 +148,35 @@ try {
     foreach ($name in @("storepulse-connector.mjs", "storepulse-finalize-closed-day.ps1", "storepulse-normalize-transactions.ps1", "storepulse-upload-finalized-business-day.ps1")) {
         Set-Content -LiteralPath (Join-Path $installRoot $name) -Value "placeholder" -Encoding UTF8
     }
+
+    $serviceSubdir = Join-Path $installRoot "service"
+    New-Item -ItemType Directory -Path $serviceSubdir -Force | Out-Null
+    Set-Content -LiteralPath (Join-Path $serviceSubdir "storepulse-service-entrypoint.ps1") -Value "placeholder" -Encoding UTF8
+
+    $servicePlan = Install-StorePulseWindowsService -InstallRoot $installRoot -ValidateOnly
+    Assert-Equal -Actual $servicePlan.service_name -Expected "StorePulseConnector" -Message "service plan name"
+    Assert-Equal -Actual $servicePlan.display_name -Expected "StorePulse Connector Service" -Message "service plan display name"
+    Assert-Equal -Actual $servicePlan.account -Expected "LocalSystem" -Message "service plan LocalSystem account"
+    Assert-Equal -Actual $servicePlan.startup_type -Expected "Automatic" -Message "service plan automatic startup"
+    Assert-True -Condition ([bool]$servicePlan.delayed_auto_start) -Message "service plan delayed auto start"
+    Assert-True -Condition ($servicePlan.binary_path -match '"[^"]*powershell\.exe" -NoProfile -ExecutionPolicy Bypass -File "[^"]*storepulse-service-entrypoint\.ps1"') -Message "service binary path quotes executable and entrypoint"
+    Assert-True -Condition ($servicePlan.binary_path -notmatch "synthetic-token|synthetic-password|connector_token") -Message "service command line excludes secrets"
+    Assert-Throws -ScriptBlock { Assert-StorePulsePathUnderRoot -Path (Join-Path $tempRoot "outside\entrypoint.ps1") -Root $installRoot -Name "outside test" | Out-Null } -Message "service path outside install root rejected"
+
+    $global:CapturedServiceCommands = @()
+    $serviceExecutor = { param([string[]]$Arguments) $global:CapturedServiceCommands += ,($Arguments -join " "); return "mocked" }
+    Install-StorePulseWindowsService -InstallRoot $installRoot -Executor $serviceExecutor | Out-Null
+    Assert-True -Condition (($global:CapturedServiceCommands -join "`n") -match "create StorePulseConnector") -Message "install command creates expected service"
+    Assert-True -Condition (($global:CapturedServiceCommands -join "`n") -match "obj= LocalSystem") -Message "install command uses LocalSystem"
+    Assert-True -Condition (($global:CapturedServiceCommands -join "`n") -match "start= delayed-auto") -Message "install command requests delayed auto start"
+    Assert-True -Condition (($global:CapturedServiceCommands -join "`n") -match "restart/60000/restart/300000/restart/900000") -Message "recovery actions match required restart delays"
+    Assert-True -Condition (($global:CapturedServiceCommands -join "`n") -match "reset= 86400") -Message "recovery reset interval is one day"
+    Assert-True -Condition (($global:CapturedServiceCommands -join "`n") -notmatch "synthetic-token|synthetic-password") -Message "service command generation excludes secrets"
+
+    $global:ControlServiceState = [PSCustomObject]@{ Status = "Stopped" }
+    Assert-True -Condition (-not (Test-StorePulseServiceInstalled -GetService { param($Name) $null })) -Message "service installed test handles absent service"
+    Assert-True -Condition (Test-StorePulseServiceInstalled -GetService { param($Name) $global:ControlServiceState }) -Message "service installed test handles present service"
+    Assert-Equal -Actual (Get-StorePulseServiceStatus -GetService { param($Name) $global:ControlServiceState }).Status -Expected "Stopped" -Message "service status returns mocked state"
 
     $config = New-TestConfig -Root $programDataRoot -InstallRoot $installRoot
     Assert-True -Condition (Test-StorePulseMachineConfig -Config $config) -Message "valid config accepted"
@@ -392,17 +429,26 @@ writeFileSync(summaryPath, JSON.stringify({
 
     try {
         $installOutput = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $serviceRoot "install-storepulse-machine-connector.ps1") -ValidateOnly -WhatIf -SourceRoot (Join-Path $repoRoot "connector") -InstallRoot $installRoot -ProgramDataRoot $programDataRoot
-        Assert-True -Condition (($installOutput -join "`n") -match "ValidateOnly complete") -Message "installer WhatIf ValidateOnly succeeds when elevated"
+        Assert-True -Condition (($installOutput -join "`n") -match "ValidateOnly complete") -Message "installer WhatIf ValidateOnly succeeds"
+        Assert-True -Condition (($installOutput -join "`n") -match "Planned service command") -Message "installer WhatIf shows service command plan"
     }
     catch {
-        Assert-True -Condition ($_.Exception.Message -match "elevated PowerShell") -Message "installer requires elevation when not elevated"
+        Assert-True -Condition ($false) -Message "installer ValidateOnly should not require elevation"
     }
     $uninstallOutput = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $serviceRoot "uninstall-storepulse-machine-connector.ps1") -WhatIf -InstallRoot $installRoot
     Assert-True -Condition (($uninstallOutput -join "`n") -match "preserved") -Message "uninstall WhatIf preserves ProgramData"
 
+    $controlSource = Get-Content -LiteralPath (Join-Path $serviceRoot "storepulse-service-control.ps1") -Raw
+    Assert-True -Condition ($controlSource -match 'InstallStatus' -and $controlSource -match '"Start"' -and $controlSource -match '"Restart"') -Message "control script exposes service lifecycle commands"
+    $uninstallSource = Get-Content -LiteralPath (Join-Path $serviceRoot "uninstall-storepulse-machine-connector.ps1") -Raw
+    Assert-True -Condition ($uninstallSource -match 'PurgeData' -and $uninstallSource -match 'ConfirmImpact = "High"') -Message "uninstall purge requires explicit destructive mode"
+    $installerSource = Get-Content -LiteralPath (Join-Path $serviceRoot "install-storepulse-machine-connector.ps1") -Raw
+    Assert-True -Condition ($installerSource -match 'backupRoot' -and $installerSource -match 'Stop-StorePulseWindowsService' -and $installerSource -match 'Start-StorePulseWindowsService') -Message "installer contains upgrade rollback and restart plan"
+    Assert-True -Condition ($installerSource -match 'Repair' -and $installerSource -match 'Install-StorePulseWindowsService') -Message "installer contains repair registration path"
+
     foreach ($file in Get-ChildItem -LiteralPath $serviceRoot -Filter "*.ps1") {
         $content = Get-Content -LiteralPath $file.FullName -Raw
-        Assert-True -Condition ($content -notmatch "Deepika|AB123|C:\\Users\\|Register-ScheduledTask|New-Service|sc.exe|192\.168\.|ABC") -Message "$($file.Name) has no user/store/service hardcoding"
+        Assert-True -Condition ($content -notmatch "Deepika|AB123|C:\\Users\\|Register-ScheduledTask|New-Service|192\.168\.|ABC") -Message "$($file.Name) has no user/store/service hardcoding"
         Assert-True -Condition ($content -notmatch "Invoke-RestMethod|Invoke-WebRequest") -Message "$($file.Name) performs no network calls"
     }
 

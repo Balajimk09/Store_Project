@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [ValidateSet("Status", "Stop", "RunForeground", "Validate")]
+    [ValidateSet("InstallStatus", "Start", "Stop", "Restart", "Status", "Validate", "RunForeground")]
     [string]$Command = "Status",
     [string]$ConfigPath = "",
     [string]$ProgramDataRoot = "",
@@ -12,6 +12,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
 . (Join-Path $PSScriptRoot "storepulse-service-runtime.ps1")
+. (Join-Path $PSScriptRoot "storepulse-windows-service.ps1")
 
 $resolvedProgramDataRoot = if ([string]::IsNullOrWhiteSpace($ProgramDataRoot)) {
     if (-not [string]::IsNullOrWhiteSpace($ConfigPath) -and (Test-Path -LiteralPath $ConfigPath -PathType Leaf)) {
@@ -27,7 +28,32 @@ else {
 }
 
 switch ($Command) {
+    "InstallStatus" {
+        $installed = Test-StorePulseServiceInstalled
+        Write-Host ("Service installed: {0}" -f $installed)
+        if ($installed) {
+            $service = Get-StorePulseServiceStatus
+            Write-Host ("Service status: {0}" -f $service.Status)
+        }
+        return
+    }
+    "Start" {
+        Start-StorePulseWindowsService
+        Write-Host "Service start requested."
+        return
+    }
+    "Restart" {
+        Restart-StorePulseWindowsService
+        Write-Host "Service restart requested."
+        return
+    }
     "Status" {
+        $installed = Test-StorePulseServiceInstalled
+        Write-Host ("Service installed: {0}" -f $installed)
+        if ($installed) {
+            $service = Get-StorePulseServiceStatus
+            Write-Host ("Service status: {0}" -f $service.Status)
+        }
         $statusPath = Get-StorePulseRuntimeStatusPath -ProgramDataRoot $resolvedProgramDataRoot
         if (-not (Test-Path -LiteralPath $statusPath -PathType Leaf)) {
             Write-Host "StorePulse runtime status not found."
@@ -43,6 +69,9 @@ switch ($Command) {
             New-Item -ItemType Directory -Path $parent -Force | Out-Null
         }
         Set-Content -LiteralPath $stopPath -Encoding UTF8 -Value ((Get-Date).ToString("o"))
+        if (Test-StorePulseServiceInstalled) {
+            Stop-StorePulseWindowsService
+        }
         Write-Host ("Stop requested: {0}" -f $stopPath)
         return
     }

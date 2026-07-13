@@ -24,7 +24,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-$ScriptVersion = "2.0.1"
+$ScriptVersion = "2.0.2"
 $ScriptDirectory = Split-Path -Parent $MyInvocation.MyCommand.Path
 if ([string]::IsNullOrWhiteSpace($EnvPath)) {
     $EnvPath = Join-Path $ScriptDirectory ".env"
@@ -353,11 +353,10 @@ function Invoke-FinalizationHttpRequest {
         [Parameter(Mandatory)][string]$Json,
         [Parameter(Mandatory)][int]$TimeoutSeconds
     )
-    $bytes = [System.Text.Encoding]::UTF8.GetBytes($Json)
     $headers = @{
         "x-storepulse-connector-token" = $Token
     }
-    $response = Invoke-WebRequest -Method Post -Uri $Endpoint -ContentType "application/json; charset=utf-8" -TimeoutSec $TimeoutSeconds -Headers $headers -Body $bytes -UseBasicParsing
+    $response = Invoke-WebRequest -Method Post -Uri $Endpoint -ContentType "application/json; charset=utf-8" -TimeoutSec $TimeoutSeconds -Headers $headers -Body $Json -UseBasicParsing
     return ConvertFrom-JsonIfPossible -Value ([string]$response.Content)
 }
 

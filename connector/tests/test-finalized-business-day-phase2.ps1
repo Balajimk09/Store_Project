@@ -153,12 +153,13 @@ function Invoke-WithLocalJsonHttpResponse {
     param(
         [Parameter(Mandatory)][int]$StatusCode,
         [Parameter(Mandatory)][string]$Body,
-        [Parameter(Mandatory)][scriptblock]$Client
+        [Parameter(Mandatory)][scriptblock]$Client,
+        [string]$RequestBodyPath = ""
     )
     $port = Get-Random -Minimum 20000 -Maximum 50000
     $readyPath = Join-Path $tempRoot ("http-ready-" + [guid]::NewGuid().ToString("N") + ".txt")
     $job = Start-Job -ScriptBlock {
-        param($Port, $StatusCode, $Body, $ReadyPath)
+        param($Port, $StatusCode, $Body, $ReadyPath, $RequestBodyPath)
         $listener = New-Object System.Net.Sockets.TcpListener ([System.Net.IPAddress]::Parse("127.0.0.1")), $Port
         $tcpClient = $null
         try {
@@ -167,9 +168,42 @@ function Invoke-WithLocalJsonHttpResponse {
             $tcpClient = $listener.AcceptTcpClient()
             $stream = $tcpClient.GetStream()
             $buffer = New-Object byte[] 8192
+            $requestBuffer = New-Object System.IO.MemoryStream
+            $contentLength = $null
+            $headerEnd = -1
             do {
                 $read = $stream.Read($buffer, 0, $buffer.Length)
-            } while ($read -gt 0 -and $stream.DataAvailable)
+                if ($read -gt 0) {
+                    $requestBuffer.Write($buffer, 0, $read)
+                    $data = $requestBuffer.ToArray()
+                    if ($headerEnd -lt 0) {
+                        $headerText = [System.Text.Encoding]::ASCII.GetString($data)
+                        $headerEnd = $headerText.IndexOf("`r`n`r`n")
+                        if ($headerEnd -ge 0) {
+                            $headerOnly = $headerText.Substring(0, $headerEnd)
+                            $match = [regex]::Match($headerOnly, "(?im)^Content-Length:\s*(\d+)\s*$")
+                            if ($match.Success) {
+                                $contentLength = [int]$match.Groups[1].Value
+                            }
+                            else {
+                                $contentLength = 0
+                            }
+                        }
+                    }
+                    if ($headerEnd -ge 0 -and $null -ne $contentLength -and $data.Length -ge ($headerEnd + 4 + $contentLength)) {
+                        break
+                    }
+                }
+            } while ($read -gt 0)
+            if (-not [string]::IsNullOrWhiteSpace($RequestBodyPath) -and $headerEnd -ge 0 -and $null -ne $contentLength) {
+                $data = $requestBuffer.ToArray()
+                $bodyStart = $headerEnd + 4
+                $receivedBody = New-Object byte[] $contentLength
+                if ($contentLength -gt 0) {
+                    [Array]::Copy($data, $bodyStart, $receivedBody, 0, $contentLength)
+                }
+                [System.IO.File]::WriteAllBytes($RequestBodyPath, $receivedBody)
+            }
             $bodyBytes = [System.Text.Encoding]::UTF8.GetBytes($Body)
             $reason = if ($StatusCode -eq 400) { "Bad Request" } else { "Error" }
             $header = "HTTP/1.1 $StatusCode $reason`r`nContent-Type: application/json; charset=utf-8`r`nContent-Length: $($bodyBytes.Length)`r`nConnection: close`r`n`r`n"
@@ -182,7 +216,7 @@ function Invoke-WithLocalJsonHttpResponse {
             if ($null -ne $tcpClient) { $tcpClient.Close() }
             if ($null -ne $listener) { $listener.Stop() }
         }
-    } -ArgumentList $port, $StatusCode, $Body, $readyPath
+    } -ArgumentList $port, $StatusCode, $Body, $readyPath, $RequestBodyPath
 
     try {
         $deadline = (Get-Date).AddSeconds(10)
@@ -681,6 +715,43 @@ try {
     Assert-Equal -Actual $realPathFailure.request_id -Expected "real-path-400" -Message "real HTTP path records request id"
     Assert-Equal -Actual $realPathFailure.server_response.error -Expected "invalid_manifest" -Message "real HTTP path parses server response"
     Assert-Equal -Actual $realPathFailure.retryable -Expected $false -Message "real HTTP path marks HTTP 400 non-retryable"
+
+    $largeRecords = @()
+    $largePadding = "x" * 2600
+    for ($i = 1; $i -le 437; $i++) {
+        $largeRecords += [PSCustomObject]@{
+            source_unique_id = "large-$i"
+            canonical_hash = ("{0:x64}" -f $i)
+            canonical_record = $true
+            payload_padding = $largePadding
+        }
+    }
+    $largeRequest = @{
+        action = "prepare"
+        records = [object[]]$largeRecords
+    }
+    $largeJson = $largeRequest | ConvertTo-Json -Depth 30 -Compress
+    $largeJsonBytes = [System.Text.Encoding]::UTF8.GetByteCount($largeJson)
+    $capturedLargeRequestPath = Join-Path $tempRoot ("large-http-request-" + [guid]::NewGuid().ToString("N") + ".json")
+    $largeResponse = Invoke-WithLocalJsonHttpResponse `
+        -StatusCode 200 `
+        -Body '{"ok":true,"expected_record_count":437,"record_hash_count":437,"final_source_set_hash":"33635d2ef2f6ee8b060bebee933aad6184e980248629cebbd8f84ffa0a131daf"}' `
+        -RequestBodyPath $capturedLargeRequestPath `
+        -Client {
+            param($Endpoint)
+            Invoke-FinalizationHttpRequest `
+                -Endpoint $Endpoint `
+                -Token "test-token-value-that-is-long-enough" `
+                -Json $largeJson `
+                -TimeoutSeconds 30
+        }
+    $capturedLargeJson = Get-Content -LiteralPath $capturedLargeRequestPath -Raw
+    $capturedLargePayload = $capturedLargeJson | ConvertFrom-Json
+    Assert-True -Condition ($largeJsonBytes -gt 1048576) -Message "large HTTP success payload exceeds 1 MB"
+    Assert-True -Condition ($capturedLargePayload.records -is [array]) -Message "large HTTP request preserves records as array"
+    Assert-Equal -Actual (@($capturedLargePayload.records).Count) -Expected 437 -Message "large HTTP server receives all records"
+    Assert-Equal -Actual $largeResponse.expected_record_count -Expected 437 -Message "large HTTP success response parsed"
+    Assert-Equal -Actual $largeResponse.final_source_set_hash -Expected "33635d2ef2f6ee8b060bebee933aad6184e980248629cebbd8f84ffa0a131daf" -Message "large HTTP transport succeeds through Invoke-FinalizationHttpRequest"
 
     Assert-Throws -ScriptBlock { Invoke-UploaderMocked -Records @($recordA) -Name "count-mismatch" -Transport { param($Body,$Attempt,$Json) [PSCustomObject]@{ ok = $true; expected_record_count = 2; record_hash_count = 1; final_source_set_hash = "d" * 64 } } | Out-Null } -Message "prepare count mismatch rejected"
     Assert-Throws -ScriptBlock { Invoke-UploaderMocked -Records @($recordA) -Name "missing-hash" -Transport { param($Body,$Attempt,$Json) [PSCustomObject]@{ ok = $true; expected_record_count = 1; record_hash_count = 1 } } | Out-Null } -Message "prepare missing authoritative hash rejected"

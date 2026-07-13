@@ -24,7 +24,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-$ScriptVersion = "2.0.2"
+$ScriptVersion = "2.0.3"
 $ScriptDirectory = Split-Path -Parent $MyInvocation.MyCommand.Path
 if ([string]::IsNullOrWhiteSpace($EnvPath)) {
     $EnvPath = Join-Path $ScriptDirectory ".env"
@@ -528,11 +528,9 @@ if (-not (Test-Path -LiteralPath $JsonPath -PathType Leaf)) { throw "Normalized 
 if (-not (Test-Path -LiteralPath $XmlPath -PathType Leaf)) { throw "Source XML file was not found: $XmlPath" }
 
 $parsedRecords = ConvertFrom-Json -InputObject (Get-Content -LiteralPath $JsonPath -Raw)
-if ($parsedRecords -is [System.Array]) {
-    $records = $parsedRecords
-}
-else {
-    $records = @($parsedRecords)
+
+[object[]]$records = foreach ($record in @($parsedRecords)) {
+    $record
 }
 Assert-FinalizedBusinessDayRecords -Records $records -SourceStoreNumber $SourceStoreNumber -BusinessDate $BusinessDate
 
@@ -671,7 +669,11 @@ try {
 
     $batchCount = [int][math]::Ceiling($records.Count / [double]$BatchSize)
     for ($batchIndex = 0; $batchIndex -lt $batchCount; $batchIndex++) {
-        $batchRecords = @($records | Select-Object -Skip ($batchIndex * $BatchSize) -First $BatchSize)
+    [object[]]$batchRecords = foreach ($record in @(
+        $records | Select-Object -Skip ($batchIndex * $BatchSize) -First $BatchSize
+    )) {
+        $record
+    }
         $stageBody = @{
             action = "stage"
             finalization_id = $finalizationId

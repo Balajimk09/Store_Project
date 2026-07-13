@@ -106,30 +106,101 @@ function Invoke-UploaderMocked {
         [Parameter(Mandatory)][scriptblock]$Transport,
         [string]$Name = "mocked",
         [int]$BatchSize = 1,
-        [int]$MaxAttempts = 2
+        [int]$MaxAttempts = 2,
+        [switch]$AllowFailure
     )
     $files = New-UploaderFiles -Records $Records -Name $Name
     $previousToken = [Environment]::GetEnvironmentVariable("STOREPULSE_CONNECTOR_TOKEN", "Process")
     [Environment]::SetEnvironmentVariable("STOREPULSE_CONNECTOR_TOKEN", "test-token-value-that-is-long-enough", "Process")
+    $outputText = ""
+    $errorText = ""
+    $exitCode = 0
     try {
-        & $uploaderPath -JsonPath $files.Json -XmlPath $files.Xml -SourceStoreNumber "SYNTH" -BusinessDate "2026-01-05" `
-            -PeriodNumber "123" -SourcePeriodLabel "2026-01-06.123" `
-            -PeriodOpen "2026-01-05T22:00:00-05:00" -PeriodClose "2026-01-06T00:30:00-05:00" `
-            -Endpoint "https://example.invalid/functions/v1/finalize-pos-business-day" -ResultPath $files.Result `
-            -BatchSize $BatchSize -MaxAttempts $MaxAttempts -TimeoutSeconds 10 -Transport $Transport *> $null
-        $exitCode = 0
-        if (Get-Variable -Name LASTEXITCODE -Scope Global -ErrorAction SilentlyContinue) {
-            $exitCode = $global:LASTEXITCODE
+        try {
+            $output = & $uploaderPath -JsonPath $files.Json -XmlPath $files.Xml -SourceStoreNumber "SYNTH" -BusinessDate "2026-01-05" `
+                -PeriodNumber "123" -SourcePeriodLabel "2026-01-06.123" `
+                -PeriodOpen "2026-01-05T22:00:00-05:00" -PeriodClose "2026-01-06T00:30:00-05:00" `
+                -Endpoint "https://example.invalid/functions/v1/finalize-pos-business-day" -ResultPath $files.Result `
+                -BatchSize $BatchSize -MaxAttempts $MaxAttempts -TimeoutSeconds 10 -Transport $Transport *>&1
+            $outputText = ($output | ForEach-Object { [string]$_ }) -join "`n"
+            if (Get-Variable -Name LASTEXITCODE -Scope Global -ErrorAction SilentlyContinue) {
+                $exitCode = $global:LASTEXITCODE
+            }
+        }
+        catch {
+            $exitCode = 1
+            $errorText = $_.Exception.Message
+            $outputText = (($outputText, $errorText) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }) -join "`n"
+            if (-not $AllowFailure) {
+                throw
+            }
         }
         [PSCustomObject]@{
             ExitCode = $exitCode
             Result = if (Test-Path -LiteralPath $files.Result) { Get-Content -LiteralPath $files.Result -Raw | ConvertFrom-Json } else { $null }
             ResultText = if (Test-Path -LiteralPath $files.Result) { Get-Content -LiteralPath $files.Result -Raw } else { "" }
+            OutputText = $outputText
+            ErrorText = $errorText
             Files = $files
         }
     }
     finally {
         [Environment]::SetEnvironmentVariable("STOREPULSE_CONNECTOR_TOKEN", $previousToken, "Process")
+    }
+}
+
+function Invoke-WithLocalJsonHttpResponse {
+    param(
+        [Parameter(Mandatory)][int]$StatusCode,
+        [Parameter(Mandatory)][string]$Body,
+        [Parameter(Mandatory)][scriptblock]$Client
+    )
+    $port = Get-Random -Minimum 20000 -Maximum 50000
+    $readyPath = Join-Path $tempRoot ("http-ready-" + [guid]::NewGuid().ToString("N") + ".txt")
+    $job = Start-Job -ScriptBlock {
+        param($Port, $StatusCode, $Body, $ReadyPath)
+        $listener = New-Object System.Net.Sockets.TcpListener ([System.Net.IPAddress]::Parse("127.0.0.1")), $Port
+        $tcpClient = $null
+        try {
+            $listener.Start()
+            Set-Content -LiteralPath $ReadyPath -Value "ready" -Encoding ASCII
+            $tcpClient = $listener.AcceptTcpClient()
+            $stream = $tcpClient.GetStream()
+            $buffer = New-Object byte[] 8192
+            do {
+                $read = $stream.Read($buffer, 0, $buffer.Length)
+            } while ($read -gt 0 -and $stream.DataAvailable)
+            $bodyBytes = [System.Text.Encoding]::UTF8.GetBytes($Body)
+            $reason = if ($StatusCode -eq 400) { "Bad Request" } else { "Error" }
+            $header = "HTTP/1.1 $StatusCode $reason`r`nContent-Type: application/json; charset=utf-8`r`nContent-Length: $($bodyBytes.Length)`r`nConnection: close`r`n`r`n"
+            $headerBytes = [System.Text.Encoding]::ASCII.GetBytes($header)
+            $stream.Write($headerBytes, 0, $headerBytes.Length)
+            $stream.Write($bodyBytes, 0, $bodyBytes.Length)
+            $stream.Flush()
+        }
+        finally {
+            if ($null -ne $tcpClient) { $tcpClient.Close() }
+            if ($null -ne $listener) { $listener.Stop() }
+        }
+    } -ArgumentList $port, $StatusCode, $Body, $readyPath
+
+    try {
+        $deadline = (Get-Date).AddSeconds(10)
+        while (-not (Test-Path -LiteralPath $readyPath) -and (Get-Date) -lt $deadline) {
+            if ($job.State -ne "Running") { break }
+            Start-Sleep -Milliseconds 50
+        }
+        if (-not (Test-Path -LiteralPath $readyPath)) {
+            $jobOutput = Receive-Job -Job $job -ErrorAction SilentlyContinue | Out-String
+            throw "Local HTTP test server did not start. $jobOutput"
+        }
+        & $Client ("http://127.0.0.1:$port/finalize")
+    }
+    finally {
+        Wait-Job -Job $job -Timeout 5 | Out-Null
+        Receive-Job -Job $job -ErrorAction SilentlyContinue | Out-Null
+        Remove-Job -Job $job -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $readyPath -Force -ErrorAction SilentlyContinue
     }
 }
 
@@ -401,6 +472,11 @@ try {
     } -BatchSize 1
     Assert-Equal -Actual $ordered.ExitCode -Expected 0 -Message "mocked finalized flow exit code"
     Assert-Equal -Actual $ordered.Result.status -Expected "finalized" -Message "mocked finalized flow status"
+    Assert-True -Condition ($ordered.OutputText -match "Starting prepare request") -Message "prepare progress logged"
+    Assert-True -Condition ($ordered.OutputText -match "Prepare request succeeded") -Message "prepare success logged"
+    Assert-True -Condition ($ordered.OutputText -match "Starting begin request") -Message "begin progress logged"
+    Assert-True -Condition ($ordered.OutputText -match "Beginning stage batch 1 of 2") -Message "stage batch progress logged"
+    Assert-True -Condition ($ordered.OutputText -match "Starting finalize request") -Message "finalize progress logged"
 
     $global:StorePulsePhase2Actions = @()
     $already = Invoke-UploaderMocked -Records @($recordA, $recordB) -Name "already" -Transport {
@@ -412,6 +488,199 @@ try {
     } -BatchSize 1
     Assert-Equal -Actual $already.Result.status -Expected "already_finalized" -Message "already_finalized result status"
     Assert-Equal -Actual (($global:StorePulsePhase2Actions -join ",")) -Expected "prepare,begin" -Message "already_finalized skips stage and finalize"
+
+    $http400 = Invoke-UploaderMocked -Records @($recordA) -Name "http-400" -AllowFailure -Transport {
+        param($Body, $Attempt, $Json)
+        if ($Body.action -eq "prepare") {
+            return [PSCustomObject]@{
+                __http_failure = $true
+                status_code = 400
+                server_response = [PSCustomObject]@{
+                    ok = $false
+                    error = "invalid_manifest"
+                    request_id = "req-400"
+                }
+                error_message = "Bad Request"
+            }
+        }
+        throw "unexpected action"
+    }
+    Assert-Equal -Actual $http400.ExitCode -Expected 1 -Message "HTTP 400 failure exits unsuccessfully"
+    Assert-Equal -Actual $http400.Result.failed_action -Expected "prepare" -Message "HTTP 400 records failed action"
+    Assert-Equal -Actual $http400.Result.status_code -Expected 400 -Message "HTTP 400 records status code"
+    Assert-Equal -Actual $http400.Result.request_id -Expected "req-400" -Message "HTTP 400 records request id"
+    Assert-Equal -Actual $http400.Result.retryable -Expected $false -Message "HTTP 400 records non-retryable"
+    Assert-Equal -Actual $http400.Result.server_response.error -Expected "invalid_manifest" -Message "HTTP 400 records server response body"
+    Assert-True -Condition ($http400.ResultText -match "failed_action") -Message "HTTP 400 result includes failed action field"
+    Assert-True -Condition ($http400.ResultText -notmatch "test-token-value-that-is-long-enough") -Message "HTTP 400 result excludes connector token"
+    Assert-True -Condition ($http400.OutputText -notmatch "test-token-value-that-is-long-enough") -Message "HTTP 400 output excludes connector token"
+
+    $global:StorePulsePhase2RetryAttempts = 0
+    $http500 = Invoke-UploaderMocked -Records @($recordA) -Name "http-500" -AllowFailure -MaxAttempts 2 -Transport {
+        param($Body, $Attempt, $Json)
+        if ($Body.action -eq "prepare") {
+            $global:StorePulsePhase2RetryAttempts += 1
+            return [PSCustomObject]@{
+                __http_failure = $true
+                status_code = 500
+                server_response = [PSCustomObject]@{
+                    ok = $false
+                    error = "temporary_failure"
+                    request_id = "req-500"
+                }
+                error_message = "Internal Server Error"
+            }
+        }
+        throw "unexpected action"
+    }
+    Assert-Equal -Actual $http500.ExitCode -Expected 1 -Message "HTTP 500 failure exits unsuccessfully"
+    Assert-Equal -Actual $global:StorePulsePhase2RetryAttempts -Expected 2 -Message "HTTP 500 retries within configured limit"
+    Assert-Equal -Actual $http500.Result.failed_action -Expected "prepare" -Message "HTTP 500 records failed action"
+    Assert-Equal -Actual $http500.Result.status_code -Expected 500 -Message "HTTP 500 records status code"
+    Assert-Equal -Actual $http500.Result.request_id -Expected "req-500" -Message "HTTP 500 records request id"
+    Assert-Equal -Actual $http500.Result.retryable -Expected $true -Message "HTTP 500 records retryable"
+    Assert-Equal -Actual $http500.Result.server_response.error -Expected "temporary_failure" -Message "HTTP 500 records server response body"
+
+    $global:StorePulsePhase2NetworkAfterHttpAttempts = 0
+    $networkAfterHttp = Invoke-UploaderMocked -Records @($recordA) -Name "network-after-http" -AllowFailure -MaxAttempts 2 -Transport {
+        param($Body, $Attempt, $Json)
+        if ($Body.action -eq "prepare") {
+            $global:StorePulsePhase2NetworkAfterHttpAttempts += 1
+            if ($global:StorePulsePhase2NetworkAfterHttpAttempts -eq 1) {
+                return [PSCustomObject]@{
+                    __http_failure = $true
+                    status_code = 500
+                    server_response = [PSCustomObject]@{
+                        ok = $false
+                        error = "first_attempt_failure"
+                        request_id = "old-500"
+                    }
+                    error_message = "First attempt failed"
+                }
+            }
+            throw "second attempt connection failure"
+        }
+        throw "unexpected action"
+    }
+    Assert-Equal -Actual $global:StorePulsePhase2NetworkAfterHttpAttempts -Expected 2 -Message "second prepare attempt executed after HTTP 500"
+    Assert-Equal -Actual $networkAfterHttp.Result.failed_action -Expected "prepare" -Message "second-attempt network failure records prepare action"
+    Assert-Equal -Actual $networkAfterHttp.Result.status_code -Expected $null -Message "second-attempt network failure has no stale status"
+    Assert-True -Condition ([string]::IsNullOrWhiteSpace([string]$networkAfterHttp.Result.request_id)) -Message "second-attempt network failure has no stale request id"
+    Assert-True -Condition ($null -eq $networkAfterHttp.Result.server_response) -Message "second-attempt network failure has no stale server response"
+    Assert-True -Condition ($networkAfterHttp.Result.error_message -match "second attempt connection failure") -Message "second-attempt network failure message retained"
+    Assert-True -Condition ($networkAfterHttp.ResultText -notmatch "old-500") -Message "second-attempt result excludes old HTTP request id"
+    Assert-True -Condition ($networkAfterHttp.OutputText -notmatch "old-500") -Message "second-attempt output excludes old HTTP request id"
+
+    $global:StorePulsePhase2StalePrepareAttempts = 0
+    $staleFailure = Invoke-UploaderMocked -Records @($recordA) -Name "stale-failure" -AllowFailure -MaxAttempts 2 -Transport {
+        param($Body, $Attempt, $Json)
+        if ($Body.action -eq "prepare") {
+            $global:StorePulsePhase2StalePrepareAttempts += 1
+            if ($global:StorePulsePhase2StalePrepareAttempts -eq 1) {
+                return [PSCustomObject]@{
+                    __http_failure = $true
+                    status_code = 500
+                    server_response = [PSCustomObject]@{
+                        ok = $false
+                        error = "temporary_prepare"
+                        request_id = "stale-prepare-500"
+                    }
+                    error_message = "Temporary prepare failure"
+                }
+            }
+            return [PSCustomObject]@{ ok = $true; expected_record_count = 1; record_hash_count = 1; final_source_set_hash = "7" * 64 }
+        }
+        if ($Body.action -eq "begin") {
+            return [PSCustomObject]@{ ok = $true; status = "uploading"; already_finalized = $false }
+        }
+        throw "unexpected action"
+    }
+    Assert-Equal -Actual $global:StorePulsePhase2StalePrepareAttempts -Expected 2 -Message "retryable prepare failure is retried"
+    Assert-Equal -Actual $staleFailure.Result.failed_action -Expected "begin" -Message "stale failure does not replace begin validation action"
+    Assert-Equal -Actual $staleFailure.Result.status_code -Expected $null -Message "begin validation failure has no stale HTTP status"
+    Assert-True -Condition ([string]::IsNullOrWhiteSpace([string]$staleFailure.Result.request_id)) -Message "begin validation failure has no stale request id"
+    Assert-True -Condition ($null -eq $staleFailure.Result.server_response) -Message "begin validation failure has no stale server response"
+    Assert-True -Condition ($staleFailure.Result.error_message -match "Begin response did not include finalization_id") -Message "begin missing finalization_id reported"
+    Assert-True -Condition ($staleFailure.ResultText -notmatch "stale-prepare-500") -Message "stale prepare request id absent from final result"
+
+    $redacted = Invoke-UploaderMocked -Records @($recordA) -Name "redacted-http-400" -AllowFailure -Transport {
+        param($Body, $Attempt, $Json)
+        if ($Body.action -eq "prepare") {
+            return [PSCustomObject]@{
+                __http_failure = $true
+                status_code = 400
+                server_response = [PSCustomObject]@{
+                    ok = $false
+                    error = "token test-token-value-that-is-long-enough invalid"
+                    request_id = "req-test-token-value-that-is-long-enough"
+                    nested = [PSCustomObject]@{
+                        detail = "Authorization test-token-value-that-is-long-enough"
+                    }
+                }
+                error_message = "Bad token test-token-value-that-is-long-enough"
+            }
+        }
+        throw "unexpected action"
+    }
+    Assert-True -Condition ($redacted.OutputText -notmatch "test-token-value-that-is-long-enough") -Message "redacted output excludes connector token"
+    Assert-True -Condition ($redacted.ResultText -notmatch "test-token-value-that-is-long-enough") -Message "redacted result excludes connector token"
+    Assert-True -Condition ($redacted.Result.error_message -notmatch "test-token-value-that-is-long-enough") -Message "redacted error message excludes connector token"
+    Assert-True -Condition (($redacted.Result.server_response | ConvertTo-Json -Depth 10 -Compress) -match "\[REDACTED\]") -Message "redacted server response contains redaction marker"
+    Assert-True -Condition ($redacted.Result.server_response.error -match "\[REDACTED\]") -Message "redacted server response structure remains usable"
+    Assert-True -Condition ($redacted.Result.server_response.nested.detail -match "\[REDACTED\]") -Message "redacted nested server response remains usable"
+
+    $redactedPropertyName = Invoke-UploaderMocked -Records @($recordA) -Name "redacted-property-name" -AllowFailure -Transport {
+        param($Body, $Attempt, $Json)
+        if ($Body.action -eq "prepare") {
+            $response = [ordered]@{
+                ok = $false
+                error = "invalid_manifest"
+                request_id = "property-redaction"
+            }
+            $response["diagnostic-test-token-value-that-is-long-enough-field"] = "property value"
+            $response["nested"] = [PSCustomObject]([ordered]@{
+                "nested-test-token-value-that-is-long-enough-field" = "nested value"
+            })
+            return [PSCustomObject]@{
+                __http_failure = $true
+                status_code = 400
+                server_response = [PSCustomObject]$response
+                error_message = "Bad Request"
+            }
+        }
+        throw "unexpected action"
+    }
+    $redactedProperty = $redactedPropertyName.Result.server_response.PSObject.Properties["diagnostic-[REDACTED]-field"]
+    $redactedNestedProperty = $redactedPropertyName.Result.server_response.nested.PSObject.Properties["nested-[REDACTED]-field"]
+    Assert-True -Condition ($redactedPropertyName.OutputText -notmatch "test-token-value-that-is-long-enough") -Message "redacted property-name output excludes connector token"
+    Assert-True -Condition ($redactedPropertyName.ResultText -notmatch "test-token-value-that-is-long-enough") -Message "redacted property-name result excludes connector token"
+    Assert-True -Condition ($null -ne $redactedProperty -and $redactedProperty.Value -eq "property value") -Message "redacted property name remains diagnostically usable"
+    Assert-True -Condition ($null -ne $redactedNestedProperty -and $redactedNestedProperty.Value -eq "nested value") -Message "nested redacted property name remains diagnostically usable"
+    Assert-True -Condition ($redactedPropertyName.ResultText -match "\[REDACTED\]") -Message "redacted property-name result contains redaction marker"
+
+    $script:CurrentConnectorToken = "test-token-value-that-is-long-enough"
+    $script:LastFinalizationFailure = $null
+    $realPathFailure = $null
+    try {
+        Invoke-WithLocalJsonHttpResponse -StatusCode 400 -Body '{"error":"invalid_manifest","request_id":"real-path-400"}' -Client {
+            param($Endpoint)
+            Invoke-FinalizationRequest `
+                -Endpoint $Endpoint `
+                -Token "test-token-value-that-is-long-enough" `
+                -Body @{ action = "prepare" } `
+                -MaxAttempts 1 `
+                -TimeoutSeconds 10 `
+                -Action "prepare" | Out-Null
+        }
+        $global:StorePulsePhase2Failures.Add("real Invoke-WebRequest HTTP 400 path Expected exception.")
+    }
+    catch {
+        $realPathFailure = $script:LastFinalizationFailure
+    }
+    Assert-Equal -Actual $realPathFailure.status_code -Expected 400 -Message "real HTTP path records status code"
+    Assert-Equal -Actual $realPathFailure.request_id -Expected "real-path-400" -Message "real HTTP path records request id"
+    Assert-Equal -Actual $realPathFailure.server_response.error -Expected "invalid_manifest" -Message "real HTTP path parses server response"
+    Assert-Equal -Actual $realPathFailure.retryable -Expected $false -Message "real HTTP path marks HTTP 400 non-retryable"
 
     Assert-Throws -ScriptBlock { Invoke-UploaderMocked -Records @($recordA) -Name "count-mismatch" -Transport { param($Body,$Attempt,$Json) [PSCustomObject]@{ ok = $true; expected_record_count = 2; record_hash_count = 1; final_source_set_hash = "d" * 64 } } | Out-Null } -Message "prepare count mismatch rejected"
     Assert-Throws -ScriptBlock { Invoke-UploaderMocked -Records @($recordA) -Name "missing-hash" -Transport { param($Body,$Attempt,$Json) [PSCustomObject]@{ ok = $true; expected_record_count = 1; record_hash_count = 1 } } | Out-Null } -Message "prepare missing authoritative hash rejected"

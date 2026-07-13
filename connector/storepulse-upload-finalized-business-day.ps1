@@ -205,18 +205,178 @@ function Test-RetryableStatus {
     return ($code -eq 408 -or $code -eq 425 -or $code -eq 429 -or $code -ge 500)
 }
 
-function Get-HttpStatusCode {
-    param([Parameter(Mandatory)]$ErrorRecord)
+function ConvertFrom-JsonIfPossible {
+    param([AllowNull()][string]$Value)
+    if ([string]::IsNullOrWhiteSpace($Value)) { return $null }
     try {
-        $response = $ErrorRecord.Exception.Response
-        if ($null -eq $response) { return $null }
-        $status = $response.StatusCode
+        return ConvertFrom-Json -InputObject $Value
+    }
+    catch {
+        return $Value
+    }
+}
+
+function Get-ResponseRequestId {
+    param([AllowNull()]$Response)
+    if ($null -eq $Response -or $Response -is [string]) { return $null }
+    $property = $Response.PSObject.Properties["request_id"]
+    if ($null -eq $property -or $null -eq $property.Value) { return $null }
+    $value = [string]$property.Value
+    if ([string]::IsNullOrWhiteSpace($value)) { return $null }
+    return $value
+}
+
+function Redact-ConnectorTokenFromString {
+    param([AllowNull()][string]$Value)
+    if ($null -eq $Value) { return $null }
+    $tokenVariable = Get-Variable -Name CurrentConnectorToken -Scope Script -ErrorAction SilentlyContinue
+    if ($null -eq $tokenVariable) { return $Value }
+    $token = [string]$tokenVariable.Value
+    if ([string]::IsNullOrEmpty($token)) { return $Value }
+    return $Value.Replace($token, "[REDACTED]")
+}
+
+function Redact-ConnectorTokenFromObject {
+    param([AllowNull()]$Value)
+    if ($null -eq $Value) { return $null }
+    if ($Value -is [string]) { return Redact-ConnectorTokenFromString -Value $Value }
+    if ($Value -is [bool] -or $Value -is [byte] -or $Value -is [int16] -or $Value -is [int32] -or $Value -is [int64] -or $Value -is [decimal] -or $Value -is [double] -or $Value -is [single] -or $Value -is [datetime]) {
+        return $Value
+    }
+    if ($Value -is [System.Collections.IDictionary]) {
+        $copy = [ordered]@{}
+        foreach ($key in $Value.Keys) {
+            $redactedKey = Redact-ConnectorTokenFromString -Value ([string]$key)
+            $copy[$redactedKey] = Redact-ConnectorTokenFromObject -Value $Value[$key]
+        }
+        return [PSCustomObject]$copy
+    }
+    if ($Value -is [System.Collections.IEnumerable] -and -not ($Value -is [string]) -and -not ($Value -is [System.Xml.XmlNode])) {
+        $items = @()
+        foreach ($item in @($Value)) {
+            $items += Redact-ConnectorTokenFromObject -Value $item
+        }
+        return [object[]]$items
+    }
+    $properties = @($Value.PSObject.Properties | Where-Object { $_.MemberType -in @("NoteProperty", "Property") })
+    if ($properties.Count -gt 0) {
+        $copy = [ordered]@{}
+        foreach ($property in $properties) {
+            $redactedName = Redact-ConnectorTokenFromString -Value $property.Name
+            $copy[$redactedName] = Redact-ConnectorTokenFromObject -Value $property.Value
+        }
+        return [PSCustomObject]$copy
+    }
+    return $Value
+}
+
+function New-FinalizationFailureInfo {
+    param(
+        [Parameter(Mandatory)][string]$Action,
+        [AllowNull()]$StatusCode,
+        [AllowNull()]$ServerResponse,
+        [Parameter(Mandatory)][string]$Message
+    )
+    $sanitizedServerResponse = Redact-ConnectorTokenFromObject -Value $ServerResponse
+    [ordered]@{
+        failed_action = $Action
+        status_code = $StatusCode
+        server_response = $sanitizedServerResponse
+        request_id = Redact-ConnectorTokenFromString -Value (Get-ResponseRequestId -Response $sanitizedServerResponse)
+        retryable = Test-RetryableStatus -StatusCode $StatusCode
+        error_message = Redact-ConnectorTokenFromString -Value $Message
+    }
+}
+
+function Get-FinalizationErrorMessage {
+    param([Parameter(Mandatory)]$ErrorRecord)
+    $message = $null
+    if ($ErrorRecord.Exception) {
+        $message = [string]$ErrorRecord.Exception.Message
+    }
+    if ([string]::IsNullOrWhiteSpace($message) -or $message -eq "ScriptHalted") {
+        $message = [string]$ErrorRecord
+    }
+    return (Redact-ConnectorTokenFromString -Value $message)
+}
+
+function Throw-FinalizationHttpFailure {
+    param([Parameter(Mandatory)]$FailureInfo)
+    $script:LastFinalizationFailure = $FailureInfo
+    $message = "{0} request failed" -f $FailureInfo.failed_action
+    if ($null -ne $FailureInfo.status_code) {
+        $message = "{0} with HTTP {1}" -f $message, $FailureInfo.status_code
+    }
+    if ($FailureInfo.request_id) {
+        $message = "{0} (request_id {1})" -f $message, $FailureInfo.request_id
+    }
+    throw $message
+}
+
+function Get-WebResponseBody {
+    param([AllowNull()]$Response)
+    if ($null -eq $Response) { return "" }
+    try {
+        $stream = $Response.GetResponseStream()
+        if ($null -eq $stream) { return "" }
+        $reader = New-Object System.IO.StreamReader($stream)
+        try {
+            return $reader.ReadToEnd()
+        }
+        finally {
+            $reader.Dispose()
+        }
+    }
+    catch {
+        return ""
+    }
+}
+
+function Get-WebResponseStatusCode {
+    param([AllowNull()]$Response)
+    if ($null -eq $Response) { return $null }
+    try {
+        $status = $Response.StatusCode
         $valueProperty = $status.PSObject.Properties["value__"]
         if ($null -ne $valueProperty) { return [int]$valueProperty.Value }
         return [int]$status
     }
     catch {
         return $null
+    }
+}
+
+function Invoke-FinalizationHttpRequest {
+    param(
+        [Parameter(Mandatory)][string]$Endpoint,
+        [Parameter(Mandatory)][string]$Token,
+        [Parameter(Mandatory)][string]$Json,
+        [Parameter(Mandatory)][int]$TimeoutSeconds
+    )
+    $bytes = [System.Text.Encoding]::UTF8.GetBytes($Json)
+    $headers = @{
+        "x-storepulse-connector-token" = $Token
+    }
+    $response = Invoke-WebRequest -Method Post -Uri $Endpoint -ContentType "application/json; charset=utf-8" -TimeoutSec $TimeoutSeconds -Headers $headers -Body $bytes -UseBasicParsing
+    return ConvertFrom-JsonIfPossible -Value ([string]$response.Content)
+}
+
+function Get-ActionLabel {
+    param(
+        [Parameter(Mandatory)][string]$Action,
+        [AllowNull()]$Body
+    )
+    if ($Action -eq "stage") {
+        return "stage batch {0} of {1}" -f $Body.batch_number, $Body.batch_count
+    }
+    return $Action
+}
+
+function Write-FinalizationRequestFailure {
+    param([Parameter(Mandatory)]$FailureInfo)
+    Write-Information -InformationAction Continue -MessageData ("{0} request failed. HTTP status: {1}; retryable: {2}; request_id: {3}" -f $FailureInfo.failed_action, $(if ($null -eq $FailureInfo.status_code) { "unknown" } else { $FailureInfo.status_code }), $FailureInfo.retryable, $(if ($FailureInfo.request_id) { $FailureInfo.request_id } else { "none" }))
+    if ($FailureInfo.server_response) {
+        Write-Information -InformationAction Continue -MessageData ("Server response: {0}" -f ($FailureInfo.server_response | ConvertTo-Json -Depth 30 -Compress))
     }
 }
 
@@ -227,25 +387,90 @@ function Invoke-FinalizationRequest {
         [Parameter(Mandatory)]$Body,
         [Parameter(Mandatory)][int]$MaxAttempts,
         [Parameter(Mandatory)][int]$TimeoutSeconds,
+        [Parameter(Mandatory)][string]$Action,
         [scriptblock]$Transport = $null
     )
     $json = $Body | ConvertTo-Json -Depth 30 -Compress
+    $actionLabel = Get-ActionLabel -Action $Action -Body $Body
+    $script:CurrentFinalizationAction = $actionLabel
+    $script:CurrentConnectorToken = $Token
+    $script:LastFinalizationFailure = $null
     for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
+        $script:LastFinalizationFailure = $null
         try {
-            if ($null -ne $Transport) {
-                return & $Transport $Body $attempt $json
+            if ($Action -eq "stage") {
+                Write-Information -InformationAction Continue -MessageData ("Beginning {0}..." -f $actionLabel)
             }
-            return Invoke-RestMethod -Method Post -Uri $Endpoint -ContentType "application/json" -TimeoutSec $TimeoutSeconds -Headers @{
-                "x-storepulse-connector-token" = $Token
-            } -Body $json
+            else {
+                Write-Information -InformationAction Continue -MessageData ("Starting {0} request..." -f $Action)
+            }
+            if ($null -ne $Transport) {
+                $transportResult = & $Transport $Body $attempt $json $Action
+                if ($null -ne $transportResult -and $transportResult.PSObject.Properties["__http_failure"] -and $transportResult.__http_failure -eq $true) {
+                    $mockFailure = New-FinalizationFailureInfo `
+                        -Action $actionLabel `
+                        -StatusCode $transportResult.status_code `
+                        -ServerResponse $transportResult.server_response `
+                        -Message $(if ($transportResult.error_message) { [string]$transportResult.error_message } else { "$actionLabel request failed." })
+                    $script:LastFinalizationFailure = $mockFailure
+                    Write-FinalizationRequestFailure -FailureInfo $mockFailure
+                    if ($attempt -lt $MaxAttempts -and $mockFailure.retryable) {
+                        Start-Sleep -Seconds ([math]::Min(30, 2 * $attempt))
+                        continue
+                    }
+                    Throw-FinalizationHttpFailure -FailureInfo $mockFailure
+                }
+                Write-Information -InformationAction Continue -MessageData ("{0} request succeeded." -f ((Get-Culture).TextInfo.ToTitleCase($Action)))
+                $script:LastFinalizationFailure = $null
+                return $transportResult
+            }
+            $result = Invoke-FinalizationHttpRequest -Endpoint $Endpoint -Token $Token -Json $json -TimeoutSeconds $TimeoutSeconds
+            Write-Information -InformationAction Continue -MessageData ("{0} request succeeded." -f ((Get-Culture).TextInfo.ToTitleCase($Action)))
+            $script:LastFinalizationFailure = $null
+            return $result
         }
         catch {
-            $statusCode = Get-HttpStatusCode -ErrorRecord $_
-            if ($attempt -lt $MaxAttempts -and (Test-RetryableStatus -StatusCode $statusCode)) {
+            $statusCode = $null
+            $serverResponse = $null
+            $exceptionResponse = $null
+            if ($_.Exception) {
+                $responseProperty = $_.Exception.PSObject.Properties["Response"]
+                if ($null -ne $responseProperty) {
+                    $exceptionResponse = $responseProperty.Value
+                }
+            }
+            if ($exceptionResponse) {
+                $statusCode = Get-WebResponseStatusCode -Response $exceptionResponse
+                $serverResponse = ConvertFrom-JsonIfPossible -Value (Get-WebResponseBody -Response $exceptionResponse)
+            }
+            $errorDetailsMessage = $null
+            $errorDetailsProperty = $_.PSObject.Properties["ErrorDetails"]
+            if ($null -ne $errorDetailsProperty -and $null -ne $errorDetailsProperty.Value) {
+                $messageProperty = $errorDetailsProperty.Value.PSObject.Properties["Message"]
+                if ($null -ne $messageProperty) {
+                    $errorDetailsMessage = [string]$messageProperty.Value
+                }
+            }
+            if (($null -eq $serverResponse -or ([string]$serverResponse).Length -eq 0) -and -not [string]::IsNullOrWhiteSpace($errorDetailsMessage)) {
+                $serverResponse = ConvertFrom-JsonIfPossible -Value $errorDetailsMessage
+            }
+            $failureInfo = $null
+            if ($null -ne $script:LastFinalizationFailure -and $script:LastFinalizationFailure.failed_action -eq $actionLabel -and $null -eq $exceptionResponse) {
+                $failureInfo = $script:LastFinalizationFailure
+                $statusCode = $failureInfo.status_code
+                $serverResponse = $failureInfo.server_response
+            }
+            if ($null -eq $failureInfo) {
+                $failureInfo = New-FinalizationFailureInfo -Action $actionLabel -StatusCode $statusCode -ServerResponse $serverResponse -Message (Get-FinalizationErrorMessage -ErrorRecord $_)
+            }
+            $retryable = $failureInfo.retryable
+            $script:LastFinalizationFailure = $failureInfo
+            Write-FinalizationRequestFailure -FailureInfo $failureInfo
+            if ($attempt -lt $MaxAttempts -and $retryable) {
                 Start-Sleep -Seconds ([math]::Min(30, 2 * $attempt))
                 continue
             }
-            throw
+            Throw-FinalizationHttpFailure -FailureInfo $failureInfo
         }
     }
 }
@@ -284,7 +509,7 @@ function Assert-FinalizationId {
         [Parameter(Mandatory)][string]$Expected,
         [Parameter(Mandatory)][string]$Action
     )
-    $actual = [string]$Response.finalization_id
+    $actual = [string](Get-PropertyValue -Object $Response -Name "finalization_id" -DefaultValue "")
     if ([string]::IsNullOrWhiteSpace($actual) -or $actual -ne $Expected) {
         throw "$Action response finalization_id mismatch."
     }
@@ -368,8 +593,11 @@ $connectorToken = [Environment]::GetEnvironmentVariable("STOREPULSE_CONNECTOR_TO
 if ([string]::IsNullOrWhiteSpace($connectorToken)) {
     throw "STOREPULSE_CONNECTOR_TOKEN is missing. Add it to $EnvPath."
 }
+$script:CurrentConnectorToken = $connectorToken
 
 $finalizationId = $null
+$script:CurrentFinalizationAction = $null
+$script:LastFinalizationFailure = $null
 try {
     $prepareBody = @{
         action = "prepare"
@@ -380,7 +608,7 @@ try {
         source_period_label = $SourcePeriodLabel
         records = $records
     }
-    $prepareResult = Invoke-FinalizationRequest -Endpoint $Endpoint -Token $connectorToken -Body $prepareBody -MaxAttempts $MaxAttempts -TimeoutSeconds $TimeoutSeconds -Transport $Transport
+    $prepareResult = Invoke-FinalizationRequest -Endpoint $Endpoint -Token $connectorToken -Body $prepareBody -MaxAttempts $MaxAttempts -TimeoutSeconds $TimeoutSeconds -Action "prepare" -Transport $Transport
     Assert-ResponseOk -Response $prepareResult -Action "prepare"
     $authoritativeFinalSourceSetHash = [string]$prepareResult.final_source_set_hash
     if ($authoritativeFinalSourceSetHash -notmatch '^[a-fA-F0-9]{64}$') {
@@ -410,9 +638,9 @@ try {
         reconciliation_metadata = $manifest
     }
 
-    $beginResult = Invoke-FinalizationRequest -Endpoint $Endpoint -Token $connectorToken -Body $beginBody -MaxAttempts $MaxAttempts -TimeoutSeconds $TimeoutSeconds -Transport $Transport
+    $beginResult = Invoke-FinalizationRequest -Endpoint $Endpoint -Token $connectorToken -Body $beginBody -MaxAttempts $MaxAttempts -TimeoutSeconds $TimeoutSeconds -Action "begin" -Transport $Transport
     Assert-ResponseOk -Response $beginResult -Action "begin"
-    $finalizationId = [string]$beginResult.finalization_id
+    $finalizationId = [string](Get-PropertyValue -Object $beginResult -Name "finalization_id" -DefaultValue "")
     if ([string]::IsNullOrWhiteSpace($finalizationId)) { throw "Begin response did not include finalization_id." }
 
     if ($beginResult.already_finalized -eq $true) {
@@ -454,7 +682,7 @@ try {
             batch_count = $batchCount
             records = $batchRecords
         }
-        $stageResult = Invoke-FinalizationRequest -Endpoint $Endpoint -Token $connectorToken -Body $stageBody -MaxAttempts $MaxAttempts -TimeoutSeconds $TimeoutSeconds -Transport $Transport
+        $stageResult = Invoke-FinalizationRequest -Endpoint $Endpoint -Token $connectorToken -Body $stageBody -MaxAttempts $MaxAttempts -TimeoutSeconds $TimeoutSeconds -Action "stage" -Transport $Transport
         Assert-ResponseOk -Response $stageResult -Action "stage"
         Assert-FinalizationId -Response $stageResult -Expected $finalizationId -Action "stage"
         if ([int]$stageResult.batch_number -ne ($batchIndex + 1)) { throw "Stage response batch_number mismatch." }
@@ -465,7 +693,7 @@ try {
         finalization_id = $finalizationId
         payload_hash = $payloadHash
         final_source_set_hash = $authoritativeFinalSourceSetHash
-    } -MaxAttempts $MaxAttempts -TimeoutSeconds $TimeoutSeconds -Transport $Transport
+    } -MaxAttempts $MaxAttempts -TimeoutSeconds $TimeoutSeconds -Action "finalize" -Transport $Transport
     Assert-ResponseOk -Response $finalizeResult -Action "finalize"
     Assert-FinalizationId -Response $finalizeResult -Expected $finalizationId -Action "finalize"
     if ($finalizeResult.finalized -ne $true -and $finalizeResult.already_finalized -ne $true) {
@@ -492,19 +720,28 @@ try {
     Write-Host "Closed business day finalization completed."
 }
 catch {
-    $statusCode = Get-HttpStatusCode -ErrorRecord $_
-    $retryable = Test-RetryableStatus -StatusCode $statusCode
+    $failureInfo = $script:LastFinalizationFailure
+    if ($null -eq $failureInfo) {
+        $failureInfo = New-FinalizationFailureInfo `
+            -Action $(if ($script:CurrentFinalizationAction) { $script:CurrentFinalizationAction } else { "unknown" }) `
+            -StatusCode $null `
+            -ServerResponse $null `
+            -Message (Get-FinalizationErrorMessage -ErrorRecord $_)
+    }
     $failure = [ordered]@{
         ok = $false
         dry_run = $false
         finalized = $false
-        retryable = $retryable
+        failed_action = $failureInfo.failed_action
+        status_code = $failureInfo.status_code
+        server_response = $failureInfo.server_response
+        request_id = $failureInfo.request_id
+        retryable = $failureInfo.retryable
         finalization_id = $finalizationId
-        status_code = $statusCode
-        error_message = $_.Exception.Message
+        error_message = $failureInfo.error_message
         manifest = $manifest
         failed_at = (Get-Date).ToString("o")
     }
     Write-ResultFile -Result $failure -Path $ResultPath
-    throw
+    throw ("{0}: {1}" -f $failureInfo.failed_action, $failureInfo.error_message)
 }

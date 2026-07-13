@@ -1,6 +1,6 @@
 # StorePulse Machine-Wide Connector Service
 
-Phase 3 creates the foundation for a machine-wide Windows connector that can later run as LocalSystem or a dedicated service identity. Checkpoint 4 adds the offline/testable Windows Service installation layer, but the repository task does not install or register the service on any machine.
+Phase 3 creates the foundation for a machine-wide Windows connector that can later run as LocalSystem or a dedicated service identity. Checkpoint 5 adds pilot-ready packaging, first-time machine configuration, private Node runtime validation, and end-to-end offline install validation. Repository work still does not install or register the service on any machine.
 
 ## Target Architecture
 
@@ -28,6 +28,7 @@ C:\ProgramData\StorePulse
   logs\
   working\
   archive\
+  state\
 ```
 
 `config.json` contains non-secret operational values only. `secrets.json` contains DPAPI-encrypted values only.
@@ -38,6 +39,7 @@ The machine config stores:
 
 - `source_store_number`
 - `commander_ip`
+- `commander_install_path`
 - `live_endpoint_url`
 - `finalization_endpoint_url`
 - `live_poll_interval_seconds`
@@ -46,6 +48,10 @@ The machine config stores:
 - optional one-shot worker enablement flags for future rollout
 
 Configuration must not include connector tokens, Commander usernames, Commander passwords, cookies, or service-role keys.
+
+`configure-storepulse-machine-connector.ps1` is the first-time setup entrypoint. It supports ValidateOnly, interactive setup, and noninteractive installer-friendly setup with secure secret input. It writes config through `storepulse-machine-config.ps1` and encrypted secrets through `storepulse-machine-secrets.ps1`.
+
+Real machine-wide writes require elevated PowerShell. ValidateOnly performs syntactic validation only and makes no network calls.
 
 ## Encrypted Secrets
 
@@ -62,6 +68,8 @@ Required secret names:
 - `connector_token`
 
 Values are protected with Windows DPAPI LocalMachine scope so they are not tied to an employee Windows profile. The file ACL is tightened to SYSTEM and Administrators where possible.
+
+Secret rotation should run the configuration tool again with only the secret values being replaced. Config values are preserved unless explicitly supplied. Secrets must not be placed on command lines in production operation.
 
 ## LocalSystem Service Model
 
@@ -88,10 +96,10 @@ Service registration is available only through the installer/control scripts whe
 
 ### Live Worker
 
-The live worker uses the existing provisional/current-shift connector in one-shot mode:
+The live worker uses the existing provisional/current-shift connector in one-shot mode through the bundled private Node runtime:
 
 ```text
-node storepulse-connector.mjs --once --summary-path <ProgramData>\StorePulse\state\live-once-summary.json
+C:\Program Files\StorePulse\Connector\runtime\node\node.exe storepulse-connector.mjs --once --summary-path <ProgramData>\StorePulse\state\live-once-summary.json
 ```
 
 The current user-specific prototype still defaults to continuous polling when launched without `--once`. The machine-wide runtime controls repetition by launching one scan cycle per worker interval instead of letting the connector run its own endless loop.
@@ -110,6 +118,8 @@ The live connector summary JSON contains:
 Exit code `0` means the one-shot cycle completed successfully, including when there were no new files or only duplicates. A non-zero exit means a real configuration, processing, or upload failure occurred.
 
 Secrets are passed to the connector through process environment variables, not command-line arguments. The runtime clears/restores process environment variables after invocation.
+
+Installed service mode never falls back to a globally installed `node` from `PATH`. If the private runtime is missing or invalid, the live worker records a non-secret `runtime_missing` or `runtime_invalid` failure.
 
 ### Closed-Day Worker
 
@@ -213,6 +223,40 @@ The installer does not install Node globally. Production packaging should bundle
 C:\Program Files\StorePulse\Connector\runtime\node
 ```
 
+## Private Node Runtime Packaging
+
+The package includes `node-runtime-manifest.json` with:
+
+- required Node major version
+- expected relative path
+- executable name
+- architecture
+- expected `node.exe` SHA-256
+- source/version metadata
+
+Before pilot installation, an administrator must obtain a vetted Windows Node runtime from the approved distribution channel, place `node.exe` under `runtime\node`, compute its SHA-256, and replace the manifest placeholder with the exact 64-character hash. The installer and runtime validate the private runtime and fail closed on:
+
+- missing `node.exe`
+- SHA-256 mismatch
+- architecture mismatch
+- manifest still containing a placeholder hash
+
+The installer never downloads Node and never uses global Node for service execution.
+
+## Install Validation
+
+`test-storepulse-installation.ps1` performs offline validation and writes a JSON report under ProgramData state or a supplied output path. Modes include:
+
+- `ValidateFiles`
+- `ValidateConfig`
+- `ValidateSecrets`
+- `ValidateRuntime`
+- `ValidateServicePlan`
+- `SmokeTestOnce`
+- `All`
+
+`SmokeTestOnce` requires no-production mode in this checkpoint and uses injected/mock workers. It must not call Commander, Supabase, service registration, or scheduled tasks.
+
 ## Logging
 
 Machine logs are written under:
@@ -232,6 +276,14 @@ Logs must not include:
 ## Upgrades
 
 Upgrade stops `StorePulseConnector`, backs up the existing Program Files connector tree, replaces binaries, restores the previous binaries on copy/registration failure, and restarts the service after a successful upgrade. ProgramData config, secrets, logs, working data, archives, and state are durable machine state and must survive binary replacement.
+
+Rollback checklist:
+
+1. Stop `StorePulseConnector`.
+2. Restore the previous Program Files connector tree from the upgrade backup.
+3. Preserve ProgramData unchanged.
+4. Run `test-storepulse-installation.ps1 -Mode All -NoProduction`.
+5. Start the service only after validation passes.
 
 ## Repair
 
@@ -265,16 +317,40 @@ If any removal step fails, the administrator should stop and inspect the printed
 
 ## Pilot Installation Checklist
 
-1. Build or copy the connector package with a private Node runtime under `runtime\node`.
-2. Run installer `-ValidateOnly` and confirm the manifest, service command, Program Files path, and ProgramData path.
-3. Install on a non-production pilot machine using `-Install` from elevated PowerShell.
-4. Create `config.json` under ProgramData without secrets.
-5. Write DPAPI LocalMachine `secrets.json`.
-6. Run `storepulse-service-control.ps1 -Command Validate`.
-7. Run `RunForeground` against test endpoints and synthetic connector data.
-8. Start the Windows Service only after Validate/RunForeground results are clean.
-9. Monitor `runtime-status.json` and JSONL logs.
-10. Keep the legacy user-specific task disabled only after the service has proven stable for the pilot.
+1. Build or copy the connector package with a vetted private Node runtime under `runtime\node`.
+2. Replace the Node manifest SHA-256 placeholder with the vetted `node.exe` hash.
+3. Run installer `-ValidateOnly` and confirm the manifest, service command, Program Files path, ProgramData path, and runtime expectation.
+4. Run `configure-storepulse-machine-connector.ps1 -ValidateOnly` with pilot configuration values.
+5. Write machine config and DPAPI LocalMachine secrets through the configuration script.
+6. Run `test-storepulse-installation.ps1 -Mode All -NoProduction`.
+7. Install on a non-production pilot machine using `-Install` from elevated PowerShell only after validation passes.
+8. Run `storepulse-service-control.ps1 -Command Validate`.
+9. Run `RunForeground` against test endpoints and synthetic connector data.
+10. Start the Windows Service only after Validate/RunForeground results are clean.
+11. Monitor `runtime-status.json`, JSONL logs, and the install validation report.
+12. Keep the legacy user-specific task disabled only after the service has proven stable for the pilot.
+
+## HUB Migration Sequence
+
+1. Inventory the current prototype task and connector paths without changing them.
+2. Prepare Program Files and ProgramData package on a non-production machine.
+3. Validate config, encrypted secrets, private Node, service plan, and no-production smoke test.
+4. Run one controlled foreground service cycle against pilot endpoints.
+5. Pause the legacy user-specific task only during the approved cutover window.
+6. Start `StorePulseConnector`.
+7. Verify live status, logs, and StorePulse ingestion.
+8. Keep rollback ready by preserving the previous prototype files and task definition until the pilot completes.
+
+## Second-Laptop Clean Install Checklist
+
+1. Copy the same reviewed installer package.
+2. Confirm there are no user-profile paths in config.
+3. Configure machine-specific store number, Commander host, endpoints, and paths.
+4. Write DPAPI LocalMachine secrets on that laptop.
+5. Run full install validation in no-production mode.
+6. Install/register the service only after validation passes.
+7. Start with RunForeground before enabling normal service start.
+8. Compare logs/status behavior with the first pilot before fleet rollout.
 
 ## Migration From User-Specific Prototype
 

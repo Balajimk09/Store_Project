@@ -4,7 +4,7 @@
   "service_display_name": "StorePulse Connector Service",
   "expected_install_root": "C:\\Program Files\\StorePulse\\Connector",
   "expected_program_data_root": "C:\\ProgramData\\StorePulse",
-  "version": "3.0.0-checkpoint4",
+  "version": "3.0.0-checkpoint5",
   "bundled_node_runtime_relative_path": "runtime\\node",
   "supported_upgrade_schema_version": 1,
   "required_files": [
@@ -19,8 +19,12 @@
     "service\\storepulse-service-control.ps1",
     "service\\storepulse-windows-service.ps1",
     "service\\storepulse-service-entrypoint.ps1",
+    "service\\storepulse-node-runtime.ps1",
+    "service\\configure-storepulse-machine-connector.ps1",
+    "service\\test-storepulse-installation.ps1",
     "service\\install-storepulse-machine-connector.ps1",
     "service\\uninstall-storepulse-machine-connector.ps1",
-    "service\\install-manifest.json"
+    "service\\install-manifest.json",
+    "service\\node-runtime-manifest.json"
   ]
 }

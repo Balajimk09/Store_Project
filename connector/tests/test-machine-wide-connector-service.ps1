@@ -52,6 +52,29 @@ function New-TestConfig {
     }
 }
 
+function Install-TestNodeRuntime {
+    param([string]$InstallRoot, [string]$Architecture = "any")
+    $nodeCommand = Get-Command node -ErrorAction Stop
+    $nodeSource = $nodeCommand.Source
+    $nodeDir = Join-Path (Join-Path $InstallRoot "runtime") "node"
+    $serviceDir = Join-Path $InstallRoot "service"
+    New-Item -ItemType Directory -Path $nodeDir -Force | Out-Null
+    New-Item -ItemType Directory -Path $serviceDir -Force | Out-Null
+    $nodeDestination = Join-Path $nodeDir "node.exe"
+    Copy-Item -LiteralPath $nodeSource -Destination $nodeDestination -Force
+    $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $nodeDestination).Hash.ToLowerInvariant()
+    [PSCustomObject]@{
+        required_node_major = 20
+        expected_relative_path = "runtime\node"
+        executable_name = "node.exe"
+        architecture = $Architecture
+        sha256 = $hash
+        source = "Synthetic local test runtime"
+        version = "test"
+    } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $serviceDir "node-runtime-manifest.json") -Encoding UTF8
+    return [PSCustomObject]@{ NodePath = $nodeDestination; Hash = $hash; ManifestPath = (Join-Path $serviceDir "node-runtime-manifest.json") }
+}
+
 function Invoke-ConnectorOnceTest {
     param(
         [string]$Name,
@@ -121,6 +144,7 @@ try {
     . (Join-Path $serviceRoot "storepulse-machine-secrets.ps1")
     . (Join-Path $serviceRoot "storepulse-service-runtime.ps1")
     . (Join-Path $serviceRoot "storepulse-windows-service.ps1")
+    . (Join-Path $serviceRoot "storepulse-node-runtime.ps1")
 
     [Environment]::SetEnvironmentVariable("STOREPULSE_PROGRAMDATA_ROOT", (Join-Path $tempRoot "ProgramData"), "Process")
     [Environment]::SetEnvironmentVariable("STOREPULSE_INSTALL_ROOT", (Join-Path $tempRoot "ProgramFiles\StorePulse\Connector"), "Process")
@@ -139,6 +163,7 @@ try {
     Assert-Equal -Actual $manifest.service_display_name -Expected "StorePulse Connector Service" -Message "manifest display name"
     Assert-True -Condition (($manifest.required_files -contains "service\storepulse-windows-service.ps1") -and ($manifest.required_files -contains "service\storepulse-service-entrypoint.ps1")) -Message "manifest includes service files"
     Assert-Equal -Actual $manifest.bundled_node_runtime_relative_path -Expected "runtime\node" -Message "manifest declares private Node runtime path"
+    Assert-True -Condition ($manifest.required_files -contains "service\node-runtime-manifest.json") -Message "manifest includes Node runtime manifest"
 
     $programDataRoot = Get-StorePulseProgramDataRoot
     $installRoot = Get-StorePulseInstallRoot
@@ -152,6 +177,7 @@ try {
     $serviceSubdir = Join-Path $installRoot "service"
     New-Item -ItemType Directory -Path $serviceSubdir -Force | Out-Null
     Set-Content -LiteralPath (Join-Path $serviceSubdir "storepulse-service-entrypoint.ps1") -Value "placeholder" -Encoding UTF8
+    $testNode = Install-TestNodeRuntime -InstallRoot $installRoot
 
     $servicePlan = Install-StorePulseWindowsService -InstallRoot $installRoot -ValidateOnly
     Assert-Equal -Actual $servicePlan.service_name -Expected "StorePulseConnector" -Message "service plan name"
@@ -178,6 +204,24 @@ try {
     Assert-True -Condition (Test-StorePulseServiceInstalled -GetService { param($Name) $global:ControlServiceState }) -Message "service installed test handles present service"
     Assert-Equal -Actual (Get-StorePulseServiceStatus -GetService { param($Name) $global:ControlServiceState }).Status -Expected "Stopped" -Message "service status returns mocked state"
 
+    $nodeRuntimeValid = Test-StorePulseNodeRuntime -InstallRoot $installRoot -ManifestPath $testNode.ManifestPath -PassThru
+    Assert-True -Condition ([bool]$nodeRuntimeValid.ok) -Message "private Node runtime validates with matching SHA"
+    $missingRuntimeRoot = Join-Path $tempRoot "missing-runtime"
+    New-Item -ItemType Directory -Path (Join-Path $missingRuntimeRoot "service") -Force | Out-Null
+    Copy-Item -LiteralPath $testNode.ManifestPath -Destination (Join-Path (Join-Path $missingRuntimeRoot "service") "node-runtime-manifest.json")
+    $nodeRuntimeMissing = Test-StorePulseNodeRuntime -InstallRoot $missingRuntimeRoot -ManifestPath (Join-Path (Join-Path $missingRuntimeRoot "service") "node-runtime-manifest.json") -PassThru
+    Assert-Equal -Actual $nodeRuntimeMissing.status -Expected "runtime_missing" -Message "missing private Node runtime is reported"
+    $badHashManifest = Join-Path $serviceSubdir "node-runtime-bad-hash.json"
+    (Get-Content -LiteralPath $testNode.ManifestPath -Raw).Replace($testNode.Hash, ("0" * 64)) | Set-Content -LiteralPath $badHashManifest -Encoding UTF8
+    $nodeRuntimeBadHash = Test-StorePulseNodeRuntime -InstallRoot $installRoot -ManifestPath $badHashManifest -PassThru
+    Assert-Equal -Actual $nodeRuntimeBadHash.status -Expected "runtime_invalid" -Message "Node runtime SHA mismatch is reported"
+    $badArchManifest = Join-Path $serviceSubdir "node-runtime-bad-arch.json"
+    $badArchObject = Get-Content -LiteralPath $testNode.ManifestPath -Raw | ConvertFrom-Json
+    $badArchObject.architecture = "not-this-architecture"
+    $badArchObject | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $badArchManifest -Encoding UTF8
+    $nodeRuntimeBadArch = Test-StorePulseNodeRuntime -InstallRoot $installRoot -ManifestPath $badArchManifest -PassThru
+    Assert-Equal -Actual $nodeRuntimeBadArch.status -Expected "runtime_invalid" -Message "Node runtime architecture mismatch is reported"
+
     $config = New-TestConfig -Root $programDataRoot -InstallRoot $installRoot
     Assert-True -Condition (Test-StorePulseMachineConfig -Config $config) -Message "valid config accepted"
     $configPath = Write-StorePulseMachineConfig -Config $config -CreateDirectories
@@ -188,6 +232,80 @@ try {
     Assert-Throws -ScriptBlock { $bad = New-TestConfig -Root $programDataRoot -InstallRoot $installRoot; $bad.live_endpoint_url = "http://example.invalid"; Test-StorePulseMachineConfig -Config $bad | Out-Null } -Message "non-HTTPS URL rejected"
     Assert-Throws -ScriptBlock { $bad = New-TestConfig -Root $programDataRoot -InstallRoot $installRoot; $bad.source_store_number = "bad/store"; Test-StorePulseMachineConfig -Config $bad | Out-Null } -Message "invalid store number rejected"
     Assert-Throws -ScriptBlock { $bad = New-TestConfig -Root $programDataRoot -InstallRoot $installRoot; Add-Member -InputObject $bad -NotePropertyName "connector_token" -NotePropertyValue "plain"; Test-StorePulseMachineConfig -Config $bad | Out-Null } -Message "secret in config rejected"
+
+    $configureValidateOutput = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $serviceRoot "configure-storepulse-machine-connector.ps1") `
+        -ValidateOnly `
+        -ConfigPath (Join-Path $programDataRoot "validate-only-config.json") `
+        -SecretsPath (Join-Path $programDataRoot "validate-only-secrets.json") `
+        -ProgramDataRoot $programDataRoot `
+        -InstallRoot $installRoot `
+        -SourceStoreNumber "SYNTH" `
+        -CommanderIp "commander.local" `
+        -CommanderInstallPath (Join-Path $installRoot "Commander") `
+        -LiveUploadUrl "https://example.invalid/functions/v1/ingest-pos-transactions" `
+        -FinalizationUrl "https://example.invalid/functions/v1/finalize-pos-business-day" `
+        -LivePollSeconds 300 `
+        -ClosedDayPollSeconds 3600 `
+        -LogsRoot (Join-Path $programDataRoot "logs") `
+        -WorkingRoot (Join-Path $programDataRoot "working") `
+        -ArchiveRoot (Join-Path $programDataRoot "archive") `
+        -StateRoot (Join-Path $programDataRoot "state")
+    Assert-True -Condition (($configureValidateOutput -join "`n") -match "ValidateOnly complete") -Message "configuration setup ValidateOnly succeeds"
+    Assert-True -Condition (-not (Test-Path -LiteralPath (Join-Path $programDataRoot "validate-only-config.json"))) -Message "configuration ValidateOnly writes no config"
+
+    $configurePath = Join-Path $programDataRoot "configured.json"
+    $configureSecretsPath = Join-Path $programDataRoot "configured-secrets.json"
+    $configureOutput = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $serviceRoot "configure-storepulse-machine-connector.ps1") `
+        -NonInteractive `
+        -UseTestPlaintextSecrets `
+        -ConfigPath $configurePath `
+        -SecretsPath $configureSecretsPath `
+        -ProgramDataRoot $programDataRoot `
+        -InstallRoot $installRoot `
+        -SourceStoreNumber "SYNTH" `
+        -CommanderIp "commander.local" `
+        -LiveUploadUrl "https://example.invalid/functions/v1/ingest-pos-transactions" `
+        -FinalizationUrl "https://example.invalid/functions/v1/finalize-pos-business-day" `
+        -LivePollSeconds 300 `
+        -ClosedDayPollSeconds 3600 `
+        -LogsRoot (Join-Path $programDataRoot "logs") `
+        -WorkingRoot (Join-Path $programDataRoot "working") `
+        -ArchiveRoot (Join-Path $programDataRoot "archive") `
+        -StateRoot (Join-Path $programDataRoot "state") `
+        -TestCommanderUsername "synthetic-user" `
+        -TestCommanderPassword "synthetic-password" `
+        -TestConnectorToken "synthetic-token"
+    Assert-True -Condition (Test-Path -LiteralPath $configurePath -PathType Leaf) -Message "configuration setup writes config"
+    Assert-True -Condition (Test-Path -LiteralPath $configureSecretsPath -PathType Leaf) -Message "configuration setup writes encrypted secrets"
+    Assert-True -Condition ((Get-Content -LiteralPath $configureSecretsPath -Raw) -notmatch "synthetic-user|synthetic-password|synthetic-token") -Message "configuration secrets file does not contain plaintext"
+    Assert-True -Condition (($configureOutput -join "`n") -notmatch "synthetic-password|synthetic-token") -Message "configuration output excludes secret values"
+    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $serviceRoot "configure-storepulse-machine-connector.ps1") `
+        -NonInteractive `
+        -UseTestPlaintextSecrets `
+        -ConfigPath $configurePath `
+        -SecretsPath $configureSecretsPath `
+        -ProgramDataRoot $programDataRoot `
+        -CommanderIp "commander.changed.local" `
+        -TestCommanderUsername "synthetic-user" `
+        -TestCommanderPassword "synthetic-password" `
+        -TestConnectorToken "synthetic-token" | Out-Null
+    $partialConfig = Get-Content -LiteralPath $configurePath -Raw | ConvertFrom-Json
+    Assert-Equal -Actual $partialConfig.source_store_number -Expected "SYNTH" -Message "partial configuration preserves existing source store"
+    Assert-Equal -Actual $partialConfig.commander_ip -Expected "commander.changed.local" -Message "partial configuration updates supplied field"
+
+    $validationReportPath = Join-Path $programDataRoot "state\install-validation.json"
+    $validationOutput = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $serviceRoot "test-storepulse-installation.ps1") `
+        -Mode All `
+        -ConfigPath $configurePath `
+        -SecretsPath $configureSecretsPath `
+        -InstallRoot $installRoot `
+        -ProgramDataRoot $programDataRoot `
+        -OutputPath $validationReportPath `
+        -NoProduction
+    Assert-True -Condition (($validationOutput -join "`n") -match "Validation report") -Message "installation validation writes report"
+    $validationReport = Get-Content -LiteralPath $validationReportPath -Raw | ConvertFrom-Json
+    Assert-True -Condition ([bool]$validationReport.ok) -Message "installation validation report succeeds"
+    Assert-True -Condition (($validationReport | ConvertTo-Json -Depth 20) -notmatch "synthetic-password|synthetic-token") -Message "installation validation report excludes secrets"
 
     $zeroNew = Invoke-ConnectorOnceTest -Name "zero-new"
     Assert-Equal -Actual $zeroNew.ExitCode -Expected 0 -Message "--once zero files exits 0"
@@ -236,6 +354,8 @@ try {
 
     $connectorSource = Get-Content -LiteralPath (Join-Path $repoRoot "connector\storepulse-connector.mjs") -Raw
     Assert-True -Condition ($connectorSource.Contains("while (!shuttingDown)")) -Message "default continuous polling loop remains present"
+    $runtimeSource = Get-Content -LiteralPath (Join-Path $serviceRoot "storepulse-service-runtime.ps1") -Raw
+    Assert-True -Condition ($runtimeSource -match 'Test-StorePulseNodeRuntime' -and $runtimeSource -match '\$nodeExe' -and $runtimeSource -notmatch '& node \$connectorScript') -Message "runtime uses private Node runtime instead of global node"
 
     $secretsObject = [PSCustomObject]@{
         commander_username = "synthetic-user"
@@ -445,6 +565,8 @@ writeFileSync(summaryPath, JSON.stringify({
     $installerSource = Get-Content -LiteralPath (Join-Path $serviceRoot "install-storepulse-machine-connector.ps1") -Raw
     Assert-True -Condition ($installerSource -match 'backupRoot' -and $installerSource -match 'Stop-StorePulseWindowsService' -and $installerSource -match 'Start-StorePulseWindowsService') -Message "installer contains upgrade rollback and restart plan"
     Assert-True -Condition ($installerSource -match 'Repair' -and $installerSource -match 'Install-StorePulseWindowsService') -Message "installer contains repair registration path"
+    Assert-True -Condition ($installerSource.IndexOf('Test-StorePulseNodeRuntime') -lt $installerSource.LastIndexOf('Install-StorePulseWindowsService -InstallRoot $resolvedInstallRoot | Out-Null')) -Message "installer validates Node runtime before service registration"
+    Assert-True -Condition ($installerSource -match 'Read-StorePulseMachineConfig' -and $installerSource -match 'Read-StorePulseMachineSecrets') -Message "installer validates config and secrets before registration"
 
     foreach ($file in Get-ChildItem -LiteralPath $serviceRoot -Filter "*.ps1") {
         $content = Get-Content -LiteralPath $file.FullName -Raw

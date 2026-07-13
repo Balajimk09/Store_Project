@@ -9,6 +9,9 @@ if (-not (Get-Command Get-StorePulseProgramDataRoot -ErrorAction SilentlyContinu
 if (-not (Get-Command Read-StorePulseMachineSecrets -ErrorAction SilentlyContinue)) {
     . (Join-Path $PSScriptRoot "storepulse-machine-secrets.ps1")
 }
+if (-not (Get-Command Test-StorePulseNodeRuntime -ErrorAction SilentlyContinue)) {
+    . (Join-Path $PSScriptRoot "storepulse-node-runtime.ps1")
+}
 
 $script:StorePulseRuntimeVersion = "3.0.0-checkpoint2"
 
@@ -44,6 +47,8 @@ function Test-StorePulseServiceScripts {
         $path = Join-Path $Root $name
         if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "Required connector script missing: $name" }
     }
+    $nodeManifest = Join-Path (Join-Path $Root "service") "node-runtime-manifest.json"
+    if (-not (Test-Path -LiteralPath $nodeManifest -PathType Leaf)) { throw "Required Node runtime manifest missing." }
     return $true
 }
 
@@ -199,6 +204,12 @@ function New-StorePulseDefaultLiveWorker {
         param($Config, $Secrets, $InstallRoot)
         $connectorScript = Join-Path $InstallRoot "storepulse-connector.mjs"
         if (-not (Test-Path -LiteralPath $connectorScript -PathType Leaf)) { throw "Live connector script is missing." }
+        $nodeManifestPath = Join-Path (Join-Path $InstallRoot "service") "node-runtime-manifest.json"
+        $nodeValidation = Test-StorePulseNodeRuntime -InstallRoot $InstallRoot -ManifestPath $nodeManifestPath -PassThru
+        if (-not $nodeValidation.ok) {
+            throw ("{0}: {1}" -f $nodeValidation.status, $nodeValidation.message)
+        }
+        $nodeExe = [string]$nodeValidation.node_path
 
         $programDataRoot = Split-Path -Parent ([string]$Config.logs_root)
         $stateRoot = Get-StorePulseStateRoot -ProgramDataRoot $programDataRoot
@@ -224,7 +235,7 @@ function New-StorePulseDefaultLiveWorker {
             [Environment]::SetEnvironmentVariable("STOREPULSE_SUMMARY_PATH", $summaryPath, "Process")
             [Environment]::SetEnvironmentVariable("STOREPULSE_STATE_PATH", $statePath, "Process")
 
-            $output = & node $connectorScript --once --summary-path $summaryPath 2>&1
+            $output = & $nodeExe $connectorScript --once --summary-path $summaryPath 2>&1
             $exitCode = $LASTEXITCODE
             if ($exitCode -ne 0) {
                 $safeOutput = ConvertTo-StorePulseSafeText -Value (($output | ForEach-Object { [string]$_ }) -join "`n") -Secrets $Secrets

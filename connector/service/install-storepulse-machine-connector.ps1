@@ -13,7 +13,9 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
 . (Join-Path $PSScriptRoot "storepulse-machine-config.ps1")
+. (Join-Path $PSScriptRoot "storepulse-machine-secrets.ps1")
 . (Join-Path $PSScriptRoot "storepulse-windows-service.ps1")
+. (Join-Path $PSScriptRoot "storepulse-node-runtime.ps1")
 
 function Test-StorePulseElevation {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -51,10 +53,7 @@ function Copy-StorePulseInstalledFiles {
         Copy-Item -LiteralPath $nodeSource -Destination $nodeDestination -Recurse -Force
     }
     else {
-        if (-not (Test-Path -LiteralPath $nodeDestination -PathType Container)) {
-            New-Item -ItemType Directory -Path $nodeDestination -Force | Out-Null
-        }
-        Set-Content -LiteralPath (Join-Path $nodeDestination "README.txt") -Encoding UTF8 -Value "Private Node runtime placeholder. Production packaging must place node.exe here before service start."
+        throw "Private Node runtime source is missing: $nodeSource"
     }
 }
 
@@ -91,6 +90,14 @@ if ($ValidateOnly -or (-not $Install -and -not $Repair -and -not $Upgrade)) {
     return
 }
 
+$configPath = Get-StorePulseConfigPath -ProgramDataRoot $resolvedProgramDataRoot
+$secretsPath = Get-StorePulseSecretsPath -ProgramDataRoot $resolvedProgramDataRoot
+$config = Read-StorePulseMachineConfig -Path $configPath
+Test-StorePulseMachineConfig -Config $config | Out-Null
+$secrets = Read-StorePulseMachineSecrets -Path $secretsPath
+Test-StorePulseMachineSecrets -Secrets $secrets | Out-Null
+Test-StorePulseNodeRuntime -InstallRoot $resolvedSourceRoot -ManifestPath (Join-Path (Join-Path $resolvedSourceRoot "service") "node-runtime-manifest.json") | Out-Null
+
 if ($PSCmdlet.ShouldProcess($resolvedInstallRoot, "$mode StorePulse connector files and service")) {
     foreach ($dir in @($resolvedInstallRoot, $resolvedProgramDataRoot, (Join-Path $resolvedProgramDataRoot "logs"), (Join-Path $resolvedProgramDataRoot "working"), (Join-Path $resolvedProgramDataRoot "archive"), (Join-Path $resolvedProgramDataRoot "state"))) {
         if (-not (Test-Path -LiteralPath $dir -PathType Container)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
@@ -105,6 +112,7 @@ if ($PSCmdlet.ShouldProcess($resolvedInstallRoot, "$mode StorePulse connector fi
 
     try {
         Copy-StorePulseInstalledFiles -Manifest $manifest -SourceRoot $resolvedSourceRoot -InstallRoot $resolvedInstallRoot
+        Test-StorePulseNodeRuntime -InstallRoot $resolvedInstallRoot -ManifestPath (Join-Path (Join-Path $resolvedInstallRoot "service") "node-runtime-manifest.json") | Out-Null
         Install-StorePulseWindowsService -InstallRoot $resolvedInstallRoot | Out-Null
         if ($Upgrade) { Start-StorePulseWindowsService -ErrorAction SilentlyContinue }
     }

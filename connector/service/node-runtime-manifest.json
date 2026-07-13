@@ -1,0 +1,10 @@
+{
+  "required_node_major": 20,
+  "expected_relative_path": "runtime\\node",
+  "executable_name": "node.exe",
+  "architecture": "x64",
+  "sha256": "REPLACE_WITH_VETTED_NODE_EXE_SHA256",
+  "source": "Administrator-provided vetted private Node.js runtime",
+  "version": "20.x",
+  "notes": "Do not download automatically. Replace sha256 with the vetted node.exe SHA-256 before pilot installation."
+}

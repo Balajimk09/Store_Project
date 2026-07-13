@@ -59,6 +59,7 @@ function New-StorePulseWorkerStatus {
         last_success_at = $null
         last_failure_at = $null
         last_error = $null
+        last_result = $null
     }
 }
 
@@ -146,6 +147,13 @@ function Get-StorePulseConfigBool {
     return [bool]$property.Value
 }
 
+function Get-StorePulseConfigString {
+    param([Parameter(Mandatory)]$Config, [Parameter(Mandatory)][string]$Name, [string]$Default = "")
+    $property = $Config.PSObject.Properties[$Name]
+    if ($null -eq $property -or $null -eq $property.Value -or [string]::IsNullOrWhiteSpace([string]$property.Value)) { return $Default }
+    return [string]$property.Value
+}
+
 function Get-StorePulseBackoffSeconds {
     param([int]$ConsecutiveFailures, [int]$BaseSeconds, [int]$MaxSeconds)
     if ($ConsecutiveFailures -le 0) { return 0 }
@@ -167,10 +175,11 @@ function Invoke-StorePulseWorkerOnce {
     $WorkerStatus.status = "running"
     $WorkerStatus.last_started_at = (Get-Date).ToString("o")
     try {
-        & $Worker $Config $Secrets $InstallRoot
+        $workerResult = & $Worker $Config $Secrets $InstallRoot
         $WorkerStatus.status = "succeeded"
         $WorkerStatus.last_success_at = (Get-Date).ToString("o")
         $WorkerStatus.last_error = $null
+        $WorkerStatus.last_result = $workerResult
         $WorkerStatus.consecutive_failures = 0
         $WorkerStatus.next_delay_seconds = 0
         Write-StorePulseJsonLog -LogsRoot $LogsRoot -Level "info" -Event "$Name worker succeeded" -Secrets $Secrets
@@ -188,7 +197,58 @@ function Invoke-StorePulseWorkerOnce {
 function New-StorePulseDefaultLiveWorker {
     return {
         param($Config, $Secrets, $InstallRoot)
-        throw "Live worker one-shot placeholder: existing live connector has no safe supported one-shot command in this checkpoint."
+        $connectorScript = Join-Path $InstallRoot "storepulse-connector.mjs"
+        if (-not (Test-Path -LiteralPath $connectorScript -PathType Leaf)) { throw "Live connector script is missing." }
+
+        $programDataRoot = Split-Path -Parent ([string]$Config.logs_root)
+        $stateRoot = Get-StorePulseStateRoot -ProgramDataRoot $programDataRoot
+        if (-not (Test-Path -LiteralPath $stateRoot -PathType Container)) {
+            New-Item -ItemType Directory -Path $stateRoot -Force | Out-Null
+        }
+        $summaryPath = Join-Path $stateRoot "live-once-summary.json"
+        $statePath = Join-Path $stateRoot "live-upload-state.json"
+        $watchFolder = Get-StorePulseConfigString -Config $Config -Name "live_watch_folder" -Default (Join-Path ([string]$Config.working_root) "live")
+        $archiveFolder = Get-StorePulseConfigString -Config $Config -Name "live_archive_folder" -Default ""
+
+        $previous = @{}
+        foreach ($name in @("STOREPULSE_API_URL", "STOREPULSE_CONNECTOR_TOKEN", "STOREPULSE_WATCH_FOLDER", "STOREPULSE_ARCHIVE_FOLDER", "STOREPULSE_POLL_SECONDS", "STOREPULSE_ONCE", "STOREPULSE_SUMMARY_PATH", "STOREPULSE_STATE_PATH")) {
+            $previous[$name] = [Environment]::GetEnvironmentVariable($name, "Process")
+        }
+        try {
+            [Environment]::SetEnvironmentVariable("STOREPULSE_API_URL", [string]$Config.live_endpoint_url, "Process")
+            [Environment]::SetEnvironmentVariable("STOREPULSE_CONNECTOR_TOKEN", [string]$Secrets.connector_token, "Process")
+            [Environment]::SetEnvironmentVariable("STOREPULSE_WATCH_FOLDER", $watchFolder, "Process")
+            [Environment]::SetEnvironmentVariable("STOREPULSE_ARCHIVE_FOLDER", $archiveFolder, "Process")
+            [Environment]::SetEnvironmentVariable("STOREPULSE_POLL_SECONDS", [string]$Config.live_poll_interval_seconds, "Process")
+            [Environment]::SetEnvironmentVariable("STOREPULSE_ONCE", "true", "Process")
+            [Environment]::SetEnvironmentVariable("STOREPULSE_SUMMARY_PATH", $summaryPath, "Process")
+            [Environment]::SetEnvironmentVariable("STOREPULSE_STATE_PATH", $statePath, "Process")
+
+            $output = & node $connectorScript --once --summary-path $summaryPath 2>&1
+            $exitCode = $LASTEXITCODE
+            if ($exitCode -ne 0) {
+                $safeOutput = ConvertTo-StorePulseSafeText -Value (($output | ForEach-Object { [string]$_ }) -join "`n") -Secrets $Secrets
+                throw "Live connector one-shot exited with code $exitCode. $safeOutput"
+            }
+            if (-not (Test-Path -LiteralPath $summaryPath -PathType Leaf)) {
+                throw "Live connector one-shot did not write summary JSON."
+            }
+            $summary = Get-Content -LiteralPath $summaryPath -Raw | ConvertFrom-Json
+            return [PSCustomObject]@{
+                scanned = [int]$summary.scanned
+                eligible = [int]$summary.eligible
+                uploaded = [int]$summary.uploaded
+                skipped_duplicate = [int]$summary.skipped_duplicate
+                skipped_unstable = [int]$summary.skipped_unstable
+                failed = [int]$summary.failed
+                summary_path = $summaryPath
+            }
+        }
+        finally {
+            foreach ($name in $previous.Keys) {
+                [Environment]::SetEnvironmentVariable($name, $previous[$name], "Process")
+            }
+        }
     }.GetNewClosure()
 }
 

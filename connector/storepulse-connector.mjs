@@ -22,6 +22,40 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function newSummary() {
+  const startedAt = new Date().toISOString();
+  return {
+    scanned: 0,
+    eligible: 0,
+    uploaded: 0,
+    skipped_duplicate: 0,
+    skipped_unstable: 0,
+    failed: 0,
+    started_at: startedAt,
+    completed_at: null,
+  };
+}
+
+function parseArgs(argv) {
+  const result = { once: false, summaryPath: null };
+  for (let index = 0; index < argv.length; index += 1) {
+    const arg = argv[index];
+    if (arg === '--once') {
+      result.once = true;
+    } else if (arg === '--summary-path') {
+      const value = argv[index + 1];
+      if (!value) {
+        throw new Error('--summary-path requires a path value.');
+      }
+      result.summaryPath = value;
+      index += 1;
+    } else {
+      throw new Error(`Unknown connector argument: ${arg}`);
+    }
+  }
+  return result;
+}
+
 async function loadLocalEnvFile() {
   if (!existsSync(envPath)) return;
 
@@ -74,6 +108,7 @@ function requiredConfigValue(name) {
 
 async function loadConfig() {
   await loadLocalEnvFile();
+  const args = parseArgs(process.argv.slice(2));
 
   const apiUrl = requiredConfigValue('STOREPULSE_API_URL');
   const token = requiredConfigValue('STOREPULSE_CONNECTOR_TOKEN');
@@ -91,13 +126,16 @@ async function loadConfig() {
     archiveFolder: String(process.env.STOREPULSE_ARCHIVE_FOLDER || '').trim() || null,
     pollSeconds: parsePositiveInteger(process.env.STOREPULSE_POLL_SECONDS, DEFAULT_POLL_SECONDS),
     dryRun: parseBoolean(process.env.STOREPULSE_DRY_RUN, false),
-    once: parseBoolean(process.env.STOREPULSE_ONCE, false),
+    once: args.once || parseBoolean(process.env.STOREPULSE_ONCE, false),
+    summaryPath: args.summaryPath || String(process.env.STOREPULSE_SUMMARY_PATH || '').trim() || null,
+    statePath: String(process.env.STOREPULSE_STATE_PATH || '').trim() || statePath,
+    stabilityWaitMs: parsePositiveInteger(process.env.STOREPULSE_STABILITY_WAIT_MS, STABILITY_WAIT_MS),
   };
 }
 
-async function readState() {
+async function readState(config) {
   try {
-    const text = await readFile(statePath, 'utf8');
+    const text = await readFile(config.statePath, 'utf8');
     const parsed = JSON.parse(text);
     if (parsed && typeof parsed === 'object' && parsed.uploaded && typeof parsed.uploaded === 'object') {
       return parsed;
@@ -109,8 +147,15 @@ async function readState() {
   return { version: 1, uploaded: {} };
 }
 
-async function writeState(state) {
-  await writeFile(statePath, `${JSON.stringify(state, null, 2)}\n`, 'utf8');
+async function writeState(config, state) {
+  await mkdir(path.dirname(config.statePath), { recursive: true });
+  await writeFile(config.statePath, `${JSON.stringify(state, null, 2)}\n`, 'utf8');
+}
+
+async function writeSummary(summary, summaryPath) {
+  if (!summaryPath) return;
+  await mkdir(path.dirname(summaryPath), { recursive: true });
+  await writeFile(summaryPath, `${JSON.stringify(summary, null, 2)}\n`, 'utf8');
 }
 
 function fileExtension(filePath) {
@@ -158,10 +203,10 @@ async function listCandidateFiles(watchFolder) {
   return files;
 }
 
-async function stableFileStats(filePath) {
+async function stableFileStats(filePath, stabilityWaitMs = STABILITY_WAIT_MS) {
   try {
     const first = await stat(filePath);
-    await sleep(STABILITY_WAIT_MS);
+    await sleep(stabilityWaitMs);
     const second = await stat(filePath);
 
     if (first.size !== second.size || first.mtimeMs !== second.mtimeMs) {
@@ -242,6 +287,16 @@ async function uploadFile(config, filePath, fileHash) {
   const formData = new FormData();
   appendFileToFormData(formData, buffer, fileName);
 
+  const testUploadResult = String(process.env.STOREPULSE_CONNECTOR_TEST_UPLOAD_RESULT || '').trim().toLowerCase();
+  if (testUploadResult === 'success') {
+    console.log(`Uploaded ${fileName} (${fileHash})`);
+    return { uploaded: true };
+  }
+  if (testUploadResult === 'failure') {
+    console.error(`Upload failed for ${fileName}: synthetic test failure.`);
+    return { uploaded: false };
+  }
+
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
 
@@ -284,34 +339,40 @@ async function uploadFile(config, filePath, fileHash) {
   }
 }
 
-async function processFile(config, state, filePath) {
+async function processFile(config, state, filePath, summary) {
   const fileName = path.basename(filePath);
-  const stableStats = await stableFileStats(filePath);
+  const stableStats = await stableFileStats(filePath, config.stabilityWaitMs);
 
   if (!stableStats) {
     console.log(`Skipping ${fileName}: file is still changing or cannot be read.`);
-    return;
+    summary.skipped_unstable += 1;
+    return { status: 'skipped_unstable' };
   }
+  summary.eligible += 1;
 
   const fileHash = await hashFile(filePath);
   if (state.uploaded[fileHash]) {
     console.log(`Skipping ${fileName}: already uploaded locally.`);
-    return;
+    summary.skipped_duplicate += 1;
+    return { status: 'skipped_duplicate' };
   }
 
   if (config.dryRun) {
     console.log(`Dry run: would upload ${fileName} (${stableStats.size} bytes).`);
-    return;
+    return { status: 'dry_run' };
   }
 
   const result = await uploadFile(config, filePath, fileHash);
-  if (!result.uploaded) return;
+  if (!result.uploaded) {
+    summary.failed += 1;
+    return { status: 'failed' };
+  }
 
   state.uploaded[fileHash] = {
     fileName,
     uploadedAt: new Date().toISOString(),
   };
-  await writeState(state);
+  await writeState(config, state);
 
   if (config.archiveFolder) {
     try {
@@ -321,10 +382,13 @@ async function processFile(config, state, filePath) {
       console.error(`Uploaded ${fileName}, but could not archive it: ${message}`);
     }
   }
+  summary.uploaded += 1;
+  return { status: 'uploaded' };
 }
 
-async function pollOnce(config, state) {
+async function pollOnce(config, state, summary) {
   const files = await listCandidateFiles(config.watchFolder);
+  summary.scanned += files.length;
   if (files.length === 0) {
     console.log('No supported report files found.');
     return;
@@ -332,7 +396,7 @@ async function pollOnce(config, state) {
 
   for (const filePath of files) {
     if (shuttingDown) break;
-    await processFile(config, state, filePath);
+    await processFile(config, state, filePath, summary);
   }
 }
 
@@ -346,7 +410,8 @@ function installShutdownHandler() {
 
 async function main() {
   const config = await loadConfig();
-  const state = await readState();
+  const state = await readState(config);
+  const summary = newSummary();
   installShutdownHandler();
 
   console.log('StorePulse POS connector started.');
@@ -359,13 +424,19 @@ async function main() {
   console.log(`Archive folder: ${config.archiveFolder || '(not configured)'}`);
 
   if (config.once) {
-    await pollOnce(config, state);
+    await pollOnce(config, state, summary);
+    summary.completed_at = new Date().toISOString();
+    await writeSummary(summary, config.summaryPath);
+    console.log(`One-shot summary: scanned=${summary.scanned} eligible=${summary.eligible} uploaded=${summary.uploaded} skipped_duplicate=${summary.skipped_duplicate} skipped_unstable=${summary.skipped_unstable} failed=${summary.failed}`);
     console.log('StorePulse connector completed one scan and stopped.');
+    if (summary.failed > 0) {
+      process.exit(1);
+    }
     return;
   }
 
   while (!shuttingDown) {
-    await pollOnce(config, state);
+    await pollOnce(config, state, summary);
     if (shuttingDown) break;
     await sleep(config.pollSeconds * 1000);
   }

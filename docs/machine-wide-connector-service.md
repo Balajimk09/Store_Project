@@ -79,7 +79,28 @@ This checkpoint intentionally does not:
 
 ### Live Worker
 
-The live worker remains the existing provisional/current-shift flow. Until a supported one-shot live command is introduced, the Phase 3 host reports a safe no-op placeholder rather than changing the live connector behavior.
+The live worker uses the existing provisional/current-shift connector in one-shot mode:
+
+```text
+node storepulse-connector.mjs --once --summary-path <ProgramData>\StorePulse\state\live-once-summary.json
+```
+
+The current user-specific prototype still defaults to continuous polling when launched without `--once`. The machine-wide runtime controls repetition by launching one scan cycle per worker interval instead of letting the connector run its own endless loop.
+
+The live connector summary JSON contains:
+
+- `scanned`
+- `eligible`
+- `uploaded`
+- `skipped_duplicate`
+- `skipped_unstable`
+- `failed`
+- `started_at`
+- `completed_at`
+
+Exit code `0` means the one-shot cycle completed successfully, including when there were no new files or only duplicates. A non-zero exit means a real configuration, processing, or upload failure occurred.
+
+Secrets are passed to the connector through process environment variables, not command-line arguments. The runtime clears/restores process environment variables after invocation.
 
 ### Closed-Day Worker
 
@@ -140,6 +161,8 @@ Secrets are redacted before status is written.
 
 Worker failures are isolated per worker. A live worker failure does not stop the closed-day worker, and a closed-day worker failure does not stop the live worker. Each worker tracks consecutive failures and receives bounded exponential backoff up to five minutes.
 
+Run mode repeats one-shot worker cycles according to configured poll intervals. If a worker fails, that worker uses bounded exponential backoff while the other worker may continue on its own cadence.
+
 ## Runtime Logging
 
 Runtime logs are JSON lines under:
@@ -164,6 +187,8 @@ It does not register or control a Windows Service in this checkpoint.
 ## Future Windows Service Wrapper
 
 A future phase should wrap `storepulse-service-host.ps1 -Mode Run` in a real Windows Service with a recovery policy, service identity decision, Event Log integration, and a controlled installer/repair flow. This checkpoint intentionally stops before service registration.
+
+The installer scaffold does not install Node globally. Production packaging should either bundle a vetted Node runtime with the connector or provision a supported Node runtime through a managed installation step before service registration.
 
 ## Logging
 

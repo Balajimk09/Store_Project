@@ -41,6 +41,7 @@ Write-Host ("Source root: {0}" -f $resolvedSourceRoot)
 Write-Host ("Install root: {0}" -f $resolvedInstallRoot)
 Write-Host ("ProgramData root: {0}" -f $resolvedProgramDataRoot)
 Write-Host "This checkpoint does not create users, register services, register scheduled tasks, or write secrets."
+Write-Host "Node.js is not installed globally by this scaffold. Future packaging should bundle or provision a supported Node runtime with the connector."
 
 if ($ValidateOnly) {
     Write-Host "ValidateOnly complete. No files copied."

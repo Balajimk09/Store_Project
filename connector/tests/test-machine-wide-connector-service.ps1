@@ -44,9 +44,71 @@ function New-TestConfig {
         logs_root = Join-Path $Root "logs"
         working_root = Join-Path $Root "working"
         archive_root = Join-Path $Root "archive"
+        live_watch_folder = Join-Path (Join-Path $Root "working") "live"
+        live_archive_folder = Join-Path (Join-Path $Root "archive") "live"
         closed_day_once_enabled = $false
         live_worker_enabled = $true
         closed_day_worker_enabled = $true
+    }
+}
+
+function Invoke-ConnectorOnceTest {
+    param(
+        [string]$Name,
+        [string]$UploadResult = "success",
+        [scriptblock]$Prepare = $null,
+        [int]$StabilityWaitMs = 25,
+        [string]$ExistingWatch = "",
+        [string]$ExistingState = ""
+    )
+    $dir = Join-Path $tempRoot ("connector-once-" + $Name + "-" + [guid]::NewGuid().ToString("N"))
+    $watch = if ([string]::IsNullOrWhiteSpace($ExistingWatch)) { Join-Path $dir "watch" } else { $ExistingWatch }
+    $summary = Join-Path $dir "summary.json"
+    $state = if ([string]::IsNullOrWhiteSpace($ExistingState)) { Join-Path $dir "state.json" } else { $ExistingState }
+    New-Item -ItemType Directory -Path $watch -Force | Out-Null
+    New-Item -ItemType Directory -Path $dir -Force | Out-Null
+    if ($null -ne $Prepare) {
+        & $Prepare $watch $state
+    }
+
+    $previous = @{}
+    foreach ($nameKey in @("STOREPULSE_API_URL", "STOREPULSE_CONNECTOR_TOKEN", "STOREPULSE_WATCH_FOLDER", "STOREPULSE_ARCHIVE_FOLDER", "STOREPULSE_POLL_SECONDS", "STOREPULSE_DRY_RUN", "STOREPULSE_ONCE", "STOREPULSE_SUMMARY_PATH", "STOREPULSE_STATE_PATH", "STOREPULSE_STABILITY_WAIT_MS", "STOREPULSE_CONNECTOR_TEST_UPLOAD_RESULT")) {
+        $previous[$nameKey] = [Environment]::GetEnvironmentVariable($nameKey, "Process")
+    }
+    try {
+        [Environment]::SetEnvironmentVariable("STOREPULSE_API_URL", "https://example.invalid", "Process")
+        [Environment]::SetEnvironmentVariable("STOREPULSE_CONNECTOR_TOKEN", "synthetic-token", "Process")
+        [Environment]::SetEnvironmentVariable("STOREPULSE_WATCH_FOLDER", $watch, "Process")
+        [Environment]::SetEnvironmentVariable("STOREPULSE_ARCHIVE_FOLDER", " ", "Process")
+        [Environment]::SetEnvironmentVariable("STOREPULSE_POLL_SECONDS", "60", "Process")
+        [Environment]::SetEnvironmentVariable("STOREPULSE_DRY_RUN", "false", "Process")
+        [Environment]::SetEnvironmentVariable("STOREPULSE_SUMMARY_PATH", $summary, "Process")
+        [Environment]::SetEnvironmentVariable("STOREPULSE_STATE_PATH", $state, "Process")
+        [Environment]::SetEnvironmentVariable("STOREPULSE_STABILITY_WAIT_MS", [string]$StabilityWaitMs, "Process")
+        [Environment]::SetEnvironmentVariable("STOREPULSE_CONNECTOR_TEST_UPLOAD_RESULT", $UploadResult, "Process")
+        $previousErrorActionPreference = $ErrorActionPreference
+        try {
+            $ErrorActionPreference = "Continue"
+            $output = & node (Join-Path $repoRoot "connector\storepulse-connector.mjs") --once --summary-path $summary 2>&1
+            $exitCode = $LASTEXITCODE
+        }
+        finally {
+            $ErrorActionPreference = $previousErrorActionPreference
+        }
+        [PSCustomObject]@{
+            ExitCode = $exitCode
+            OutputText = (($output | ForEach-Object { [string]$_ }) -join "`n")
+            Summary = if (Test-Path -LiteralPath $summary -PathType Leaf) { Get-Content -LiteralPath $summary -Raw | ConvertFrom-Json } else { $null }
+            SummaryText = if (Test-Path -LiteralPath $summary -PathType Leaf) { Get-Content -LiteralPath $summary -Raw } else { "" }
+            Directory = $dir
+            Watch = $watch
+            State = $state
+        }
+    }
+    finally {
+        foreach ($nameKey in $previous.Keys) {
+            [Environment]::SetEnvironmentVariable($nameKey, $previous[$nameKey], "Process")
+        }
     }
 }
 
@@ -89,6 +151,54 @@ try {
     Assert-Throws -ScriptBlock { $bad = New-TestConfig -Root $programDataRoot -InstallRoot $installRoot; $bad.live_endpoint_url = "http://example.invalid"; Test-StorePulseMachineConfig -Config $bad | Out-Null } -Message "non-HTTPS URL rejected"
     Assert-Throws -ScriptBlock { $bad = New-TestConfig -Root $programDataRoot -InstallRoot $installRoot; $bad.source_store_number = "bad/store"; Test-StorePulseMachineConfig -Config $bad | Out-Null } -Message "invalid store number rejected"
     Assert-Throws -ScriptBlock { $bad = New-TestConfig -Root $programDataRoot -InstallRoot $installRoot; Add-Member -InputObject $bad -NotePropertyName "connector_token" -NotePropertyValue "plain"; Test-StorePulseMachineConfig -Config $bad | Out-Null } -Message "secret in config rejected"
+
+    $zeroNew = Invoke-ConnectorOnceTest -Name "zero-new"
+    Assert-Equal -Actual $zeroNew.ExitCode -Expected 0 -Message "--once zero files exits 0"
+    Assert-Equal -Actual $zeroNew.Summary.scanned -Expected 0 -Message "--once zero files scanned count"
+    Assert-Equal -Actual $zeroNew.Summary.uploaded -Expected 0 -Message "--once zero files uploaded count"
+    Assert-True -Condition (-not [string]::IsNullOrWhiteSpace([string]$zeroNew.Summary.started_at)) -Message "--once summary has started_at"
+    Assert-True -Condition (-not [string]::IsNullOrWhiteSpace([string]$zeroNew.Summary.completed_at)) -Message "--once summary has completed_at"
+
+    $uploadedOnce = Invoke-ConnectorOnceTest -Name "upload" -Prepare {
+        param($Watch, $State)
+        Set-Content -LiteralPath (Join-Path $Watch "report.xml") -Value "<report />" -Encoding UTF8
+    }
+    Assert-Equal -Actual $uploadedOnce.ExitCode -Expected 0 -Message "--once upload exits 0"
+    Assert-Equal -Actual $uploadedOnce.Summary.scanned -Expected 1 -Message "--once scans one eligible file"
+    Assert-Equal -Actual $uploadedOnce.Summary.eligible -Expected 1 -Message "--once reports eligible file"
+    Assert-Equal -Actual $uploadedOnce.Summary.uploaded -Expected 1 -Message "--once reports uploaded file"
+
+    $duplicateSeed = Invoke-ConnectorOnceTest -Name "duplicate-seed" -Prepare {
+        param($Watch, $State)
+        Set-Content -LiteralPath (Join-Path $Watch "duplicate.xml") -Value "<report />" -Encoding UTF8
+    }
+    $duplicate = Invoke-ConnectorOnceTest -Name "duplicate" -ExistingWatch $duplicateSeed.Watch -ExistingState $duplicateSeed.State
+    Assert-Equal -Actual $duplicate.ExitCode -Expected 0 -Message "--once duplicate exits 0"
+    Assert-Equal -Actual $duplicate.Summary.skipped_duplicate -Expected 1 -Message "--once reports skipped duplicate"
+
+    $unstable = Invoke-ConnectorOnceTest -Name "unstable" -StabilityWaitMs 1000 -Prepare {
+        param($Watch, $State)
+        $file = Join-Path $Watch "unstable.xml"
+        Set-Content -LiteralPath $file -Value "first" -Encoding UTF8
+        Start-Job -ScriptBlock {
+            param($Path)
+            Start-Sleep -Milliseconds 200
+            Add-Content -LiteralPath $Path -Value "second"
+        } -ArgumentList $file | Out-Null
+    }
+    Assert-Equal -Actual $unstable.ExitCode -Expected 0 -Message "--once unstable exits 0"
+    Assert-Equal -Actual $unstable.Summary.skipped_unstable -Expected 1 -Message "--once reports unstable file"
+
+    $uploadFailure = Invoke-ConnectorOnceTest -Name "upload-failure" -UploadResult "failure" -Prepare {
+        param($Watch, $State)
+        Set-Content -LiteralPath (Join-Path $Watch "fail.xml") -Value "<report />" -Encoding UTF8
+    }
+    Assert-True -Condition ($uploadFailure.ExitCode -ne 0) -Message "--once upload failure exits nonzero"
+    Assert-Equal -Actual $uploadFailure.Summary.failed -Expected 1 -Message "--once reports upload failure"
+    Assert-True -Condition ($uploadFailure.OutputText -notmatch "synthetic-token" -and $uploadFailure.SummaryText -notmatch "synthetic-token") -Message "--once output and summary exclude connector token"
+
+    $connectorSource = Get-Content -LiteralPath (Join-Path $repoRoot "connector\storepulse-connector.mjs") -Raw
+    Assert-True -Condition ($connectorSource.Contains("while (!shuttingDown)")) -Message "default continuous polling loop remains present"
 
     $secretsObject = [PSCustomObject]@{
         commander_username = "synthetic-user"
@@ -171,6 +281,58 @@ try {
         -Sleep { param($Seconds) } | Out-Null
     Assert-Equal -Actual $global:DisabledLiveCount -Expected 0 -Message "disabled live worker skipped"
     Assert-Equal -Actual $global:DisabledClosedCount -Expected 1 -Message "enabled closed worker still runs"
+
+    $fakeConnectorScript = @'
+import { appendFileSync, writeFileSync } from 'node:fs';
+const summaryIndex = process.argv.indexOf('--summary-path');
+const summaryPath = summaryIndex >= 0 ? process.argv[summaryIndex + 1] : process.env.STOREPULSE_SUMMARY_PATH;
+const statePath = process.env.STOREPULSE_STATE_PATH;
+appendFileSync(`${statePath}.calls`, `${process.argv.join(' ')}|${process.env.STOREPULSE_WATCH_FOLDER}|${process.env.STOREPULSE_CONNECTOR_TOKEN ? 'token-present' : 'token-missing'}\n`);
+writeFileSync(summaryPath, JSON.stringify({
+  scanned: 0,
+  eligible: 0,
+  uploaded: 0,
+  skipped_duplicate: 0,
+  skipped_unstable: 0,
+  failed: 0,
+  started_at: new Date().toISOString(),
+  completed_at: new Date().toISOString()
+}, null, 2));
+'@
+    Set-Content -LiteralPath (Join-Path $installRoot "storepulse-connector.mjs") -Value $fakeConnectorScript -Encoding UTF8
+    New-Item -ItemType Directory -Path $config.live_watch_folder -Force | Out-Null
+    $defaultLiveConfig = New-TestConfig -Root $programDataRoot -InstallRoot $installRoot
+    $defaultLiveConfig.closed_day_worker_enabled = $false
+    $defaultLiveConfigPath = Join-Path $programDataRoot "default-live-config.json"
+    Write-StorePulseMachineConfig -Config $defaultLiveConfig -Path $defaultLiveConfigPath | Out-Null
+    Invoke-StorePulseServiceRuntime `
+        -Mode Once `
+        -ConfigPath $defaultLiveConfigPath `
+        -SecretsPath $secretsPathForRuntime `
+        -InstallRoot $installRoot `
+        -Sleep { param($Seconds) } | Out-Null
+    $defaultLiveStatus = Get-Content -LiteralPath $statusPath -Raw | ConvertFrom-Json
+    $liveStateRoot = Get-StorePulseStateRoot -ProgramDataRoot $programDataRoot
+    $liveCallsPath = Join-Path $liveStateRoot "live-upload-state.json.calls"
+    $liveCalls = Get-Content -LiteralPath $liveCallsPath -Raw
+    Assert-Equal -Actual $defaultLiveStatus.live_worker.status -Expected "succeeded" -Message "runtime default live worker succeeds"
+    Assert-True -Condition ($liveCalls -match "--once") -Message "runtime invokes connector with --once"
+    Assert-True -Condition ($liveCalls -match "--summary-path") -Message "runtime passes live summary path"
+    Assert-True -Condition ($liveCalls -match "token-present") -Message "runtime passes connector token through environment"
+    Assert-True -Condition (($defaultLiveStatus.live_worker.last_result | ConvertTo-Json -Depth 10) -notmatch "synthetic-token") -Message "runtime live result excludes token"
+
+    Remove-Item -LiteralPath $liveCallsPath -Force -ErrorAction SilentlyContinue
+    $global:RuntimeSleepIntervals = @()
+    Invoke-StorePulseServiceRuntime `
+        -Mode Run `
+        -ConfigPath $defaultLiveConfigPath `
+        -SecretsPath $secretsPathForRuntime `
+        -InstallRoot $installRoot `
+        -Sleep { param($Seconds) $global:RuntimeSleepIntervals += $Seconds } `
+        -MaxIterations 2 | Out-Null
+    $liveRunCalls = Get-Content -LiteralPath $liveCallsPath -Raw
+    Assert-Equal -Actual (($liveRunCalls -split "`n" | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }).Count) -Expected 2 -Message "Run mode repeats one-shot live connector"
+    Assert-True -Condition ($global:RuntimeSleepIntervals -contains 300) -Message "Run mode uses configured live polling interval"
 
     $backoffConfig = New-TestConfig -Root $programDataRoot -InstallRoot $installRoot
     $backoffConfig.closed_day_worker_enabled = $false

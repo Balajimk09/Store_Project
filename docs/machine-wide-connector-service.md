@@ -33,6 +33,14 @@ C:\ProgramData\StorePulse
 
 `config.json` contains non-secret operational values only. `secrets.json` contains DPAPI-encrypted values only.
 
+Verifone runtime files, when prepared locally on a store laptop, belong under:
+
+```text
+C:\Program Files\StorePulse\VerifoneRuntime
+```
+
+The StorePulse ZIP never distributes `SMTCommon.dll` or any other proprietary Verifone binary.
+
 ## Machine-Wide Configuration
 
 The machine config stores:
@@ -50,6 +58,38 @@ The machine config stores:
 Configuration must not include connector tokens, Commander usernames, Commander passwords, cookies, or service-role keys.
 
 `configure-storepulse-machine-connector.ps1` is the first-time setup entrypoint. It supports ValidateOnly, interactive setup, and noninteractive installer-friendly setup with secure secret input. It writes config through `storepulse-machine-config.ps1` and encrypted secrets through `storepulse-machine-secrets.ps1`.
+
+## Machine-Owned Verifone Runtime
+
+The StorePulse connector requires Verifone's `SMTCommon.dll` at runtime, but StorePulse does not package or redistribute that file. A target machine must already have a licensed Verifone Site Management Tools installation.
+
+An administrator prepares the machine-owned runtime by running:
+
+```text
+prepare-storepulse-verifone-runtime.ps1 -Mode ValidateSource -SourceDllPath "<local Verifone>\SMTCommon.dll"
+prepare-storepulse-verifone-runtime.ps1 -Mode Install -SourceDllPath "<local Verifone>\SMTCommon.dll"
+prepare-storepulse-verifone-runtime.ps1 -Mode ValidateInstalled
+```
+
+The source path is always supplied explicitly at runtime. The helper does not default to any employee profile, does not request an employee Windows password, does not call Commander, and does not create services, scheduled tasks, config, or secrets.
+
+Install mode copies only `SMTCommon.dll` into:
+
+```text
+C:\Program Files\StorePulse\VerifoneRuntime
+```
+
+It validates the file name, length, SHA-256, version metadata, Authenticode status, and isolated .NET assembly loading. The isolated validator confirms `SMTCommon.clsHTTPConnection` exists and can be instantiated without setting credentials, calling `GetData`, opening Commander, or making any network request.
+
+The helper writes `storepulse-verifone-runtime.json` beside the copied DLL. The manifest contains non-secret runtime metadata such as hashes, file length, destination root, assembly name, validated type, and validation status. It intentionally does not persist the original user-profile source path. The original Verifone installation remains installed and owned by Verifone.
+
+After this preparation succeeds, machine config should set `commander_install_path` to:
+
+```text
+C:\Program Files\StorePulse\VerifoneRuntime
+```
+
+This keeps LocalSystem service execution independent of an employee profile while leaving the employee profile and Verifone source installation untouched.
 
 Real machine-wide writes require elevated PowerShell. ValidateOnly performs syntactic validation only and makes no network calls.
 
@@ -319,27 +359,29 @@ If any removal step fails, the administrator should stop and inspect the printed
 
 1. Build or copy the connector package with a vetted private Node runtime under `runtime\node`.
 2. Replace the Node manifest SHA-256 placeholder with the vetted `node.exe` hash.
-3. Run installer `-ValidateOnly` and confirm the manifest, service command, Program Files path, ProgramData path, and runtime expectation.
-4. Run `configure-storepulse-machine-connector.ps1 -ValidateOnly` with pilot configuration values.
-5. Write machine config and DPAPI LocalMachine secrets through the configuration script.
-6. Run `test-storepulse-installation.ps1 -Mode All -NoProduction`.
-7. Install on a non-production pilot machine using `-Install` from elevated PowerShell only after validation passes.
-8. Run `storepulse-service-control.ps1 -Command Validate`.
-9. Run `RunForeground` against test endpoints and synthetic connector data.
-10. Start the Windows Service only after Validate/RunForeground results are clean.
-11. Monitor `runtime-status.json`, JSONL logs, and the install validation report.
-12. Keep the legacy user-specific task disabled only after the service has proven stable for the pilot.
+3. Prepare the machine-owned Verifone runtime from the local licensed `SMTCommon.dll`.
+4. Run installer `-ValidateOnly` and confirm the manifest, service command, Program Files path, ProgramData path, and runtime expectation.
+5. Run `configure-storepulse-machine-connector.ps1 -ValidateOnly` with pilot configuration values, including `commander_install_path` set to `C:\Program Files\StorePulse\VerifoneRuntime`.
+6. Write machine config and DPAPI LocalMachine secrets through the configuration script.
+7. Run `test-storepulse-installation.ps1 -Mode All -NoProduction`.
+8. Install on a non-production pilot machine using `-Install` from elevated PowerShell only after validation passes.
+9. Run `storepulse-service-control.ps1 -Command Validate`.
+10. Run `RunForeground` against test endpoints and synthetic connector data.
+11. Start the Windows Service only after Validate/RunForeground results are clean.
+12. Monitor `runtime-status.json`, JSONL logs, and the install validation report.
+13. Keep the legacy user-specific task disabled only after the service has proven stable for the pilot.
 
 ## HUB Migration Sequence
 
 1. Inventory the current prototype task and connector paths without changing them.
-2. Prepare Program Files and ProgramData package on a non-production machine.
-3. Validate config, encrypted secrets, private Node, service plan, and no-production smoke test.
-4. Run one controlled foreground service cycle against pilot endpoints.
-5. Pause the legacy user-specific task only during the approved cutover window.
-6. Start `StorePulseConnector`.
-7. Verify live status, logs, and StorePulse ingestion.
-8. Keep rollback ready by preserving the previous prototype files and task definition until the pilot completes.
+2. Prepare the machine-owned Verifone runtime from the local licensed `SMTCommon.dll`.
+3. Prepare Program Files and ProgramData package on a non-production machine.
+4. Validate config, encrypted secrets, private Node, Verifone runtime, service plan, and no-production smoke test.
+5. Run one controlled foreground service cycle against pilot endpoints.
+6. Pause the legacy user-specific task only during the approved cutover window.
+7. Start `StorePulseConnector`.
+8. Verify live status, logs, and StorePulse ingestion.
+9. Keep rollback ready by preserving the previous prototype files and task definition until the pilot completes.
 
 ## Second-Laptop Clean Install Checklist
 

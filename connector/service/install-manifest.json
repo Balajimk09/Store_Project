@@ -23,6 +23,7 @@
     "service\\storepulse-windows-service.ps1",
     "service\\storepulse-service-entrypoint.ps1",
     "service\\storepulse-node-runtime.ps1",
+    "service\\prepare-storepulse-verifone-runtime.ps1",
     "service\\configure-storepulse-machine-connector.ps1",
     "service\\test-storepulse-installation.ps1",
     "service\\install-storepulse-machine-connector.ps1",

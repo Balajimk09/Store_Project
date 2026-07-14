@@ -51,9 +51,16 @@ if ($Mode -in @("ValidateSecrets", "All")) {
 if ($Mode -in @("ValidateRuntime", "All")) {
     $runtime = Test-StorePulseNodeRuntime -InstallRoot $resolvedInstallRoot -ManifestPath $resolvedNodeManifestPath -PassThru
     Add-StorePulseCheckResult $checks "node_runtime" ([bool]$runtime.ok) ([string]$runtime.message)
+    $winsw = Test-StorePulseWinSWBinary -InstallRoot $resolvedInstallRoot -ManifestPath (Join-Path (Join-Path $resolvedInstallRoot "service") "winsw-manifest.json") -PassThru
+    Add-StorePulseCheckResult $checks "winsw_runtime" ([bool]$winsw.ok) ([string]$winsw.message)
 }
 if ($Mode -in @("ValidateServicePlan", "All")) {
-    try { $plan = Install-StorePulseWindowsService -InstallRoot $resolvedInstallRoot -ValidateOnly; Add-StorePulseCheckResult $checks "service_plan" $true ("Service plan valid for " + $plan.service_name) }
+    try {
+        $plan = Install-StorePulseWindowsService -InstallRoot $resolvedInstallRoot -ProgramDataRoot $programData -StartupMode ManualPilot -ValidateOnly
+        if ($plan.image_path -notlike "*StorePulseConnector.exe") { throw "Service ImagePath does not point to native wrapper." }
+        if ($plan.image_path -match "powershell.exe") { throw "Service ImagePath points directly to PowerShell." }
+        Add-StorePulseCheckResult $checks "service_plan" $true ("Service plan valid for " + $plan.service_name + " using " + $plan.startup_mode)
+    }
     catch { Add-StorePulseCheckResult $checks "service_plan" $false $_.Exception.Message }
 }
 if ($Mode -in @("SmokeTestOnce", "All")) {

@@ -6,6 +6,8 @@
   "expected_program_data_root": "C:\\ProgramData\\StorePulse",
   "version": "3.0.0-checkpoint6",
   "bundled_node_runtime_relative_path": "runtime\\node",
+  "winsw_runtime_relative_path": "service\\host\\StorePulseConnector.exe",
+  "winsw_xml_relative_path": "service\\host\\StorePulseConnector.xml",
   "supported_upgrade_schema_version": 1,
   "required_files": [
     "storepulse-connector.mjs",
@@ -23,6 +25,9 @@
     "service\\storepulse-windows-service.ps1",
     "service\\storepulse-service-entrypoint.ps1",
     "service\\storepulse-node-runtime.ps1",
+    "service\\winsw-manifest.json",
+    "service\\winsw-license-notice.txt",
+    "service\\StorePulseConnector.xml.template",
     "service\\prepare-storepulse-verifone-runtime.ps1",
     "service\\configure-storepulse-machine-connector.ps1",
     "service\\test-storepulse-installation.ps1",

@@ -30,8 +30,8 @@ if (Test-Path -LiteralPath $lockPath -PathType Leaf) {
 }
 
 if ($PSCmdlet.ShouldProcess($script:StorePulseServiceName, "Stop and remove StorePulseConnector service")) {
-    Stop-StorePulseWindowsService -ErrorAction SilentlyContinue
-    Remove-StorePulseWindowsService -ErrorAction SilentlyContinue
+    Stop-StorePulseWindowsService -InstallRoot $resolvedInstallRoot -ErrorAction SilentlyContinue
+    Remove-StorePulseWindowsService -InstallRoot $resolvedInstallRoot -ErrorAction SilentlyContinue
 }
 
 if ($PSCmdlet.ShouldProcess($resolvedInstallRoot, "Remove installed connector binaries")) {

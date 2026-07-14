@@ -6,7 +6,8 @@ param(
     [Parameter(ParameterSetName = "Validate")][switch]$ValidateOnly,
     [string]$SourceRoot = "",
     [string]$InstallRoot = "",
-    [string]$ProgramDataRoot = ""
+    [string]$ProgramDataRoot = "",
+    [ValidateSet("ManualPilot", "AutomaticDelayed")][string]$StartupMode = "ManualPilot"
 )
 
 Set-StrictMode -Version Latest
@@ -55,6 +56,19 @@ function Copy-StorePulseInstalledFiles {
     else {
         throw "Private Node runtime source is missing: $nodeSource"
     }
+
+    if ($Manifest.PSObject.Properties["winsw_runtime_relative_path"]) {
+        $winswSource = Join-Path $SourceRoot ([string]$Manifest.winsw_runtime_relative_path)
+        $winswDestination = Join-Path $InstallRoot ([string]$Manifest.winsw_runtime_relative_path)
+        if (-not (Test-Path -LiteralPath $winswSource -PathType Leaf)) {
+            throw "Native WinSW wrapper source is missing: $winswSource"
+        }
+        $parent = Split-Path -Parent $winswDestination
+        if (-not (Test-Path -LiteralPath $parent -PathType Container)) {
+            New-Item -ItemType Directory -Path $parent -Force | Out-Null
+        }
+        Copy-Item -LiteralPath $winswSource -Destination $winswDestination -Force
+    }
 }
 
 $resolvedSourceRoot = if ([string]::IsNullOrWhiteSpace($SourceRoot)) { Split-Path -Parent $PSScriptRoot } else { $SourceRoot }
@@ -73,6 +87,7 @@ Write-Host ("Source root: {0}" -f $resolvedSourceRoot)
 Write-Host ("Install root: {0}" -f $resolvedInstallRoot)
 Write-Host ("ProgramData root: {0}" -f $resolvedProgramDataRoot)
 Write-Host ("Service: {0}" -f $manifest.service_name)
+Write-Host ("Startup mode: {0}" -f $StartupMode)
 Write-Host "ProgramData config, secrets, logs, working data, archive, and state are preserved."
 Write-Host "No employee Windows password is requested."
 Write-Host "A private Node runtime is expected under runtime\\node; this installer never installs Node globally."
@@ -82,8 +97,10 @@ foreach ($relative in $manifest.required_files) {
     if (-not (Test-Path -LiteralPath $source -PathType Leaf)) { throw "Missing source file: $source" }
 }
 
-$servicePlan = Install-StorePulseWindowsService -InstallRoot $resolvedInstallRoot -ValidateOnly
-Write-Host ("Planned service command: {0}" -f $servicePlan.binary_path)
+$servicePlan = Install-StorePulseWindowsService -InstallRoot $resolvedInstallRoot -ProgramDataRoot $resolvedProgramDataRoot -StartupMode $StartupMode -ValidateOnly
+Write-Host ("Planned service executable: {0}" -f $servicePlan.wrapper_path)
+Write-Host ("Planned service ImagePath: {0}" -f $servicePlan.image_path)
+Write-Host ("Planned service startup mode: {0}" -f $servicePlan.startup_mode)
 
 if ($ValidateOnly -or (-not $Install -and -not $Repair -and -not $Upgrade)) {
     Write-Host "ValidateOnly complete. No files copied and no service registered."
@@ -97,6 +114,18 @@ Test-StorePulseMachineConfig -Config $config | Out-Null
 $secrets = Read-StorePulseMachineSecrets -Path $secretsPath
 Test-StorePulseMachineSecrets -Secrets $secrets | Out-Null
 Test-StorePulseNodeRuntime -InstallRoot $resolvedSourceRoot -ManifestPath (Join-Path (Join-Path $resolvedSourceRoot "service") "node-runtime-manifest.json") | Out-Null
+if ($manifest.PSObject.Properties["winsw_runtime_relative_path"]) {
+    $sourceWinswManifestPath = Join-Path (Join-Path $resolvedSourceRoot "service") "winsw-manifest.json"
+    $sourceWinswPath = Join-Path $resolvedSourceRoot ([string]$manifest.winsw_runtime_relative_path)
+    if (-not (Test-Path -LiteralPath $sourceWinswPath -PathType Leaf)) { throw "Native WinSW wrapper source is missing: $sourceWinswPath" }
+    $winswManifest = Read-StorePulseWinSWManifest -ManifestPath $sourceWinswManifestPath
+    $sourceWinswHash = (Get-FileHash -LiteralPath $sourceWinswPath -Algorithm SHA256).Hash.ToUpperInvariant()
+    if ($sourceWinswHash -ne ([string]$winswManifest.sha256).ToUpperInvariant()) { throw "Source WinSW wrapper SHA-256 mismatch." }
+}
+$verifoneValidation = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "prepare-storepulse-verifone-runtime.ps1") -Mode ValidateInstalled -DestinationRoot ([string]$config.commander_install_path) 2>&1
+if ($LASTEXITCODE -ne 0) {
+    throw "Verifone runtime validation failed. $($verifoneValidation -join ' ')"
+}
 
 if ($PSCmdlet.ShouldProcess($resolvedInstallRoot, "$mode StorePulse connector files and service")) {
     foreach ($dir in @($resolvedInstallRoot, $resolvedProgramDataRoot, (Join-Path $resolvedProgramDataRoot "logs"), (Join-Path $resolvedProgramDataRoot "working"), (Join-Path $resolvedProgramDataRoot "archive"), (Join-Path $resolvedProgramDataRoot "state"))) {
@@ -113,8 +142,8 @@ if ($PSCmdlet.ShouldProcess($resolvedInstallRoot, "$mode StorePulse connector fi
     try {
         Copy-StorePulseInstalledFiles -Manifest $manifest -SourceRoot $resolvedSourceRoot -InstallRoot $resolvedInstallRoot
         Test-StorePulseNodeRuntime -InstallRoot $resolvedInstallRoot -ManifestPath (Join-Path (Join-Path $resolvedInstallRoot "service") "node-runtime-manifest.json") | Out-Null
-        Install-StorePulseWindowsService -InstallRoot $resolvedInstallRoot | Out-Null
-        if ($Upgrade) { Start-StorePulseWindowsService -ErrorAction SilentlyContinue }
+        Test-StorePulseWinSWBinary -InstallRoot $resolvedInstallRoot -ManifestPath (Join-Path (Join-Path $resolvedInstallRoot "service") "winsw-manifest.json") | Out-Null
+        Install-StorePulseWindowsService -InstallRoot $resolvedInstallRoot -ProgramDataRoot $resolvedProgramDataRoot -StartupMode $StartupMode | Out-Null
     }
     catch {
         if ($null -ne $backupRoot -and (Test-Path -LiteralPath $backupRoot -PathType Container)) {
@@ -126,5 +155,7 @@ if ($PSCmdlet.ShouldProcess($resolvedInstallRoot, "$mode StorePulse connector fi
     finally {
         if ($null -ne $backupRoot) { Remove-Item -LiteralPath $backupRoot -Recurse -Force -ErrorAction SilentlyContinue }
     }
-    Write-Host "Install layer complete. Next safe step: verify ProgramData config/secrets, then run service-control Validate."
+    Write-Host ("Install layer complete. Service executable: {0}" -f (Get-StorePulseServiceWrapperPath -InstallRoot $resolvedInstallRoot))
+    Write-Host ("Installed startup mode: {0}" -f $StartupMode)
+    Write-Host "Next safe step: verify pilot readiness, then use service-control Start only during controlled cutover."
 }

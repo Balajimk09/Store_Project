@@ -1,0 +1,18 @@
+{
+  "name": "WinSW",
+  "version": "2.12.0",
+  "asset_name": "WinSW-x64.exe",
+  "official_release_url": "https://github.com/winsw/winsw/releases/tag/v2.12.0",
+  "download_url": "https://github.com/winsw/winsw/releases/download/v2.12.0/WinSW-x64.exe",
+  "sha256": "05B82D46AD331CC16BDC00DE5C6332C1EF818DF8CEEFCD49C726553209B3A0DA",
+  "architecture": "x64",
+  "license": "MIT",
+  "license_notice_file": "service\\winsw-license-notice.txt",
+  "installed_relative_path": "service\\host\\StorePulseConnector.exe",
+  "xml_relative_path": "service\\host\\StorePulseConnector.xml",
+  "expected_hosts": [
+    "github.com",
+    "objects.githubusercontent.com",
+    "release-assets.githubusercontent.com"
+  ]
+}

@@ -1,0 +1,13 @@
+<service>
+  <id>StorePulseConnector</id>
+  <name>StorePulse Connector Service</name>
+  <description>Runs the StorePulse machine-wide POS connector runtime.</description>
+  <executable>C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe</executable>
+  <arguments>-NoProfile -ExecutionPolicy Bypass -File "%INSTALL_ROOT%\service\storepulse-service-entrypoint.ps1"</arguments>
+  <workingdirectory>%INSTALL_ROOT%</workingdirectory>
+  <logpath>%PROGRAMDATA_ROOT%\logs\service-host</logpath>
+  <logmode>roll</logmode>
+  <serviceaccount>
+    <username>LocalSystem</username>
+  </serviceaccount>
+</service>

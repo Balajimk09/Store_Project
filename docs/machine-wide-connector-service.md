@@ -113,15 +113,28 @@ Secret rotation should run the configuration tool again with only the secret val
 
 ## LocalSystem Service Model
 
-The Windows Service is named `StorePulseConnector` with display name `StorePulse Connector Service`. It is designed to run as LocalSystem, start automatically, and use delayed automatic start where Windows supports it. It must not depend on `%USERPROFILE%`, employee credential stores, or user-specific scheduled tasks. Commander credentials and StorePulse tokens are read from machine secrets at runtime.
+The Windows Service is named `StorePulseConnector` with display name `StorePulse Connector Service`. It is designed to run as LocalSystem through the native WinSW service wrapper. It must not depend on `%USERPROFILE%`, employee credential stores, or user-specific scheduled tasks. Commander credentials and StorePulse tokens are read from machine secrets at runtime.
 
-The configured service command launches:
+The Windows Service ImagePath points to the native wrapper:
 
 ```text
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "C:\Program Files\StorePulse\Connector\service\storepulse-service-entrypoint.ps1"
+C:\Program Files\StorePulse\Connector\service\host\StorePulseConnector.exe
 ```
 
-The command line contains no connector token, Commander password, cookie, or service-role credential.
+The WinSW XML beside the wrapper launches:
+
+```text
+C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -NoProfile -ExecutionPolicy Bypass -File "C:\Program Files\StorePulse\Connector\service\storepulse-service-entrypoint.ps1"
+```
+
+The wrapper XML and command line contain no connector token, Commander password, cookie, or service-role credential. Wrapper logs are written under `C:\ProgramData\StorePulse\logs\service-host`.
+
+Startup is explicit:
+
+- `ManualPilot`: service is installed as Manual and remains stopped. This is the default pilot mode so a reboot cannot start a duplicate connector while the legacy scheduled task is still active.
+- `AutomaticDelayed`: service is installed as Automatic delayed-start and is used only during explicit cutover.
+
+Service start fails closed when `StorePulse-CurrentShift-Sync` is enabled unless an administrator passes the explicit pilot override. Source code never disables that scheduled task automatically.
 
 This repository checkpoint intentionally does not:
 
@@ -248,14 +261,16 @@ It does not expose secrets and combines the Windows Service state with the runti
 
 ## Windows Service Wrapper
 
-`storepulse-windows-service.ps1` is safe to dot-source and provides reusable functions for service install, status, start, stop, restart, removal, and recovery policy configuration. The recovery policy is:
+`storepulse-windows-service.ps1` is safe to dot-source and provides reusable functions for WinSW service install, status, start, stop, restart, removal, and recovery policy configuration. The package pins the official WinSW x64 release in `winsw-manifest.json`; the binary is downloaded only during packaging, hash-verified, and placed at `service\host\StorePulseConnector.exe`. The StorePulse source repository does not commit the WinSW executable.
+
+The recovery policy in the generated WinSW XML is:
 
 - first failure: restart after 1 minute
 - second failure: restart after 5 minutes
 - subsequent failures: restart after 15 minutes
 - reset failure count after 1 day
 
-The helper uses explicit path quoting and rejects service entrypoints outside the expected install root.
+The helper uses explicit path quoting and rejects service entrypoints or wrapper paths outside the expected install root.
 
 The installer does not install Node globally. Production packaging should bundle a vetted private Node runtime under:
 

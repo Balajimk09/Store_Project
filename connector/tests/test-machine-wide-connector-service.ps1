@@ -180,25 +180,61 @@ try {
     Set-Content -LiteralPath (Join-Path $serviceSubdir "storepulse-service-entrypoint.ps1") -Value "placeholder" -Encoding UTF8
     Set-Content -LiteralPath (Join-Path $serviceSubdir "storepulse-current-shift-worker.ps1") -Value "placeholder" -Encoding UTF8
     $testNode = Install-TestNodeRuntime -InstallRoot $installRoot
+    $hostRoot = Join-Path $serviceSubdir "host"
+    New-Item -ItemType Directory -Path $hostRoot -Force | Out-Null
+    $wrapperPath = Join-Path $hostRoot "StorePulseConnector.exe"
+    Set-Content -LiteralPath $wrapperPath -Value "synthetic winsw wrapper" -Encoding UTF8
+    $wrapperHash = (Get-FileHash -LiteralPath $wrapperPath -Algorithm SHA256).Hash.ToUpperInvariant()
+    [PSCustomObject]@{
+        name = "WinSW"
+        version = "2.12.0"
+        asset_name = "WinSW-x64.exe"
+        official_release_url = "https://github.com/winsw/winsw/releases/tag/v2.12.0"
+        download_url = "https://github.com/winsw/winsw/releases/download/v2.12.0/WinSW-x64.exe"
+        sha256 = $wrapperHash
+        architecture = "x64"
+        license = "MIT"
+        installed_relative_path = "service\host\StorePulseConnector.exe"
+    } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $serviceSubdir "winsw-manifest.json") -Encoding UTF8
 
-    $servicePlan = Install-StorePulseWindowsService -InstallRoot $installRoot -ValidateOnly
+    $servicePlan = Install-StorePulseWindowsService -InstallRoot $installRoot -ProgramDataRoot $programDataRoot -StartupMode ManualPilot -ValidateOnly
     Assert-Equal -Actual $servicePlan.service_name -Expected "StorePulseConnector" -Message "service plan name"
     Assert-Equal -Actual $servicePlan.display_name -Expected "StorePulse Connector Service" -Message "service plan display name"
     Assert-Equal -Actual $servicePlan.account -Expected "LocalSystem" -Message "service plan LocalSystem account"
-    Assert-Equal -Actual $servicePlan.startup_type -Expected "Automatic" -Message "service plan automatic startup"
-    Assert-True -Condition ([bool]$servicePlan.delayed_auto_start) -Message "service plan delayed auto start"
-    Assert-True -Condition ($servicePlan.binary_path -match '"[^"]*powershell\.exe" -NoProfile -ExecutionPolicy Bypass -File "[^"]*storepulse-service-entrypoint\.ps1"') -Message "service binary path quotes executable and entrypoint"
-    Assert-True -Condition ($servicePlan.binary_path -notmatch "synthetic-token|synthetic-password|connector_token") -Message "service command line excludes secrets"
+    Assert-Equal -Actual $servicePlan.startup_type -Expected "Manual" -Message "ManualPilot service plan uses Manual startup"
+    Assert-True -Condition (-not [bool]$servicePlan.delayed_auto_start) -Message "ManualPilot does not use delayed auto start"
+    Assert-True -Condition ($servicePlan.image_path.EndsWith("service\host\StorePulseConnector.exe", [StringComparison]::OrdinalIgnoreCase)) -Message "service ImagePath points to StorePulseConnector.exe"
+    Assert-True -Condition ($servicePlan.image_path -notmatch "powershell\.exe") -Message "service ImagePath does not point directly to PowerShell"
+    Assert-True -Condition ($servicePlan.wrapper_path.StartsWith($installRoot, [StringComparison]::OrdinalIgnoreCase)) -Message "wrapper executable path is under install root"
+    Assert-True -Condition ($servicePlan.wrapper_xml -match 'powershell\.exe' -and $servicePlan.wrapper_xml -match 'storepulse-service-entrypoint\.ps1') -Message "wrapper XML launches PowerShell entrypoint"
+    Assert-True -Condition ($servicePlan.wrapper_xml -match 'LocalSystem') -Message "wrapper XML uses LocalSystem"
+    Assert-True -Condition ($servicePlan.wrapper_xml -match [regex]::Escape((Join-Path $programDataRoot "logs\service-host"))) -Message "wrapper logs are directed under ProgramData"
+    Assert-True -Condition ($servicePlan.wrapper_xml -notmatch "synthetic-token|synthetic-password|connector_token") -Message "wrapper XML excludes secrets"
+    $automaticPlan = Install-StorePulseWindowsService -InstallRoot $installRoot -ProgramDataRoot $programDataRoot -StartupMode AutomaticDelayed -ValidateOnly
+    Assert-Equal -Actual $automaticPlan.startup_type -Expected "Automatic" -Message "AutomaticDelayed uses Automatic startup only when explicit"
+    Assert-True -Condition ([bool]$automaticPlan.delayed_auto_start) -Message "AutomaticDelayed uses delayed auto start"
+    $winswValid = Test-StorePulseWinSWBinary -InstallRoot $installRoot -ManifestPath (Join-Path $serviceSubdir "winsw-manifest.json") -PassThru
+    Assert-True -Condition ([bool]$winswValid.ok -and $winswValid.architecture -eq "x64") -Message "WinSW wrapper validates with matching SHA and architecture"
+    $missingWinswRoot = Join-Path $tempRoot "missing-winsw"
+    New-Item -ItemType Directory -Path (Join-Path $missingWinswRoot "service") -Force | Out-Null
+    Copy-Item -LiteralPath (Join-Path $serviceSubdir "winsw-manifest.json") -Destination (Join-Path (Join-Path $missingWinswRoot "service") "winsw-manifest.json")
+    $missingWinsw = Test-StorePulseWinSWBinary -InstallRoot $missingWinswRoot -ManifestPath (Join-Path (Join-Path $missingWinswRoot "service") "winsw-manifest.json") -PassThru
+    Assert-True -Condition (-not [bool]$missingWinsw.ok) -Message "missing WinSW wrapper fails closed"
+    $badWinswManifestPath = Join-Path $serviceSubdir "winsw-manifest-bad.json"
+    (Get-Content -LiteralPath (Join-Path $serviceSubdir "winsw-manifest.json") -Raw).Replace($wrapperHash, ("0" * 64)) | Set-Content -LiteralPath $badWinswManifestPath -Encoding UTF8
+    $badWinsw = Test-StorePulseWinSWBinary -InstallRoot $installRoot -ManifestPath $badWinswManifestPath -PassThru
+    Assert-True -Condition (-not [bool]$badWinsw.ok) -Message "WinSW wrapper hash mismatch fails closed"
     Assert-Throws -ScriptBlock { Assert-StorePulsePathUnderRoot -Path (Join-Path $tempRoot "outside\entrypoint.ps1") -Root $installRoot -Name "outside test" | Out-Null } -Message "service path outside install root rejected"
 
     $global:CapturedServiceCommands = @()
-    $serviceExecutor = { param([string[]]$Arguments) $global:CapturedServiceCommands += ,($Arguments -join " "); return "mocked" }
-    Install-StorePulseWindowsService -InstallRoot $installRoot -Executor $serviceExecutor | Out-Null
-    Assert-True -Condition (($global:CapturedServiceCommands -join "`n") -match "create StorePulseConnector") -Message "install command creates expected service"
-    Assert-True -Condition (($global:CapturedServiceCommands -join "`n") -match "obj= LocalSystem") -Message "install command uses LocalSystem"
-    Assert-True -Condition (($global:CapturedServiceCommands -join "`n") -match "start= delayed-auto") -Message "install command requests delayed auto start"
-    Assert-True -Condition (($global:CapturedServiceCommands -join "`n") -match "restart/60000/restart/300000/restart/900000") -Message "recovery actions match required restart delays"
-    Assert-True -Condition (($global:CapturedServiceCommands -join "`n") -match "reset= 86400") -Message "recovery reset interval is one day"
+    $serviceExecutor = { param([string]$Wrapper, [string[]]$Arguments) $global:CapturedServiceCommands += ,($Wrapper + " " + ($Arguments -join " ")); return "mocked" }
+    Install-StorePulseWindowsService -InstallRoot $installRoot -ProgramDataRoot $programDataRoot -StartupMode ManualPilot -Executor $serviceExecutor | Out-Null
+    Assert-True -Condition (($global:CapturedServiceCommands -join "`n") -match "StorePulseConnector\.exe install") -Message "install command registers through WinSW wrapper"
+    Assert-True -Condition (Test-Path -LiteralPath (Join-Path $hostRoot "StorePulseConnector.xml") -PathType Leaf) -Message "installer writes WinSW XML beside wrapper"
+    $installedXml = Get-Content -LiteralPath (Join-Path $hostRoot "StorePulseConnector.xml") -Raw
+    Assert-True -Condition ($installedXml -match '<startmode>Manual</startmode>') -Message "ManualPilot installs as Manual"
+    Assert-True -Condition ($installedXml -match '<delayedAutoStart>false</delayedAutoStart>') -Message "ManualPilot remains stopped and not delayed auto"
+    Assert-True -Condition ($installedXml -match '<onfailure action=\"restart\" delay=\"1 min\"' -and $installedXml -match '<onfailure action=\"restart\" delay=\"5 min\"' -and $installedXml -match '<onfailure action=\"restart\" delay=\"15 min\"') -Message "WinSW XML contains restart recovery policy"
     Assert-True -Condition (($global:CapturedServiceCommands -join "`n") -notmatch "synthetic-token|synthetic-password") -Message "service command generation excludes secrets"
 
     $global:ControlServiceState = [PSCustomObject]@{ Status = "Stopped" }
@@ -553,7 +589,7 @@ writeFileSync(summaryPath, JSON.stringify({
     try {
         $installOutput = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $serviceRoot "install-storepulse-machine-connector.ps1") -ValidateOnly -WhatIf -SourceRoot (Join-Path $repoRoot "connector") -InstallRoot $installRoot -ProgramDataRoot $programDataRoot
         Assert-True -Condition (($installOutput -join "`n") -match "ValidateOnly complete") -Message "installer WhatIf ValidateOnly succeeds"
-        Assert-True -Condition (($installOutput -join "`n") -match "Planned service command") -Message "installer WhatIf shows service command plan"
+        Assert-True -Condition (($installOutput -join "`n") -match "Planned service executable" -and ($installOutput -join "`n") -match "ManualPilot") -Message "installer WhatIf shows native wrapper ManualPilot plan"
     }
     catch {
         Assert-True -Condition ($false) -Message "installer ValidateOnly should not require elevation"
@@ -562,13 +598,16 @@ writeFileSync(summaryPath, JSON.stringify({
     Assert-True -Condition (($uninstallOutput -join "`n") -match "preserved") -Message "uninstall WhatIf preserves ProgramData"
 
     $controlSource = Get-Content -LiteralPath (Join-Path $serviceRoot "storepulse-service-control.ps1") -Raw
-    Assert-True -Condition ($controlSource -match 'InstallStatus' -and $controlSource -match '"Start"' -and $controlSource -match '"Restart"') -Message "control script exposes service lifecycle commands"
+    Assert-True -Condition ($controlSource -match 'InstallStatus' -and $controlSource -match 'PilotStatus' -and $controlSource -match 'SetAutomaticDelayed' -and $controlSource -match '"Start"' -and $controlSource -match '"Restart"') -Message "control script exposes native service lifecycle commands"
+    Assert-True -Condition ($controlSource -match 'StorePulse-CurrentShift-Sync' -and $controlSource -match 'AllowPilotWithScheduledTask') -Message "control Start has scheduled-task duplicate guard with explicit override"
+    Assert-True -Condition ($controlSource.Contains('Remove-Item -LiteralPath $stopPath') -and $controlSource.Contains('Set-Content -LiteralPath $stopPath')) -Message "control Start clears stale stop file and Stop writes graceful stop file"
     $uninstallSource = Get-Content -LiteralPath (Join-Path $serviceRoot "uninstall-storepulse-machine-connector.ps1") -Raw
     Assert-True -Condition ($uninstallSource -match 'PurgeData' -and $uninstallSource -match 'ConfirmImpact = "High"') -Message "uninstall purge requires explicit destructive mode"
     $installerSource = Get-Content -LiteralPath (Join-Path $serviceRoot "install-storepulse-machine-connector.ps1") -Raw
-    Assert-True -Condition ($installerSource -match 'backupRoot' -and $installerSource -match 'Stop-StorePulseWindowsService' -and $installerSource -match 'Start-StorePulseWindowsService') -Message "installer contains upgrade rollback and restart plan"
+    Assert-True -Condition ($installerSource -match 'backupRoot' -and $installerSource -match 'Stop-StorePulseWindowsService' -and $installerSource -notmatch 'Start-StorePulseWindowsService') -Message "installer contains upgrade rollback without automatic service start"
     Assert-True -Condition ($installerSource -match 'Repair' -and $installerSource -match 'Install-StorePulseWindowsService') -Message "installer contains repair registration path"
-    Assert-True -Condition ($installerSource.IndexOf('Test-StorePulseNodeRuntime') -lt $installerSource.LastIndexOf('Install-StorePulseWindowsService -InstallRoot $resolvedInstallRoot | Out-Null')) -Message "installer validates Node runtime before service registration"
+    Assert-True -Condition ($installerSource.IndexOf('Test-StorePulseNodeRuntime') -lt $installerSource.LastIndexOf('Install-StorePulseWindowsService -InstallRoot $resolvedInstallRoot')) -Message "installer validates Node runtime before service registration"
+    Assert-True -Condition ($installerSource.IndexOf('Test-StorePulseWinSWBinary') -lt $installerSource.LastIndexOf('Install-StorePulseWindowsService -InstallRoot $resolvedInstallRoot')) -Message "installer validates WinSW before service registration"
     Assert-True -Condition ($installerSource -match 'Read-StorePulseMachineConfig' -and $installerSource -match 'Read-StorePulseMachineSecrets') -Message "installer validates config and secrets before registration"
 
     foreach ($file in Get-ChildItem -LiteralPath $serviceRoot -Filter "*.ps1") {

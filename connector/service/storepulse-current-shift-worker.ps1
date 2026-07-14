@@ -150,6 +150,67 @@ function Write-StorePulseAtomicTextFile {
     }
 }
 
+function Read-StorePulseNormalizedTransactionArray {
+    param([Parameter(Mandatory)][string]$Path)
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        throw "Normalized JSON file was not found: $Path"
+    }
+
+    $json = Get-Content -LiteralPath $Path -Raw
+    if ([string]::IsNullOrWhiteSpace($json)) {
+        throw "Normalized JSON shape is invalid: root must be an array."
+    }
+
+    $trimmed = $json.TrimStart()
+    if (-not $trimmed.StartsWith("[")) {
+        throw "Normalized JSON shape is invalid: root must be an array."
+    }
+    $afterOpen = $trimmed.Substring(1).TrimStart()
+    if ($afterOpen.StartsWith("[")) {
+        throw "Normalized JSON shape is invalid: transaction entries must be objects, not nested arrays."
+    }
+    if ($trimmed -match '^\[\s*\]\s*$') {
+        Write-Output -NoEnumerate (New-Object System.Collections.ArrayList)
+        return
+    }
+
+    $parsed = ConvertFrom-Json -InputObject $json
+    $items = New-Object System.Collections.ArrayList
+
+    if ($null -eq $parsed) {
+        throw "Normalized JSON shape is invalid: array elements must be transaction objects."
+    }
+
+    if ($parsed -is [System.Array]) {
+        foreach ($item in $parsed) { [void]$items.Add($item) }
+    }
+    else {
+        [void]$items.Add($parsed)
+    }
+
+    for ($i = 0; $i -lt $items.Count; $i++) {
+        $item = $items[$i]
+        if ($null -eq $item) {
+            throw "Normalized JSON shape is invalid: transaction at index $i is null."
+        }
+        if ($item -is [System.Array]) {
+            throw "Normalized JSON shape is invalid: transaction at index $i is a nested array."
+        }
+        if ($item -is [string] -or $item -is [ValueType]) {
+            throw "Normalized JSON shape is invalid: transaction at index $i must be an object."
+        }
+        if ($null -eq $item.PSObject -or @($item.PSObject.Properties).Count -eq 0) {
+            throw "Normalized JSON shape is invalid: transaction at index $i must be an object."
+        }
+        if ($item.PSObject.Properties["Count"] -and $item.PSObject.Properties["Length"] -and $item.PSObject.Properties["Rank"]) {
+            throw "Normalized JSON shape is invalid: transaction at index $i was parsed as an array wrapper."
+        }
+    }
+
+    Write-Output -NoEnumerate $items
+}
+
 function Invoke-StorePulseCurrentShiftRetrieval {
     param(
         [Parameter(Mandatory)]$Config,
@@ -224,7 +285,7 @@ function Invoke-StorePulseCurrentShiftNormalizer {
         throw "Current Shift normalizer did not write reconciliation JSON."
     }
 
-    $transactions = @(Get-Content -LiteralPath $NormalizedPath -Raw | ConvertFrom-Json)
+    $transactions = Read-StorePulseNormalizedTransactionArray -Path $NormalizedPath
     return [PSCustomObject]@{
         normalized_path = $NormalizedPath
         reconciliation_path = $ReconciliationPath

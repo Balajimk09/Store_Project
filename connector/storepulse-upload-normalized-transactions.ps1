@@ -6,7 +6,8 @@ param(
     [Parameter(Mandatory)][string]$Endpoint,
     [Parameter(Mandatory)][string]$SourceStoreNumber,
     [string]$SummaryPath = "",
-    [ValidateRange(1, 1000)][int]$BatchSize = 500
+    [ValidateRange(1, 1000)][int]$BatchSize = 500,
+    [scriptblock]$Transport = $null
 )
 
 Set-StrictMode -Version Latest
@@ -29,6 +30,67 @@ function Get-OptionalJsonFile {
     return Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json
 }
 
+function Read-StorePulseNormalizedTransactionArray {
+    param([Parameter(Mandatory)][string]$Path)
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        throw "Normalized JSON file was not found: $Path"
+    }
+
+    $json = Get-Content -LiteralPath $Path -Raw
+    if ([string]::IsNullOrWhiteSpace($json)) {
+        throw "Normalized JSON shape is invalid: root must be an array."
+    }
+
+    $trimmed = $json.TrimStart()
+    if (-not $trimmed.StartsWith("[")) {
+        throw "Normalized JSON shape is invalid: root must be an array."
+    }
+    $afterOpen = $trimmed.Substring(1).TrimStart()
+    if ($afterOpen.StartsWith("[")) {
+        throw "Normalized JSON shape is invalid: transaction entries must be objects, not nested arrays."
+    }
+    if ($trimmed -match '^\[\s*\]\s*$') {
+        Write-Output -NoEnumerate (New-Object System.Collections.ArrayList)
+        return
+    }
+
+    $parsed = ConvertFrom-Json -InputObject $json
+    $items = New-Object System.Collections.ArrayList
+
+    if ($null -eq $parsed) {
+        throw "Normalized JSON shape is invalid: array elements must be transaction objects."
+    }
+
+    if ($parsed -is [System.Array]) {
+        foreach ($item in $parsed) { [void]$items.Add($item) }
+    }
+    else {
+        [void]$items.Add($parsed)
+    }
+
+    for ($i = 0; $i -lt $items.Count; $i++) {
+        $item = $items[$i]
+        if ($null -eq $item) {
+            throw "Normalized JSON shape is invalid: transaction at index $i is null."
+        }
+        if ($item -is [System.Array]) {
+            throw "Normalized JSON shape is invalid: transaction at index $i is a nested array."
+        }
+        if ($item -is [string] -or $item -is [ValueType]) {
+            throw "Normalized JSON shape is invalid: transaction at index $i must be an object."
+        }
+        if ($null -eq $item.PSObject -or @($item.PSObject.Properties).Count -eq 0) {
+            throw "Normalized JSON shape is invalid: transaction at index $i must be an object."
+        }
+        if ($item.PSObject.Properties["Count"] -and $item.PSObject.Properties["Length"] -and $item.PSObject.Properties["Rank"]) {
+            throw "Normalized JSON shape is invalid: transaction at index $i was parsed as an array wrapper."
+        }
+    }
+
+    Write-Output -NoEnumerate $items
+}
+
 function Get-ResponseCount {
     param(
         [Parameter(Mandatory)]$Response,
@@ -38,6 +100,34 @@ function Get-ResponseCount {
     $property = $Response.PSObject.Properties[$Name]
     if ($null -eq $property -or $null -eq $property.Value) { return 0 }
     return [int]$property.Value
+}
+
+function Invoke-StorePulseNormalizedUploadRequest {
+    param(
+        [Parameter(Mandatory)][string]$Endpoint,
+        [Parameter(Mandatory)][string]$ConnectorToken,
+        [Parameter(Mandatory)]$Body,
+        [scriptblock]$Transport = $null
+    )
+
+    $bodyJson = $Body | ConvertTo-Json -Depth 100 -Compress
+    if ($null -ne $Transport) {
+        return & $Transport ([PSCustomObject]@{
+            endpoint = $Endpoint
+            headers = @{ "x-storepulse-connector-token" = $ConnectorToken }
+            content_type = "application/json; charset=utf-8"
+            body = $Body
+            body_json = $bodyJson
+        })
+    }
+
+    return Invoke-RestMethod `
+        -Method Post `
+        -Uri $Endpoint `
+        -Headers @{ "x-storepulse-connector-token" = $ConnectorToken } `
+        -ContentType "application/json; charset=utf-8" `
+        -Body $bodyJson `
+        -TimeoutSec 120
 }
 
 foreach ($requiredPath in @($NormalizedPath, $SourceXmlPath)) {
@@ -55,7 +145,7 @@ if ($SourceStoreNumber -notmatch '^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$') {
 }
 
 $connectorToken = Get-RequiredEnvironmentValue -Name "STOREPULSE_CONNECTOR_TOKEN"
-$transactions = @(Get-Content -LiteralPath $NormalizedPath -Raw | ConvertFrom-Json)
+$transactions = Read-StorePulseNormalizedTransactionArray -Path $NormalizedPath
 $reconciliation = Get-OptionalJsonFile -Path $ReconciliationPath
 $sourceHash = (Get-FileHash -LiteralPath $SourceXmlPath -Algorithm SHA256).Hash.ToLowerInvariant()
 
@@ -108,13 +198,11 @@ try {
             transactions = $batch
         }
 
-        $response = Invoke-RestMethod `
-            -Method Post `
-            -Uri $Endpoint `
-            -Headers @{ "x-storepulse-connector-token" = $connectorToken } `
-            -ContentType "application/json; charset=utf-8" `
-            -Body ($body | ConvertTo-Json -Depth 100 -Compress) `
-            -TimeoutSec 120
+        $response = Invoke-StorePulseNormalizedUploadRequest `
+            -Endpoint $Endpoint `
+            -ConnectorToken $connectorToken `
+            -Body $body `
+            -Transport $Transport
 
         $batchCanonicalCount = Get-ResponseCount -Response $response -Name "canonical_record_count"
         $batchInserted = Get-ResponseCount -Response $response -Name "inserted_count"
@@ -165,6 +253,13 @@ Write-Host ("Updated: {0}" -f $summary.updated_count)
 Write-Host ("Unchanged: {0}" -f $summary.unchanged_count)
 Write-Host ("Failed: {0}" -f $summary.failed_count)
 if ($summary.failed_count -gt 0) {
-    throw "StorePulse rejected one or more normalized transactions."
+    $requestIdText = if ($summary.request_ids.Count -gt 0) { $summary.request_ids -join "," } else { "none" }
+    throw ("StorePulse rejected normalized transactions. canonical_record_count={0}; inserted_count={1}; updated_count={2}; unchanged_count={3}; failed_count={4}; request_ids={5}" -f `
+        $summary.canonical_record_count,
+        $summary.inserted_count,
+        $summary.updated_count,
+        $summary.unchanged_count,
+        $summary.failed_count,
+        $requestIdText)
 }
 Write-Host "PASS: all normalized transactions were accepted by StorePulse."

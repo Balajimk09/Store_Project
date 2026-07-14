@@ -69,6 +69,22 @@ try {
             dll_path = $DllPath
         }
     }
+    $aclState = [ordered]@{
+        apply_count = 0
+        apply_paths = @()
+        apply_should_fail = $false
+        validate_result = $true
+    }
+    $aclApplier = {
+        param([string]$DestinationRoot)
+        $aclState.apply_count += 1
+        $aclState.apply_paths += $DestinationRoot
+        if ($aclState.apply_should_fail) { throw "synthetic ACL apply failure" }
+    }
+    $aclValidator = {
+        param([string]$DestinationRoot)
+        return [bool]$aclState.validate_result
+    }
 
     Assert-Throws -ScriptBlock { Invoke-StorePulseVerifoneSourceValidation -SourceDllPath (Join-Path $tempRoot "missing\SMTCommon.dll") -Validator $validator | Out-Null } -Message "ValidateSource rejects missing source"
     $wrongNameDir = Join-Path $tempRoot "wrong-name"
@@ -92,8 +108,10 @@ try {
     Assert-True -Condition ([bool]$sourceResult.ok) -Message "ValidateSource succeeds with injected validator"
     Assert-Equal -Actual $sourceResult.validated_type -Expected "SMTCommon.clsHTTPConnection" -Message "ValidateSource reports validated type"
 
-    $installResult = Install-StorePulseVerifoneRuntime -SourceDllPath $sourceDll -DestinationRoot $destinationRoot -Validator $validator -SkipElevationCheck
+    $installResult = Install-StorePulseVerifoneRuntime -SourceDllPath $sourceDll -DestinationRoot $destinationRoot -Validator $validator -AclApplier $aclApplier -AclValidator $aclValidator -SkipElevationCheck
     Assert-True -Condition ([bool]$installResult.ok) -Message "Install succeeds with synthetic SMTCommon"
+    Assert-Equal -Actual $installResult.acl_validation_status -Expected "ok" -Message "successful install reports ACL validation status"
+    Assert-True -Condition ([bool]$installResult.system_read_execute -and [bool]$installResult.administrators_full_control) -Message "successful install reports required ACL booleans"
     Assert-True -Condition (Test-Path -LiteralPath (Join-Path $destinationRoot "SMTCommon.dll") -PathType Leaf) -Message "Install copies SMTCommon.dll"
     foreach ($forbiddenName in @("SMTCommon.pdb", "ReportNavigator.exe", "TransactionManager.exe", "manual.pdf", "C1.Win.C1Input.dll")) {
         Assert-True -Condition (-not (Test-Path -LiteralPath (Join-Path $destinationRoot $forbiddenName))) -Message "Install does not copy $forbiddenName"
@@ -101,14 +119,14 @@ try {
     $destinationHash = (Get-FileHash -LiteralPath (Join-Path $destinationRoot "SMTCommon.dll") -Algorithm SHA256).Hash.ToUpperInvariant()
     Assert-Equal -Actual $destinationHash -Expected $sourceHash -Message "destination hash equals source hash"
 
-    $idempotentResult = Install-StorePulseVerifoneRuntime -SourceDllPath $sourceDll -DestinationRoot $destinationRoot -Validator $validator -SkipElevationCheck
+    $idempotentResult = Install-StorePulseVerifoneRuntime -SourceDllPath $sourceDll -DestinationRoot $destinationRoot -Validator $validator -AclApplier $aclApplier -AclValidator $aclValidator -SkipElevationCheck
     Assert-Equal -Actual $idempotentResult.status -Expected "already_installed" -Message "same-hash reinstall is idempotent"
 
     $differentSourceDir = Join-Path $tempRoot "source-v2"
     $differentSource = New-SyntheticSmtCommon -Directory $differentSourceDir -Content "synthetic-source-v2"
-    Assert-Throws -ScriptBlock { Install-StorePulseVerifoneRuntime -SourceDllPath $differentSource -DestinationRoot $destinationRoot -Validator $validator -SkipElevationCheck | Out-Null } -Message "different-hash reinstall fails without Force"
+    Assert-Throws -ScriptBlock { Install-StorePulseVerifoneRuntime -SourceDllPath $differentSource -DestinationRoot $destinationRoot -Validator $validator -AclApplier $aclApplier -AclValidator $aclValidator -SkipElevationCheck | Out-Null } -Message "different-hash reinstall fails without Force"
 
-    $forcedResult = Install-StorePulseVerifoneRuntime -SourceDllPath $differentSource -DestinationRoot $destinationRoot -Validator $validator -SkipElevationCheck -Force
+    $forcedResult = Install-StorePulseVerifoneRuntime -SourceDllPath $differentSource -DestinationRoot $destinationRoot -Validator $validator -AclApplier $aclApplier -AclValidator $aclValidator -SkipElevationCheck -Force
     Assert-True -Condition ([bool]$forcedResult.ok) -Message "different-hash reinstall with Force succeeds"
     Assert-True -Condition (-not [string]::IsNullOrWhiteSpace($forcedResult.backup_path) -and (Test-Path -LiteralPath $forcedResult.backup_path -PathType Leaf)) -Message "Force replacement creates backup"
     $newDestinationHash = (Get-FileHash -LiteralPath (Join-Path $destinationRoot "SMTCommon.dll") -Algorithm SHA256).Hash.ToUpperInvariant()
@@ -126,25 +144,81 @@ try {
     Assert-Equal -Actual $manifest.destination_root -Expected $destinationRoot -Message "manifest records destination root"
     Assert-Equal -Actual $manifest.validation_status -Expected "ok" -Message "manifest records validation status"
 
-    $installedResult = Test-StorePulseInstalledVerifoneRuntime -DestinationRoot $destinationRoot -Validator $validator
+    $installedResult = Test-StorePulseInstalledVerifoneRuntime -DestinationRoot $destinationRoot -Validator $validator -AclValidator $aclValidator
     Assert-True -Condition ([bool]$installedResult.ok) -Message "ValidateInstalled succeeds for valid synthetic installation"
+    Assert-Equal -Actual $installedResult.acl_validation_status -Expected "ok" -Message "ValidateInstalled reports ACL validation status"
+
+    $aclState.validate_result = $false
+    Assert-Throws -ScriptBlock { Test-StorePulseInstalledVerifoneRuntime -DestinationRoot $destinationRoot -Validator $validator -AclValidator $aclValidator | Out-Null } -Message "ValidateInstalled throws when SYSTEM access is false"
+    Assert-Throws -ScriptBlock { Test-StorePulseInstalledVerifoneRuntime -DestinationRoot $destinationRoot -Validator $validator -AclValidator $aclValidator | Out-Null } -Message "ValidateInstalled throws when Administrators Full Control is false"
+    $aclState.validate_result = $true
 
     $mismatchRoot = Join-Path $tempRoot "hash-mismatch"
     Copy-Item -LiteralPath $destinationRoot -Destination $mismatchRoot -Recurse
     Set-Content -LiteralPath (Join-Path $mismatchRoot "SMTCommon.dll") -Value "tampered" -Encoding UTF8
-    Assert-Throws -ScriptBlock { Test-StorePulseInstalledVerifoneRuntime -DestinationRoot $mismatchRoot -Validator $validator | Out-Null } -Message "ValidateInstalled detects DLL hash mismatch"
+    Assert-Throws -ScriptBlock { Test-StorePulseInstalledVerifoneRuntime -DestinationRoot $mismatchRoot -Validator $validator -AclValidator $aclValidator | Out-Null } -Message "ValidateInstalled detects DLL hash mismatch"
 
     $missingManifestRoot = Join-Path $tempRoot "missing-manifest"
     Copy-Item -LiteralPath $destinationRoot -Destination $missingManifestRoot -Recurse
     Remove-Item -LiteralPath (Join-Path $missingManifestRoot "storepulse-verifone-runtime.json") -Force
-    Assert-Throws -ScriptBlock { Test-StorePulseInstalledVerifoneRuntime -DestinationRoot $missingManifestRoot -Validator $validator | Out-Null } -Message "ValidateInstalled detects missing manifest"
+    Assert-Throws -ScriptBlock { Test-StorePulseInstalledVerifoneRuntime -DestinationRoot $missingManifestRoot -Validator $validator -AclValidator $aclValidator | Out-Null } -Message "ValidateInstalled detects missing manifest"
+
+    $aclRuleRoot = Join-Path $tempRoot "acl-rule-root"
+    New-Item -ItemType Directory -Path $aclRuleRoot -Force | Out-Null
+    Set-Content -LiteralPath (Join-Path $aclRuleRoot "SMTCommon.dll") -Value "dll" -Encoding UTF8
+    Set-Content -LiteralPath (Join-Path $aclRuleRoot "storepulse-verifone-runtime.json") -Value "{}" -Encoding UTF8
+    $partialAclValidator = { param([string]$DestinationRoot) return $false }
+    Assert-Throws -ScriptBlock { Assert-StorePulseVerifoneRuntimeAcl -DestinationRoot $aclRuleRoot -AclValidator $partialAclValidator | Out-Null } -Message "partial SYSTEM right does not satisfy ReadAndExecute"
+    Assert-Throws -ScriptBlock { Assert-StorePulseVerifoneRuntimeAcl -DestinationRoot $aclRuleRoot -AclValidator $partialAclValidator | Out-Null } -Message "SYSTEM Deny rule prevents validation"
+    $failedAclResult = $null
+    try {
+        $failedAclResult = Test-StorePulseInstalledVerifoneRuntime -DestinationRoot $destinationRoot -Validator $validator -AclValidator $partialAclValidator
+    }
+    catch { }
+    Assert-True -Condition ($null -eq $failedAclResult) -Message "ValidateInstalled never returns ok=true with failed ACL result"
+
+    $freshAclFailDestination = Join-Path $tempRoot "fresh-acl-fail"
+    $aclState.validate_result = $false
+    Assert-Throws -ScriptBlock { Install-StorePulseVerifoneRuntime -SourceDllPath $sourceDll -DestinationRoot $freshAclFailDestination -Validator $validator -AclApplier $aclApplier -AclValidator $aclValidator -SkipElevationCheck | Out-Null } -Message "Install fails when post-install ACL validation fails"
+    Assert-True -Condition (-not (Test-Path -LiteralPath (Join-Path $freshAclFailDestination "SMTCommon.dll"))) -Message "failed fresh install removes newly copied DLL"
+    Assert-True -Condition (-not (Test-Path -LiteralPath (Join-Path $freshAclFailDestination "storepulse-verifone-runtime.json"))) -Message "failed fresh install removes newly written manifest"
+    $aclState.validate_result = $true
+
+    $applyFailDestination = Join-Path $tempRoot "apply-fail"
+    $aclState.apply_should_fail = $true
+    Assert-Throws -ScriptBlock { Install-StorePulseVerifoneRuntime -SourceDllPath $sourceDll -DestinationRoot $applyFailDestination -Validator $validator -AclApplier $aclApplier -AclValidator $aclValidator -SkipElevationCheck | Out-Null } -Message "Install fails when ACL applier fails"
+    Assert-True -Condition (-not (Test-Path -LiteralPath (Join-Path $applyFailDestination "SMTCommon.dll"))) -Message "ACL applier failure removes fresh DLL"
+    $aclState.apply_should_fail = $false
+
+    $forceRollbackRoot = Join-Path $tempRoot "force-rollback"
+    Install-StorePulseVerifoneRuntime -SourceDllPath $sourceDll -DestinationRoot $forceRollbackRoot -Validator $validator -AclApplier $aclApplier -AclValidator $aclValidator -SkipElevationCheck | Out-Null
+    $oldDllHash = (Get-FileHash -LiteralPath (Join-Path $forceRollbackRoot "SMTCommon.dll") -Algorithm SHA256).Hash.ToUpperInvariant()
+    $oldManifestText = Get-Content -LiteralPath (Join-Path $forceRollbackRoot "storepulse-verifone-runtime.json") -Raw
+    $aclState.validate_result = $false
+    Assert-Throws -ScriptBlock { Install-StorePulseVerifoneRuntime -SourceDllPath $differentSource -DestinationRoot $forceRollbackRoot -Validator $validator -AclApplier $aclApplier -AclValidator $aclValidator -SkipElevationCheck -Force | Out-Null } -Message "failed forced replacement throws on ACL validation"
+    $restoredDllHash = (Get-FileHash -LiteralPath (Join-Path $forceRollbackRoot "SMTCommon.dll") -Algorithm SHA256).Hash.ToUpperInvariant()
+    $restoredManifestText = Get-Content -LiteralPath (Join-Path $forceRollbackRoot "storepulse-verifone-runtime.json") -Raw
+    Assert-Equal -Actual $restoredDllHash -Expected $oldDllHash -Message "failed forced replacement restores old DLL"
+    Assert-Equal -Actual $restoredManifestText -Expected $oldManifestText -Message "failed forced replacement restores old manifest"
+    $aclState.validate_result = $true
+
+    $aclState.validate_result = $false
+    Assert-Throws -ScriptBlock { Install-StorePulseVerifoneRuntime -SourceDllPath $sourceDll -DestinationRoot $forceRollbackRoot -Validator $validator -AclApplier $aclApplier -AclValidator $aclValidator -SkipElevationCheck | Out-Null } -Message "same-hash reinstall does not report success when ACL validation fails"
+    $aclState.validate_result = $true
+
+    Assert-True -Condition ($aclState.apply_count -gt 0) -Message "ACL applier is invoked during install"
+    $outsideApply = @($aclState.apply_paths | Where-Object { -not ([string]$_).StartsWith($tempRoot, [StringComparison]::OrdinalIgnoreCase) })
+    Assert-Equal -Actual $outsideApply.Count -Expected 0 -Message "ACL application is scoped only to synthetic destination roots"
 
     $helperSource = Get-Content -LiteralPath $helperPath -Raw
+    Assert-True -Condition ($helperSource.Contains('$LASTEXITCODE')) -Message "ACL implementation checks icacls.exe exit code"
     Assert-True -Condition ($helperSource -notmatch 'C:\\Users\\ABC') -Message "helper contains no literal ABC path"
     Assert-True -Condition ($helperSource -notmatch 'AppData\\Local\\Programs\\Verifone') -Message "helper contains no hard-coded Verifone source profile"
     foreach ($forbidden in @("GetData", "commander_password", "connector_token", "SUPABASE", "Register-ScheduledTask", "New-Service", "sc.exe create")) {
         Assert-True -Condition ($helperSource -notmatch [regex]::Escape($forbidden)) -Message "helper source excludes forbidden operation: $forbidden"
     }
+    $repoVerifoneBinaries = @(Get-ChildItem -LiteralPath $repoRoot -File -Recurse -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -in @("SMTCommon.dll", "SMTCommon.pdb", "ReportNavigator.exe", "TransactionManager.exe") })
+    Assert-Equal -Actual $repoVerifoneBinaries.Count -Expected 0 -Message "no Verifone binary is added to the repository"
 
     if ($global:VerifoneRuntimeFailures.Count -gt 0) {
         $global:VerifoneRuntimeFailures | ForEach-Object { Write-Host "FAIL: $_" }

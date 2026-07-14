@@ -185,30 +185,128 @@ function Write-StorePulseVerifoneRuntimeManifest {
 }
 
 function Set-StorePulseVerifoneRuntimeAcl {
-    param([Parameter(Mandatory)][string]$DestinationRoot)
+    param(
+        [Parameter(Mandatory)][string]$DestinationRoot,
+        [scriptblock]$AclApplier = $null
+    )
 
-    if (-not (Get-Command icacls.exe -ErrorAction SilentlyContinue)) { return }
-    & icacls.exe $DestinationRoot /inheritance:r /grant:r "SYSTEM:(OI)(CI)(RX)" "Administrators:(OI)(CI)(F)" | Out-Null
+    if ($null -ne $AclApplier) {
+        & $AclApplier $DestinationRoot
+        return
+    }
+
+    $icacls = Get-Command icacls.exe -ErrorAction SilentlyContinue
+    if ($null -eq $icacls) {
+        throw "icacls.exe was not found; cannot secure Verifone runtime ACLs."
+    }
+
+    $systemGrant = "*S-1-5-18:(OI)(CI)(RX)"
+    $administratorsGrant = "*S-1-5-32-544:(OI)(CI)(F)"
+
+    & $icacls.Source $DestinationRoot /inheritance:r /grant:r $systemGrant $administratorsGrant /T | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw "icacls.exe failed while securing Verifone runtime ACLs. Exit code: $LASTEXITCODE"
+    }
 }
 
-function Test-StorePulseSystemReadExecuteAccess {
-    param([Parameter(Mandatory)][string]$Path)
+function Test-StorePulseIdentityHasFileSystemRights {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$Sid,
+        [Parameter(Mandatory)][Security.AccessControl.FileSystemRights]$RequiredRights
+    )
 
     try {
+        $targetSid = New-Object Security.Principal.SecurityIdentifier($Sid)
         $acl = Get-Acl -LiteralPath $Path
+        $allowRights = [Security.AccessControl.FileSystemRights]0
+
         foreach ($rule in $acl.Access) {
-            $identity = [string]$rule.IdentityReference
-            if ($identity -match '(^|\\)SYSTEM$' -and
-                (($rule.FileSystemRights -band [Security.AccessControl.FileSystemRights]::ReadAndExecute) -ne 0 -or
-                 ($rule.FileSystemRights -band [Security.AccessControl.FileSystemRights]::FullControl) -ne 0)) {
-                return $true
+            $ruleSid = $null
+            try {
+                $ruleSid = $rule.IdentityReference.Translate([Security.Principal.SecurityIdentifier])
+            }
+            catch {
+                continue
+            }
+
+            if ($ruleSid.Value -ne $targetSid.Value) { continue }
+
+            $intersectsRequiredRights = (($rule.FileSystemRights -band $RequiredRights) -ne 0)
+            if ($rule.AccessControlType -eq [Security.AccessControl.AccessControlType]::Deny -and $intersectsRequiredRights) {
+                return $false
+            }
+
+            if ($rule.AccessControlType -eq [Security.AccessControl.AccessControlType]::Allow) {
+                $allowRights = $allowRights -bor $rule.FileSystemRights
             }
         }
+
+        if (($allowRights -band [Security.AccessControl.FileSystemRights]::FullControl) -eq [Security.AccessControl.FileSystemRights]::FullControl) {
+            return $true
+        }
+
+        return (($allowRights -band $RequiredRights) -eq $RequiredRights)
     }
     catch {
         return $false
     }
-    return $false
+}
+
+function Test-StorePulseVerifoneRuntimeAcl {
+    param(
+        [Parameter(Mandatory)][string]$DestinationRoot,
+        [scriptblock]$AclValidator = $null
+    )
+
+    if ($null -ne $AclValidator) {
+        return [bool](& $AclValidator $DestinationRoot)
+    }
+
+    $paths = @(
+        $DestinationRoot,
+        (Join-Path $DestinationRoot "SMTCommon.dll"),
+        (Join-Path $DestinationRoot "storepulse-verifone-runtime.json")
+    )
+
+    foreach ($path in $paths) {
+        if (-not (Test-Path -LiteralPath $path)) {
+            return $false
+        }
+
+        $systemOk = Test-StorePulseIdentityHasFileSystemRights `
+            -Path $path `
+            -Sid "S-1-5-18" `
+            -RequiredRights ([Security.AccessControl.FileSystemRights]::ReadAndExecute)
+
+        $administratorsOk = Test-StorePulseIdentityHasFileSystemRights `
+            -Path $path `
+            -Sid "S-1-5-32-544" `
+            -RequiredRights ([Security.AccessControl.FileSystemRights]::FullControl)
+
+        if (-not $systemOk -or -not $administratorsOk) {
+            return $false
+        }
+    }
+
+    return $true
+}
+
+function Assert-StorePulseVerifoneRuntimeAcl {
+    param(
+        [Parameter(Mandatory)][string]$DestinationRoot,
+        [scriptblock]$AclValidator = $null
+    )
+
+    if (-not (Test-StorePulseVerifoneRuntimeAcl -DestinationRoot $DestinationRoot -AclValidator $AclValidator)) {
+        throw "Verifone runtime ACL validation failed. SYSTEM requires ReadAndExecute and Administrators requires FullControl."
+    }
+
+    [PSCustomObject]@{
+        system_read_execute = $true
+        administrators_full_control = $true
+        acl_validation_status = "ok"
+    }
 }
 
 function Invoke-StorePulseVerifoneSourceValidation {
@@ -243,6 +341,8 @@ function Install-StorePulseVerifoneRuntime {
         [Parameter(Mandatory)][string]$DestinationRoot,
         [switch]$Force,
         [scriptblock]$Validator = $null,
+        [scriptblock]$AclApplier = $null,
+        [scriptblock]$AclValidator = $null,
         [switch]$SkipElevationCheck
     )
 
@@ -258,13 +358,15 @@ function Install-StorePulseVerifoneRuntime {
     New-Item -ItemType Directory -Path $plan.destination_root -Force | Out-Null
     $destinationExists = Test-Path -LiteralPath $plan.destination_dll_path -PathType Leaf
     $backupPath = ""
+    $manifestBackupPath = ""
 
     if ($destinationExists) {
         $existingHash = (Get-FileHash -LiteralPath $plan.destination_dll_path -Algorithm SHA256).Hash.ToUpperInvariant()
         if ($existingHash -eq $sourceMetadata.sha256) {
             $destinationValidation = Test-StorePulseSmtCommonAssembly -DllPath $plan.destination_dll_path -Validator $Validator
             $manifest = Write-StorePulseVerifoneRuntimeManifest -Metadata $sourceMetadata -Validation $destinationValidation -DestinationRoot $plan.destination_root -Path $plan.manifest_path
-            Set-StorePulseVerifoneRuntimeAcl -DestinationRoot $plan.destination_root
+            Set-StorePulseVerifoneRuntimeAcl -DestinationRoot $plan.destination_root -AclApplier $AclApplier
+            $acl = Assert-StorePulseVerifoneRuntimeAcl -DestinationRoot $plan.destination_root -AclValidator $AclValidator
             return [PSCustomObject]@{
                 ok = $true
                 mode = "Install"
@@ -276,6 +378,9 @@ function Install-StorePulseVerifoneRuntime {
                 backup_path = ""
                 manifest_path = $plan.manifest_path
                 manifest = $manifest
+                system_read_execute = $acl.system_read_execute
+                administrators_full_control = $acl.administrators_full_control
+                acl_validation_status = $acl.acl_validation_status
             }
         }
 
@@ -286,9 +391,14 @@ function Install-StorePulseVerifoneRuntime {
         $stamp = (Get-Date).ToUniversalTime().ToString("yyyyMMddHHmmss")
         $backupPath = Join-Path $plan.destination_root ("SMTCommon.dll.$stamp.bak")
         Move-Item -LiteralPath $plan.destination_dll_path -Destination $backupPath -Force
+        if (Test-Path -LiteralPath $plan.manifest_path -PathType Leaf) {
+            $manifestBackupPath = Join-Path $plan.destination_root ("storepulse-verifone-runtime.json.$stamp.bak")
+            Move-Item -LiteralPath $plan.manifest_path -Destination $manifestBackupPath -Force
+        }
     }
 
     $tempPath = Join-Path $plan.destination_root ("SMTCommon.dll.tmp." + [guid]::NewGuid().ToString("N"))
+    $freshInstall = (-not $destinationExists)
     try {
         Copy-Item -LiteralPath $plan.source_path -Destination $tempPath -Force
         Move-Item -LiteralPath $tempPath -Destination $plan.destination_dll_path -Force
@@ -299,7 +409,8 @@ function Install-StorePulseVerifoneRuntime {
 
         $destinationValidation = Test-StorePulseSmtCommonAssembly -DllPath $plan.destination_dll_path -Validator $Validator
         $manifest = Write-StorePulseVerifoneRuntimeManifest -Metadata $destinationMetadata -Validation $destinationValidation -DestinationRoot $plan.destination_root -Path $plan.manifest_path
-        Set-StorePulseVerifoneRuntimeAcl -DestinationRoot $plan.destination_root
+        Set-StorePulseVerifoneRuntimeAcl -DestinationRoot $plan.destination_root -AclApplier $AclApplier
+        $acl = Assert-StorePulseVerifoneRuntimeAcl -DestinationRoot $plan.destination_root -AclValidator $AclValidator
 
         [PSCustomObject]@{
             ok = $true
@@ -313,22 +424,37 @@ function Install-StorePulseVerifoneRuntime {
             manifest_path = $plan.manifest_path
             manifest = $manifest
             source_validation_status = [string]$sourceValidation.validation_status
+            system_read_execute = $acl.system_read_execute
+            administrators_full_control = $acl.administrators_full_control
+            acl_validation_status = $acl.acl_validation_status
         }
     }
     catch {
+        $originalError = $_
         Remove-Item -LiteralPath $tempPath -Force -ErrorAction SilentlyContinue
-        Remove-Item -LiteralPath $plan.destination_dll_path -Force -ErrorAction SilentlyContinue
-        if (-not [string]::IsNullOrWhiteSpace($backupPath) -and (Test-Path -LiteralPath $backupPath -PathType Leaf)) {
-            Move-Item -LiteralPath $backupPath -Destination $plan.destination_dll_path -Force
+        if ($freshInstall) {
+            Remove-Item -LiteralPath $plan.destination_dll_path -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $plan.manifest_path -Force -ErrorAction SilentlyContinue
         }
-        throw
+        else {
+            Remove-Item -LiteralPath $plan.destination_dll_path -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $plan.manifest_path -Force -ErrorAction SilentlyContinue
+            if (-not [string]::IsNullOrWhiteSpace($backupPath) -and (Test-Path -LiteralPath $backupPath -PathType Leaf)) {
+                Move-Item -LiteralPath $backupPath -Destination $plan.destination_dll_path -Force
+            }
+            if (-not [string]::IsNullOrWhiteSpace($manifestBackupPath) -and (Test-Path -LiteralPath $manifestBackupPath -PathType Leaf)) {
+                Move-Item -LiteralPath $manifestBackupPath -Destination $plan.manifest_path -Force
+            }
+        }
+        throw $originalError
     }
 }
 
 function Test-StorePulseInstalledVerifoneRuntime {
     param(
         [Parameter(Mandatory)][string]$DestinationRoot,
-        [scriptblock]$Validator = $null
+        [scriptblock]$Validator = $null,
+        [scriptblock]$AclValidator = $null
     )
 
     Test-StorePulseWindowsPlatform
@@ -353,6 +479,7 @@ function Test-StorePulseInstalledVerifoneRuntime {
     }
 
     $validation = Test-StorePulseSmtCommonAssembly -DllPath $dllPath -Validator $Validator
+    $acl = Assert-StorePulseVerifoneRuntimeAcl -DestinationRoot $destination -AclValidator $AclValidator
     [PSCustomObject]@{
         ok = $true
         mode = "ValidateInstalled"
@@ -364,7 +491,9 @@ function Test-StorePulseInstalledVerifoneRuntime {
         assembly_full_name = [string]$validation.assembly_full_name
         validated_type = [string]$validation.validated_type
         validation_status = "ok"
-        system_read_execute = Test-StorePulseSystemReadExecuteAccess -Path $destination
+        system_read_execute = $acl.system_read_execute
+        administrators_full_control = $acl.administrators_full_control
+        acl_validation_status = $acl.acl_validation_status
     }
 }
 

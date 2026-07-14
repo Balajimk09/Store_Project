@@ -79,6 +79,7 @@ function Test-StorePulseMachineConfig {
     if ([string]$Config.source_store_number -notmatch '^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$') { throw "source_store_number contains unsupported characters." }
     if ([string]::IsNullOrWhiteSpace([string]$Config.commander_ip)) { throw "commander_ip is required." }
     if ([string]$Config.commander_ip -notmatch '^[A-Za-z0-9][A-Za-z0-9.-]{0,252}$') { throw "commander_ip must be a hostname or IP address." }
+    Test-StorePulsePathValue -Value ([string]$Config.commander_install_path) -Name "commander_install_path"
     Test-StorePulseUrl -Value ([string]$Config.live_endpoint_url) -Name "live_endpoint_url"
     Test-StorePulseUrl -Value ([string]$Config.finalization_endpoint_url) -Name "finalization_endpoint_url"
     $livePoll = [int]$Config.live_poll_interval_seconds

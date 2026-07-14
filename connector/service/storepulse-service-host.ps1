@@ -11,6 +11,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
 . (Join-Path $PSScriptRoot "storepulse-service-runtime.ps1")
+. (Join-Path $PSScriptRoot "storepulse-current-shift-worker.ps1")
 
 $config = Read-StorePulseMachineConfig -Path $ConfigPath
 $resolvedInstallRoot = if ([string]::IsNullOrWhiteSpace($InstallRoot)) { [string]$config.install_root } else { $InstallRoot }

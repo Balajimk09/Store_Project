@@ -36,6 +36,7 @@ function New-TestConfig {
     [PSCustomObject]@{
         source_store_number = "SYNTH"
         commander_ip = "commander.local"
+        commander_install_path = Join-Path $InstallRoot "Commander"
         live_endpoint_url = "https://example.invalid/functions/v1/ingest-pos-transactions"
         finalization_endpoint_url = "https://example.invalid/functions/v1/finalize-pos-business-day"
         live_poll_interval_seconds = 300
@@ -170,13 +171,14 @@ try {
     New-Item -ItemType Directory -Path $programDataRoot -Force | Out-Null
     New-Item -ItemType Directory -Path $installRoot -Force | Out-Null
 
-    foreach ($name in @("storepulse-connector.mjs", "storepulse-finalize-closed-day.ps1", "storepulse-normalize-transactions.ps1", "storepulse-upload-finalized-business-day.ps1")) {
+    foreach ($name in @("storepulse-connector.mjs", "storepulse-finalize-closed-day.ps1", "storepulse-finalize-closed-day-machine.ps1", "storepulse-normalize-transactions.ps1", "storepulse-upload-finalized-business-day.ps1", "storepulse-upload-normalized-transactions.ps1")) {
         Set-Content -LiteralPath (Join-Path $installRoot $name) -Value "placeholder" -Encoding UTF8
     }
 
     $serviceSubdir = Join-Path $installRoot "service"
     New-Item -ItemType Directory -Path $serviceSubdir -Force | Out-Null
     Set-Content -LiteralPath (Join-Path $serviceSubdir "storepulse-service-entrypoint.ps1") -Value "placeholder" -Encoding UTF8
+    Set-Content -LiteralPath (Join-Path $serviceSubdir "storepulse-current-shift-worker.ps1") -Value "placeholder" -Encoding UTF8
     $testNode = Install-TestNodeRuntime -InstallRoot $installRoot
 
     $servicePlan = Install-StorePulseWindowsService -InstallRoot $installRoot -ValidateOnly
@@ -264,6 +266,7 @@ try {
         -InstallRoot $installRoot `
         -SourceStoreNumber "SYNTH" `
         -CommanderIp "commander.local" `
+        -CommanderInstallPath (Join-Path $installRoot "Commander") `
         -LiveUploadUrl "https://example.invalid/functions/v1/ingest-pos-transactions" `
         -FinalizationUrl "https://example.invalid/functions/v1/finalize-pos-business-day" `
         -LivePollSeconds 300 `

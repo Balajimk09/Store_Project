@@ -9,6 +9,7 @@ $connectorRoot = Join-Path $repoRoot "connector"
 $serviceRoot = Join-Path $connectorRoot "service"
 $workerPath = Join-Path $serviceRoot "storepulse-current-shift-worker.ps1"
 $runtimePath = Join-Path $serviceRoot "storepulse-service-runtime.ps1"
+$normalizerPath = Join-Path $connectorRoot "storepulse-normalize-transactions.ps1"
 $uploaderPath = Join-Path $connectorRoot "storepulse-upload-normalized-transactions.ps1"
 $closedWrapperPath = Join-Path $connectorRoot "storepulse-finalize-closed-day-machine.ps1"
 
@@ -18,7 +19,7 @@ function Assert-True {
     Write-Host "PASS: $Message"
 }
 
-foreach ($path in @($workerPath, $runtimePath, $uploaderPath, $closedWrapperPath)) {
+foreach ($path in @($workerPath, $runtimePath, $normalizerPath, $uploaderPath, $closedWrapperPath)) {
     Assert-True -Condition (Test-Path -LiteralPath $path -PathType Leaf) -Message "required machine-wide worker file exists: $(Split-Path -Leaf $path)"
     $tokens = $null
     $errors = $null
@@ -81,6 +82,8 @@ $normalizerInvoker = {
     param($installRootValue, $xmlPathValue, $normalizedPathValue, $reconciliationPathValue)
     $capture.normalizer_install_root = $installRootValue
     $capture.normalizer_xml_path = $xmlPathValue
+    $capture.normalizer_normalized_path = $normalizedPathValue
+    $capture.normalizer_reconciliation_path = $reconciliationPathValue
     @([PSCustomObject]@{
         source_system = "verifone_commander"
         source_unique_id = "test-1"
@@ -135,6 +138,9 @@ try {
     Assert-True -Condition ($capture.commander_install_path -eq $config.commander_install_path) -Message "live worker uses config.commander_install_path"
     Assert-True -Condition ($capture.commander_ip -eq $config.commander_ip) -Message "live worker uses configured Commander IP"
     Assert-True -Condition ($capture.output_path.StartsWith((Join-Path $config.working_root "live"), [StringComparison]::OrdinalIgnoreCase)) -Message "Current Shift XML is written under ProgramData working live folder"
+    Assert-True -Condition ($capture.normalizer_xml_path -eq $capture.output_path) -Message "Current Shift passes explicit XML path to normalizer"
+    Assert-True -Condition ($capture.normalizer_normalized_path.StartsWith((Join-Path $config.working_root "live"), [StringComparison]::OrdinalIgnoreCase)) -Message "Current Shift passes explicit normalized JSON path under ProgramData"
+    Assert-True -Condition ($capture.normalizer_reconciliation_path.StartsWith((Join-Path $config.working_root "live"), [StringComparison]::OrdinalIgnoreCase)) -Message "Current Shift passes explicit reconciliation path under ProgramData"
     Assert-True -Condition ($capture.upload_normalized_path.StartsWith((Join-Path $config.working_root "live"), [StringComparison]::OrdinalIgnoreCase)) -Message "normalized Current Shift JSON is written under ProgramData working live folder"
     Assert-True -Condition ($capture.live_endpoint_url -eq $config.live_endpoint_url) -Message "canonical uploader uses configured live ingestion endpoint"
     Assert-True -Condition ($result.canonical_record_count -eq 1 -and $result.inserted_count -eq 1 -and $result.failed_count -eq 0) -Message "live pipeline returns canonical ingestion counts"
@@ -151,6 +157,17 @@ try {
     Assert-True -Condition ($workerSource -match 'period\s*=\s*"1"') -Message "live retrieval requests period 1"
     Assert-True -Condition ($workerSource -match 'filename\s*=\s*"current"') -Message "live retrieval requests filename current"
     Assert-True -Condition ($workerSource -notmatch '(?i)OneDrive|\$env:USERPROFILE|C:\\Users\\ABC') -Message "machine-wide live worker contains no user-profile paths"
+
+    $normalizerSource = Get-Content -LiteralPath $normalizerPath -Raw
+    Assert-True -Condition ($normalizerSource -notmatch '\$env:USERPROFILE') -Message "normalizer contains no USERPROFILE default"
+    Assert-True -Condition ($normalizerSource -notmatch '(?i)OneDrive') -Message "normalizer contains no OneDrive path"
+    Assert-True -Condition ($normalizerSource -notmatch '\\Desktop\\') -Message "normalizer contains no Desktop path"
+    Assert-True -Condition ($normalizerSource -notmatch 'C:\\Users') -Message "normalizer contains no hard-coded C:\\Users path"
+    Assert-True -Condition ($normalizerSource -notmatch 'C:\\StorePulse\\connector') -Message "normalizer contains no legacy C:\\StorePulse\\connector reconciliation default"
+    Assert-True -Condition ($normalizerSource -match '\[string\]\$XmlPath\s*=\s*""') -Message "normalizer XmlPath defaults to blank"
+    Assert-True -Condition ($normalizerSource -match '\[string\]\$OutputPath\s*=\s*""') -Message "normalizer OutputPath defaults to blank"
+    Assert-True -Condition ($normalizerSource -match '\[string\]\$ReconciliationPath\s*=\s*""') -Message "normalizer ReconciliationPath defaults to blank"
+    Assert-True -Condition ($normalizerSource -match 'throw "XmlPath is required\."' -and $normalizerSource -match 'throw "OutputPath is required\."' -and $normalizerSource -match 'throw "ReconciliationPath is required\."') -Message "normalizer fails fast when explicit paths are omitted"
 
     $wrapperSource = Get-Content -LiteralPath $closedWrapperPath -Raw
     Assert-True -Condition ($wrapperSource -match 'STOREPULSE_COMMANDER_USERNAME' -and $wrapperSource -match 'STOREPULSE_COMMANDER_PASSWORD') -Message "closed-day wrapper reads Commander credentials from service process environment"

@@ -1,8 +1,8 @@
 [CmdletBinding()]
 param(
-    [string]$XmlPath = "$env:USERPROFILE\OneDrive\Desktop\StorePulse-current-shift-vendor-library.xml",
-    [string]$OutputPath = "$env:USERPROFILE\OneDrive\Desktop\StorePulse-normalized-transactions.json",
-    [string]$ReconciliationPath = "C:\StorePulse\connector\StorePulse-current-shift-reconciliation.json",
+    [string]$XmlPath = "",
+    [string]$OutputPath = "",
+    [string]$ReconciliationPath = "",
     [string]$BusinessDate = "",
     [string]$PeriodType = "",
     [string]$PeriodNumber = "",
@@ -15,8 +15,20 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-# Production-compatible candidate: reads the current-shift XML and writes
-# the standard normalized JSON by default. This script itself never uploads data.
+if ([string]::IsNullOrWhiteSpace($XmlPath)) {
+    throw "XmlPath is required."
+}
+
+if ([string]::IsNullOrWhiteSpace($OutputPath)) {
+    throw "OutputPath is required."
+}
+
+if ([string]::IsNullOrWhiteSpace($ReconciliationPath)) {
+    throw "ReconciliationPath is required."
+}
+
+# Production-compatible candidate: reads the provided XML and writes the
+# standard normalized JSON. This script itself never uploads data.
 $xmlPath = $XmlPath
 $outputPath = $OutputPath
 $reconciliationPath = $ReconciliationPath

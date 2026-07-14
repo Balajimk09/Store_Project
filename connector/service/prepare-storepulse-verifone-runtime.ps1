@@ -190,22 +190,108 @@ function Set-StorePulseVerifoneRuntimeAcl {
         [scriptblock]$AclApplier = $null
     )
 
-    if ($null -ne $AclApplier) {
-        & $AclApplier $DestinationRoot
-        return
-    }
-
     $icacls = Get-Command icacls.exe -ErrorAction SilentlyContinue
-    if ($null -eq $icacls) {
+    if ($null -eq $icacls -and $null -eq $AclApplier) {
         throw "icacls.exe was not found; cannot secure Verifone runtime ACLs."
     }
 
-    $systemGrant = "*S-1-5-18:(OI)(CI)(RX)"
-    $administratorsGrant = "*S-1-5-32-544:(OI)(CI)(F)"
+    $root = [IO.Path]::GetFullPath($DestinationRoot).TrimEnd('\')
+    $directories = @($root)
+    $directories += @(Get-ChildItem -LiteralPath $root -Directory -Recurse -Force -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName })
+    $files = @(Get-ChildItem -LiteralPath $root -File -Recurse -Force -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName })
 
-    & $icacls.Source $DestinationRoot /inheritance:r /grant:r $systemGrant $administratorsGrant /T | Out-Null
+    foreach ($directory in $directories) {
+        $arguments = @(
+            $directory,
+            "/inheritance:r",
+            "/grant:r",
+            "*S-1-5-18:(OI)(CI)(RX)",
+            "*S-1-5-32-544:(OI)(CI)(F)"
+        )
+        $icaclsPath = if ($null -ne $icacls) { $icacls.Source } else { "" }
+        Invoke-StorePulseIcacls -Arguments $arguments -AclApplier $AclApplier -IcaclsPath $icaclsPath -ScopeRoot $root
+    }
+
+    foreach ($file in $files) {
+        $arguments = @(
+            $file,
+            "/inheritance:r",
+            "/grant:r",
+            "*S-1-5-18:(RX)",
+            "*S-1-5-32-544:(F)"
+        )
+        $icaclsPath = if ($null -ne $icacls) { $icacls.Source } else { "" }
+        Invoke-StorePulseIcacls -Arguments $arguments -AclApplier $AclApplier -IcaclsPath $icaclsPath -ScopeRoot $root
+    }
+}
+
+function Invoke-StorePulseIcacls {
+    param(
+        [Parameter(Mandatory)][string[]]$Arguments,
+        [scriptblock]$AclApplier = $null,
+        [string]$IcaclsPath = "",
+        [Parameter(Mandatory)][string]$ScopeRoot
+    )
+
+    $targetPath = [IO.Path]::GetFullPath($Arguments[0])
+    $root = [IO.Path]::GetFullPath($ScopeRoot).TrimEnd('\')
+    if ($targetPath -ne $root -and -not $targetPath.StartsWith($root + "\", [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Refusing to modify ACL outside DestinationRoot: $targetPath"
+    }
+
+    if ($Arguments -contains "/T") {
+        throw "Refusing to combine recursive icacls /T with explicit Verifone runtime ACL application."
+    }
+
+    if ($null -ne $AclApplier) {
+        $result = & $AclApplier $Arguments[0] $Arguments
+        if ($result -is [int] -and $result -ne 0) {
+            throw "Injected ACL operation failed. Exit code: $result"
+        }
+        $exitCodeProperty = if ($null -ne $result) { $result.PSObject.Properties["ExitCode"] } else { $null }
+        if ($null -ne $exitCodeProperty -and [int]$exitCodeProperty.Value -ne 0) {
+            throw "Injected ACL operation failed. Exit code: $($exitCodeProperty.Value)"
+        }
+        return
+    }
+
+    if ([string]::IsNullOrWhiteSpace($IcaclsPath)) {
+        throw "icacls.exe was not found; cannot secure Verifone runtime ACLs."
+    }
+
+    & $IcaclsPath @Arguments | Out-Null
     if ($LASTEXITCODE -ne 0) {
-        throw "icacls.exe failed while securing Verifone runtime ACLs. Exit code: $LASTEXITCODE"
+        throw "icacls.exe failed while securing Verifone runtime ACLs for $($Arguments[0]). Exit code: $LASTEXITCODE"
+    }
+}
+
+function Grant-StorePulseRollbackAccess {
+    param(
+        [Parameter(Mandatory)][string[]]$Paths,
+        [scriptblock]$AclApplier = $null,
+        [Parameter(Mandatory)][string]$ScopeRoot
+    )
+
+    $icacls = Get-Command icacls.exe -ErrorAction SilentlyContinue
+    if ($null -eq $icacls -and $null -eq $AclApplier) {
+        throw "icacls.exe was not found; cannot recover Verifone runtime rollback ACLs."
+    }
+
+    $failures = New-Object System.Collections.Generic.List[string]
+    foreach ($path in $Paths) {
+        if ([string]::IsNullOrWhiteSpace($path) -or -not (Test-Path -LiteralPath $path)) { continue }
+        $arguments = @($path, "/grant:r", "*S-1-5-32-544:(F)")
+        try {
+            $icaclsPath = if ($null -ne $icacls) { $icacls.Source } else { "" }
+            Invoke-StorePulseIcacls -Arguments $arguments -AclApplier $AclApplier -IcaclsPath $icaclsPath -ScopeRoot $ScopeRoot
+        }
+        catch {
+            $failures.Add("$path :: $($_.Exception.Message)")
+        }
+    }
+
+    if ($failures.Count -gt 0) {
+        throw "Rollback ACL recovery failed: $($failures -join '; ')"
     }
 }
 
@@ -431,20 +517,53 @@ function Install-StorePulseVerifoneRuntime {
     }
     catch {
         $originalError = $_
+        $rollbackFailures = New-Object System.Collections.Generic.List[string]
+        $rollbackPaths = @(
+            $tempPath,
+            $plan.destination_dll_path,
+            $plan.manifest_path,
+            $backupPath,
+            $manifestBackupPath
+        ) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+        try {
+            Grant-StorePulseRollbackAccess -Paths $rollbackPaths -AclApplier $AclApplier -ScopeRoot $plan.destination_root
+        }
+        catch {
+            $rollbackFailures.Add($_.Exception.Message)
+        }
+
         Remove-Item -LiteralPath $tempPath -Force -ErrorAction SilentlyContinue
+        if (Test-Path -LiteralPath $tempPath) { $rollbackFailures.Add("Failed to remove temporary DLL: $tempPath") }
         if ($freshInstall) {
             Remove-Item -LiteralPath $plan.destination_dll_path -Force -ErrorAction SilentlyContinue
             Remove-Item -LiteralPath $plan.manifest_path -Force -ErrorAction SilentlyContinue
+            if (Test-Path -LiteralPath $plan.destination_dll_path) { $rollbackFailures.Add("Failed to remove invalid fresh DLL: $($plan.destination_dll_path)") }
+            if (Test-Path -LiteralPath $plan.manifest_path) { $rollbackFailures.Add("Failed to remove stale fresh manifest: $($plan.manifest_path)") }
         }
         else {
             Remove-Item -LiteralPath $plan.destination_dll_path -Force -ErrorAction SilentlyContinue
             Remove-Item -LiteralPath $plan.manifest_path -Force -ErrorAction SilentlyContinue
             if (-not [string]::IsNullOrWhiteSpace($backupPath) -and (Test-Path -LiteralPath $backupPath -PathType Leaf)) {
-                Move-Item -LiteralPath $backupPath -Destination $plan.destination_dll_path -Force
+                try { Move-Item -LiteralPath $backupPath -Destination $plan.destination_dll_path -Force } catch { $rollbackFailures.Add("Failed to restore old DLL: $($_.Exception.Message)") }
             }
             if (-not [string]::IsNullOrWhiteSpace($manifestBackupPath) -and (Test-Path -LiteralPath $manifestBackupPath -PathType Leaf)) {
-                Move-Item -LiteralPath $manifestBackupPath -Destination $plan.manifest_path -Force
+                try { Move-Item -LiteralPath $manifestBackupPath -Destination $plan.manifest_path -Force } catch { $rollbackFailures.Add("Failed to restore old manifest: $($_.Exception.Message)") }
             }
+            if (-not (Test-Path -LiteralPath $plan.destination_dll_path -PathType Leaf)) { $rollbackFailures.Add("Forced replacement rollback did not restore old DLL.") }
+            if (-not [string]::IsNullOrWhiteSpace($manifestBackupPath) -and -not (Test-Path -LiteralPath $plan.manifest_path -PathType Leaf)) { $rollbackFailures.Add("Forced replacement rollback did not restore old manifest.") }
+            if ((Test-Path -LiteralPath $plan.destination_dll_path -PathType Leaf) -and (Test-Path -LiteralPath $plan.manifest_path -PathType Leaf)) {
+                try {
+                    Set-StorePulseVerifoneRuntimeAcl -DestinationRoot $plan.destination_root -AclApplier $AclApplier
+                    Assert-StorePulseVerifoneRuntimeAcl -DestinationRoot $plan.destination_root -AclValidator $AclValidator | Out-Null
+                }
+                catch {
+                    $rollbackFailures.Add("Failed to reapply/validate ACLs on restored runtime: $($_.Exception.Message)")
+                }
+            }
+        }
+
+        if ($rollbackFailures.Count -gt 0) {
+            throw "Verifone runtime installation failed: $($originalError.Exception.Message) Rollback cleanup also failed: $($rollbackFailures -join '; ')"
         }
         throw $originalError
     }

@@ -72,14 +72,28 @@ try {
     $aclState = [ordered]@{
         apply_count = 0
         apply_paths = @()
+        apply_commands = @()
         apply_should_fail = $false
+        fail_secure_acl_target = ""
         validate_result = $true
     }
     $aclApplier = {
-        param([string]$DestinationRoot)
+        param([string]$TargetPath, [string[]]$Arguments)
         $aclState.apply_count += 1
-        $aclState.apply_paths += $DestinationRoot
+        $aclState.apply_paths += $TargetPath
+        $aclState.apply_commands += [PSCustomObject]@{
+            target = $TargetPath
+            arguments = @($Arguments)
+            text = (@($Arguments) -join " ")
+        }
         if ($aclState.apply_should_fail) { throw "synthetic ACL apply failure" }
+        if (-not [string]::IsNullOrWhiteSpace($aclState.fail_secure_acl_target) -and
+            $TargetPath.EndsWith($aclState.fail_secure_acl_target, [StringComparison]::OrdinalIgnoreCase) -and
+            (@($Arguments) -contains "/inheritance:r")) {
+            $aclState.fail_secure_acl_target = ""
+            throw "synthetic child ACL failure"
+        }
+        return 0
     }
     $aclValidator = {
         param([string]$DestinationRoot)
@@ -119,8 +133,27 @@ try {
     $destinationHash = (Get-FileHash -LiteralPath (Join-Path $destinationRoot "SMTCommon.dll") -Algorithm SHA256).Hash.ToUpperInvariant()
     Assert-Equal -Actual $destinationHash -Expected $sourceHash -Message "destination hash equals source hash"
 
+    $childDirectory = Join-Path $destinationRoot "nested"
+    New-Item -ItemType Directory -Path $childDirectory -Force | Out-Null
+    $childFile = Join-Path $childDirectory "child.txt"
+    Set-Content -LiteralPath $childFile -Value "child" -Encoding UTF8
+    $aclState.apply_commands = @()
+    Set-StorePulseVerifoneRuntimeAcl -DestinationRoot $destinationRoot -AclApplier $aclApplier
+    $combinedRecursiveCommands = @($aclState.apply_commands | Where-Object { ($_.arguments -contains "/inheritance:r") -and ($_.arguments -contains "/T") })
+    Assert-Equal -Actual $combinedRecursiveCommands.Count -Expected 0 -Message "ACL commands never combine /inheritance:r with /T"
+    $rootAclCommand = @($aclState.apply_commands | Where-Object { $_.target -eq $destinationRoot })[0]
+    Assert-True -Condition ($rootAclCommand.text -match '\*S-1-5-18:\(OI\)\(CI\)\(RX\)' -and $rootAclCommand.text -match '\*S-1-5-32-544:\(OI\)\(CI\)\(F\)') -Message "destination folder receives explicit inheritable grants"
+    $childDirectoryCommand = @($aclState.apply_commands | Where-Object { $_.target -eq $childDirectory })[0]
+    Assert-True -Condition ($childDirectoryCommand.text -match '\*S-1-5-18:\(OI\)\(CI\)\(RX\)' -and $childDirectoryCommand.text -match '\*S-1-5-32-544:\(OI\)\(CI\)\(F\)') -Message "child directory receives explicit inheritable grants"
+    foreach ($expectedFile in @((Join-Path $destinationRoot "SMTCommon.dll"), (Join-Path $destinationRoot "storepulse-verifone-runtime.json"), $childFile)) {
+        $fileCommand = @($aclState.apply_commands | Where-Object { $_.target -eq $expectedFile })[0]
+        Assert-True -Condition ($fileCommand.text -match '\*S-1-5-18:\(RX\)' -and $fileCommand.text -match '\*S-1-5-32-544:\(F\)' -and $fileCommand.text -notmatch '\(OI\)\(CI\)') -Message "child file receives explicit SYSTEM RX and Administrators F grants: $expectedFile"
+    }
+
     $idempotentResult = Install-StorePulseVerifoneRuntime -SourceDllPath $sourceDll -DestinationRoot $destinationRoot -Validator $validator -AclApplier $aclApplier -AclValidator $aclValidator -SkipElevationCheck
     Assert-Equal -Actual $idempotentResult.status -Expected "already_installed" -Message "same-hash reinstall is idempotent"
+    $sameHashAclCommands = @($aclState.apply_commands | Where-Object { $_.target -eq (Join-Path $destinationRoot "SMTCommon.dll") -and $_.text -match '\*S-1-5-18:\(RX\)' })
+    Assert-True -Condition ($sameHashAclCommands.Count -gt 0) -Message "same-hash reinstall applies explicit child file ACLs"
 
     $differentSourceDir = Join-Path $tempRoot "source-v2"
     $differentSource = New-SyntheticSmtCommon -Directory $differentSourceDir -Content "synthetic-source-v2"
@@ -190,16 +223,28 @@ try {
     Assert-True -Condition (-not (Test-Path -LiteralPath (Join-Path $applyFailDestination "SMTCommon.dll"))) -Message "ACL applier failure removes fresh DLL"
     $aclState.apply_should_fail = $false
 
+    $childAclFailDestination = Join-Path $tempRoot "child-acl-fail"
+    $aclState.apply_commands = @()
+    $aclState.fail_secure_acl_target = "SMTCommon.dll"
+    Assert-Throws -ScriptBlock { Install-StorePulseVerifoneRuntime -SourceDllPath $sourceDll -DestinationRoot $childAclFailDestination -Validator $validator -AclApplier $aclApplier -AclValidator $aclValidator -SkipElevationCheck | Out-Null } -Message "child-file ACL application failure causes Install to fail"
+    $rollbackGrantCommands = @($aclState.apply_commands | Where-Object { $_.target.EndsWith("SMTCommon.dll", [StringComparison]::OrdinalIgnoreCase) -and $_.text -match '\*S-1-5-32-544:\(F\)' -and ($_.arguments -notcontains "/inheritance:r") })
+    Assert-True -Condition ($rollbackGrantCommands.Count -gt 0) -Message "rollback repairs cleanup access before deleting failed files"
+    Assert-True -Condition (-not (Test-Path -LiteralPath (Join-Path $childAclFailDestination "SMTCommon.dll"))) -Message "failed child ACL fresh install leaves no active DLL"
+    Assert-True -Condition (-not (Test-Path -LiteralPath (Join-Path $childAclFailDestination "storepulse-verifone-runtime.json"))) -Message "failed child ACL fresh install leaves no active manifest"
+
     $forceRollbackRoot = Join-Path $tempRoot "force-rollback"
     Install-StorePulseVerifoneRuntime -SourceDllPath $sourceDll -DestinationRoot $forceRollbackRoot -Validator $validator -AclApplier $aclApplier -AclValidator $aclValidator -SkipElevationCheck | Out-Null
     $oldDllHash = (Get-FileHash -LiteralPath (Join-Path $forceRollbackRoot "SMTCommon.dll") -Algorithm SHA256).Hash.ToUpperInvariant()
     $oldManifestText = Get-Content -LiteralPath (Join-Path $forceRollbackRoot "storepulse-verifone-runtime.json") -Raw
+    $aclState.apply_commands = @()
     $aclState.validate_result = $false
     Assert-Throws -ScriptBlock { Install-StorePulseVerifoneRuntime -SourceDllPath $differentSource -DestinationRoot $forceRollbackRoot -Validator $validator -AclApplier $aclApplier -AclValidator $aclValidator -SkipElevationCheck -Force | Out-Null } -Message "failed forced replacement throws on ACL validation"
     $restoredDllHash = (Get-FileHash -LiteralPath (Join-Path $forceRollbackRoot "SMTCommon.dll") -Algorithm SHA256).Hash.ToUpperInvariant()
     $restoredManifestText = Get-Content -LiteralPath (Join-Path $forceRollbackRoot "storepulse-verifone-runtime.json") -Raw
     Assert-Equal -Actual $restoredDllHash -Expected $oldDllHash -Message "failed forced replacement restores old DLL"
     Assert-Equal -Actual $restoredManifestText -Expected $oldManifestText -Message "failed forced replacement restores old manifest"
+    $restoredAclCommands = @($aclState.apply_commands | Where-Object { ($_.target -eq (Join-Path $forceRollbackRoot "SMTCommon.dll") -or $_.target -eq (Join-Path $forceRollbackRoot "storepulse-verifone-runtime.json")) -and ($_.arguments -contains "/inheritance:r") })
+    Assert-True -Condition ($restoredAclCommands.Count -ge 2) -Message "failed forced replacement reapplies ACLs to restored files"
     $aclState.validate_result = $true
 
     $aclState.validate_result = $false
@@ -212,6 +257,7 @@ try {
 
     $helperSource = Get-Content -LiteralPath $helperPath -Raw
     Assert-True -Condition ($helperSource.Contains('$LASTEXITCODE')) -Message "ACL implementation checks icacls.exe exit code"
+    Assert-True -Condition ($helperSource -notmatch '/inheritance:r\s+/grant:r[\s\S]*?/T') -Message "helper source does not combine inheritance removal with recursive /T grants"
     Assert-True -Condition ($helperSource -notmatch 'C:\\Users\\ABC') -Message "helper contains no literal ABC path"
     Assert-True -Condition ($helperSource -notmatch 'AppData\\Local\\Programs\\Verifone') -Message "helper contains no hard-coded Verifone source profile"
     foreach ($forbidden in @("GetData", "commander_password", "connector_token", "SUPABASE", "Register-ScheduledTask", "New-Service", "sc.exe create")) {

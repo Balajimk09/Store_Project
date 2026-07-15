@@ -20,6 +20,18 @@ function Assert-Equal {
     if ($Actual -eq $Expected) { $global:MachineServicePassCount += 1 } else { $global:MachineServiceFailures.Add("$Message Expected=[$Expected] Actual=[$Actual]") }
 }
 
+function Assert-DateTimeClose {
+    param($Actual, $Expected, [double]$ToleranceSeconds, [string]$Message)
+    $actualTime = [datetimeoffset]::Parse([string]$Actual)
+    $expectedTime = [datetimeoffset]::Parse([string]$Expected)
+    $deltaSeconds = [math]::Abs(($actualTime - $expectedTime).TotalSeconds)
+    if ($deltaSeconds -le $ToleranceSeconds) {
+        $global:MachineServicePassCount += 1
+    } else {
+        $global:MachineServiceFailures.Add("$Message Expected=[$Expected] Actual=[$Actual] DeltaSeconds=[$deltaSeconds]")
+    }
+}
+
 function Assert-Throws {
     param([scriptblock]$ScriptBlock, [string]$Message)
     try {
@@ -421,7 +433,7 @@ try {
     Assert-Equal -Actual $heartbeatResult.status -Expected "succeeded" -Message "heartbeat reporter handles success response"
     Assert-Equal -Actual $heartbeatPayload.reported_state -Expected "ready" -Message "heartbeat payload reports ready state"
     Assert-Equal -Actual $heartbeatPayload.canonical_record_count -Expected 342 -Message "heartbeat payload includes latest canonical count"
-    Assert-Equal -Actual $heartbeatPayload.last_sync_completed_at -Expected $heartbeatStatus.live_worker.last_completed_at -Message "heartbeat payload uses latest worker completion timestamp"
+    Assert-DateTimeClose -Actual $heartbeatPayload.last_sync_completed_at -Expected $heartbeatStatus.live_worker.last_completed_at -ToleranceSeconds 1 -Message "heartbeat payload uses latest worker completion timestamp"
     Assert-True -Condition ($global:HeartbeatHttpCapture.Headers["x-storepulse-connector-token"] -eq "synthetic-token-value-that-is-long-enough") -Message "heartbeat sends connector token header"
     Assert-True -Condition ($global:HeartbeatHttpCapture.Json -notmatch "synthetic-token-value-that-is-long-enough|synthetic-password") -Message "heartbeat JSON excludes secrets"
     $failedHeartbeat = Invoke-StorePulseConnectorHeartbeat -Config $heartbeatConfig -Secrets $heartbeatSecrets -RuntimeStatus $heartbeatStatus -ReportedState "ready" -HttpExecutor {

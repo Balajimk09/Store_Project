@@ -77,7 +77,16 @@ begin
     raise exception 'heartbeat protection trigger function is missing';
   end if;
 
-  if has_function_privilege('PUBLIC', v_function_oid, 'EXECUTE') then
+  if exists (
+    select 1
+    from pg_proc p
+    cross join lateral aclexplode(
+      coalesce(p.proacl, acldefault('f', p.proowner))
+    ) privilege
+    where p.oid = v_function_oid
+      and privilege.grantee = 0
+      and privilege.privilege_type = 'EXECUTE'
+  ) then
     raise exception 'PUBLIC must not execute heartbeat protection trigger function directly';
   end if;
 

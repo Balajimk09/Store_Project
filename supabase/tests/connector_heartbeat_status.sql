@@ -148,40 +148,19 @@ begin
     id,
     owner_id,
     store_name,
-    store_address,
-    city,
-    state,
-    zip_code,
-    phone_number,
-    pos_type,
-    has_fuel,
-    register_count
+    store_address
   ) values
     (
       v_store_id,
       v_owner_id,
       'Heartbeat Test Store',
-      'Synthetic address',
-      'Synthetic',
-      'TX',
-      '00000',
-      '0000000000',
-      'verifone_commander',
-      true,
-      1
+      'Synthetic address'
     ),
     (
       v_other_store_id,
       v_other_owner_id,
       'Other Heartbeat Test Store',
-      'Synthetic address',
-      'Synthetic',
-      'TX',
-      '00000',
-      '0000000000',
-      'verifone_commander',
-      true,
-      1
+      'Synthetic address'
     )
   on conflict (id) do nothing;
 

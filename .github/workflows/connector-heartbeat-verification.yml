@@ -122,43 +122,16 @@ jobs:
             supabase db lint --help
           } 2>&1 | tee ci-artifacts/database/supabase-cli-help.log
 
-      - name: Prepare isolated Supabase migration workspace
+      - name: Verify migration filename uniqueness
         run: |
           set -euo pipefail
-          python - <<'PY'
-          from datetime import datetime, timedelta
-          from pathlib import Path
-          import os
-          import shutil
+          node scripts/test-supabase-migration-uniqueness.mjs
 
-          repo = Path(os.environ["GITHUB_WORKSPACE"])
-          workdir = Path(os.environ["RUNNER_TEMP"]) / "storepulse-supabase-ci"
-          supabase_dir = workdir / "supabase"
-          migrations_dir = supabase_dir / "migrations"
-
-          if workdir.exists():
-            shutil.rmtree(workdir)
-
-          migrations_dir.mkdir(parents=True)
-          shutil.copy2(repo / "supabase" / "config.toml", supabase_dir / "config.toml")
-
-          base = datetime(2026, 1, 1, 0, 0, 0)
-          source_files = sorted((repo / "supabase" / "migrations").glob("*.sql"))
-          for index, source in enumerate(source_files):
-            version = (base + timedelta(minutes=index)).strftime("%Y%m%d%H%M%S")
-            destination = migrations_dir / f"{version}_{source.name}"
-            shutil.copy2(source, destination)
-
-          print(f"Prepared isolated Supabase workdir: {workdir}")
-          print(f"Copied {len(source_files)} migration files with CI-only unique versions.")
-          PY
-          echo "SUPABASE_CI_WORKDIR=$RUNNER_TEMP/storepulse-supabase-ci" >> "$GITHUB_ENV"
-
-      - name: Start isolated local Supabase
+      - name: Start local Supabase
         run: |
           set -euo pipefail
           set +e
-          supabase --workdir "$SUPABASE_CI_WORKDIR" start > /tmp/storepulse-supabase-start.log 2>&1
+          supabase start > /tmp/storepulse-supabase-start.log 2>&1
           status=$?
           set -e
           if [ "$status" -ne 0 ]; then
@@ -174,7 +147,7 @@ jobs:
       - name: Apply migrations on clean local database
         run: |
           set -euo pipefail
-          supabase --workdir "$SUPABASE_CI_WORKDIR" db reset --local 2>&1 | tee ci-artifacts/database/db-reset-initial.log
+          supabase db reset --local 2>&1 | tee ci-artifacts/database/db-reset-initial.log
 
       - name: Run heartbeat SQL regression
         run: |
@@ -187,21 +160,43 @@ jobs:
       - name: Run local database lint
         run: |
           set -euo pipefail
-          supabase --workdir "$SUPABASE_CI_WORKDIR" db lint --local --schema public,auth --level warning --fail-on error \
+          supabase db lint --local --schema public,auth --level warning --fail-on error \
             2>&1 | tee ci-artifacts/database/db-lint.log
 
       - name: Verify reset and reapply path
         run: |
           set -euo pipefail
-          supabase --workdir "$SUPABASE_CI_WORKDIR" db reset --local 2>&1 | tee ci-artifacts/database/db-reset-reapply.log
+          supabase db reset --local 2>&1 | tee ci-artifacts/database/db-reset-reapply.log
           psql "$LOCAL_DB_URL" \
             -v ON_ERROR_STOP=1 \
             -f supabase/tests/connector_heartbeat_status.sql \
             2>&1 | tee ci-artifacts/database/connector-heartbeat-status-after-reset.log
 
+      - name: Simulate repaired history dry run locally
+        run: |
+          set -euo pipefail
+          pending_versions=(
+            20260714093000
+            20260715170000
+            20260715232534
+          )
+          supabase migration repair --local --status reverted "${pending_versions[@]}" \
+            2>&1 | tee ci-artifacts/database/migration-history-simulation-revert.log
+          supabase db push --db-url "$LOCAL_DB_URL" --dry-run \
+            2>&1 | tee ci-artifacts/database/migration-history-simulation-dry-run.log
+          for version in "${pending_versions[@]}"; do
+            grep -Fq "$version" ci-artifacts/database/migration-history-simulation-dry-run.log
+          done
+          if grep -Eq '20260619|20260623|20260629|20260630|20260708|20260709|202607110|202607111|202607120|202607121|202607122' ci-artifacts/database/migration-history-simulation-dry-run.log; then
+            echo "Unexpected legacy migration appeared in the simulated dry run."
+            exit 1
+          fi
+          supabase migration repair --local --status applied "${pending_versions[@]}" \
+            2>&1 | tee ci-artifacts/database/migration-history-simulation-restore.log
+
       - name: Stop local Supabase
         if: always()
-        run: supabase --workdir "$SUPABASE_CI_WORKDIR" stop --no-backup
+        run: supabase stop --no-backup
 
       # Official GitHub artifact action, pinned to an immutable commit SHA.
       - name: Upload database logs

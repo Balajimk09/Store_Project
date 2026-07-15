@@ -331,6 +331,7 @@ begin
   reset role;
 
   set local role anon;
+  perform set_config('request.jwt.claim.role', 'anon', true);
   begin
     update public.store_pos_connectors
     set connector_name = 'Anon write attempt'
@@ -344,6 +345,7 @@ begin
   reset role;
 
   set local role service_role;
+  perform set_config('request.jwt.claim.role', 'service_role', true);
 
   update public.store_pos_connectors
   set

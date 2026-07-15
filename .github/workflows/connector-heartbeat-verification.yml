@@ -23,6 +23,7 @@ env:
   DENO_VERSION: 'v2.9.2'
   SUPABASE_CLI_VERSION: '2.109.1'
   LOCAL_DB_URL: postgresql://postgres:postgres@127.0.0.1:54322/postgres
+  NO_COLOR: '1'
 
 jobs:
   heartbeat-edge-function-tests:
@@ -61,11 +62,12 @@ jobs:
 
       - name: Require executable Deno coverage
         run: |
-          if ! grep -Eq "ok \\| ([5-9][5-9]|[6-9][0-9]|[1-9][0-9]{2,}) passed \\| 0 failed" ci-artifacts/deno/deno-test.log; then
+          perl -pe 's/\e\[[0-9;]*m//g' ci-artifacts/deno/deno-test.log > ci-artifacts/deno/deno-test.clean.log
+          if ! grep -Eq "ok \\| ([5-9][5-9]|[6-9][0-9]|[1-9][0-9]{2,}) passed \\| 0 failed" ci-artifacts/deno/deno-test.clean.log; then
             echo "Expected at least 55 passing Deno tests with zero failures."
             exit 1
           fi
-          if grep -Eiq "ignored|filtered out" ci-artifacts/deno/deno-test.log; then
+          if grep -Eiq "ignored|filtered out" ci-artifacts/deno/deno-test.clean.log; then
             echo "Deno tests must not be ignored or filtered."
             exit 1
           fi

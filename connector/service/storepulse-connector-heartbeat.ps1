@@ -24,15 +24,52 @@ function ConvertTo-StorePulseHeartbeatSafeText {
 }
 
 function Get-StorePulseErrorCode {
-    param([AllowNull()][string]$Message)
+    param(
+        [ValidateSet("", "commander", "cloud", "heartbeat", "normalization", "worker")]
+        [string]$Stage = "",
+        [AllowNull()][string]$Message,
+        [AllowNull()][Nullable[int]]$HttpStatus = $null
+    )
     $text = if ($null -eq $Message) { "" } else { [string]$Message }
-    if ($text -match '(?i)unauthorized|401|403') { return "cloud_unauthorized" }
-    if ($text -match '(?i)timeout|timed out|connection|dns|unreachable') { return "cloud_unreachable" }
-    if ($text -match '(?i)commander.*auth|authentication') { return "commander_authentication_failed" }
-    if ($text -match '(?i)commander|SMTCommon') { return "commander_unreachable" }
-    if ($text -match '(?i)normaliz') { return "normalization_failed" }
-    if ($text -match '(?i)reject|400|409|422') { return "cloud_rejected" }
+    if ($Stage -eq "commander" -or $text -match '(?i)commander|SMTCommon|vtranssetz') {
+        if ($HttpStatus -in @(401, 403) -or $text -match '(?i)auth|login|credential|unauthorized|forbidden') { return "commander_authentication_failed" }
+        if ($text -match '(?i)invalid|malformed|parse|xml|response') { return "commander_response_invalid" }
+        if ($text -match '(?i)timeout|timed out|connection|dns|unreachable|refused|network') { return "commander_unreachable" }
+        return "commander_response_invalid"
+    }
+    if ($Stage -eq "heartbeat") {
+        if ($HttpStatus -in @(401, 403) -or $text -match '(?i)401|403|unauthorized|forbidden') { return "heartbeat_unauthorized" }
+        if (($HttpStatus -eq 409 -or $text -match '(?i)installation_mismatch') -and $text -match '(?i)installation') { return "installation_mismatch" }
+        if ($HttpStatus -in @(400, 409, 422) -or $text -match '(?i)400|409|422|reject|invalid') { return "heartbeat_rejected" }
+        if ($text -match '(?i)timeout|timed out|connection|dns|unreachable|refused|network') { return "heartbeat_unreachable" }
+        return "heartbeat_unreachable"
+    }
+    if ($Stage -eq "cloud" -or $text -match '(?i)cloud|upload|ingest|StorePulse|HTTP') {
+        if ($HttpStatus -in @(401, 403) -or $text -match '(?i)401|403|unauthorized|forbidden') { return "cloud_unauthorized" }
+        if ($HttpStatus -in @(400, 409, 422) -or $text -match '(?i)400|409|422|reject|invalid') { return "cloud_rejected" }
+        if ($text -match '(?i)timeout|timed out|connection|dns|unreachable|refused|network') { return "cloud_unreachable" }
+        return "cloud_rejected"
+    }
+    if ($Stage -eq "normalization" -or $text -match '(?i)normaliz') { return "normalization_failed" }
     return "unknown_error"
+}
+
+function Get-StorePulseCommanderStatus {
+    param([AllowNull()][string]$ErrorCode, [Parameter(Mandatory)][string]$ReportedState)
+    if ($ReportedState -in @("ready", "syncing")) { return "connected" }
+    switch ($ErrorCode) {
+        "commander_authentication_failed" { return "authentication_failed" }
+        "commander_unreachable" { return "unreachable" }
+        "commander_response_invalid" { return "error" }
+        default { return "unknown" }
+    }
+}
+
+function Get-StorePulseCloudStatus {
+    param([AllowNull()][string]$ErrorCode, [Parameter(Mandatory)][string]$ReportedState)
+    if ($ReportedState -in @("ready", "syncing")) { return "connected" }
+    if ($ErrorCode -like "cloud_*") { return "error" }
+    return "unknown"
 }
 
 function New-StorePulseHeartbeatPayload {
@@ -62,14 +99,14 @@ function New-StorePulseHeartbeatPayload {
         runtime_started_at = [string]$RuntimeStatus.started_at
         heartbeat_at = (Get-Date).ToUniversalTime().ToString("o")
         last_sync_started_at = if ($null -ne $live) { $live.last_started_at } else { $null }
-        last_sync_completed_at = if ($null -ne $live) { $live.last_success_at } else { $null }
+        last_sync_completed_at = if ($null -ne $live -and $live.PSObject.Properties["last_completed_at"]) { $live.last_completed_at } elseif ($null -ne $live) { $live.last_success_at } else { $null }
         last_success_at = if ($null -ne $live) { $live.last_success_at } else { $null }
         last_failure_at = if ($null -ne $live) { $live.last_failure_at } else { $null }
         last_error_code = $ErrorCode
         last_error_message = ConvertTo-StorePulseHeartbeatSafeText -Value $ErrorMessage -Secrets $Secrets
         consecutive_failure_count = if ($null -ne $live) { [int]$live.consecutive_failures } else { 0 }
-        commander_status = if ($ReportedState -in @("ready", "syncing")) { "connected" } elseif ($ErrorCode -like "commander_*") { "error" } else { "unknown" }
-        cloud_status = if ($ReportedState -in @("ready", "syncing")) { "connected" } elseif ($ErrorCode -like "cloud_*") { "error" } else { "unknown" }
+        commander_status = Get-StorePulseCommanderStatus -ErrorCode $ErrorCode -ReportedState $ReportedState
+        cloud_status = Get-StorePulseCloudStatus -ErrorCode $ErrorCode -ReportedState $ReportedState
         live_poll_interval_seconds = [int]$Config.live_poll_interval_seconds
         canonical_record_count = $canonical
         inserted_count = if ($null -ne $result -and $result.PSObject.Properties["inserted_count"]) { [int]$result.inserted_count } else { 0 }
@@ -92,8 +129,19 @@ function Invoke-StorePulseHeartbeatHttp {
     if ($null -ne $HttpExecutor) {
         return & $HttpExecutor $Endpoint @{ "x-storepulse-connector-token" = $Token } $json $TimeoutSeconds
     }
-    $response = Invoke-WebRequest -Uri $Endpoint -Method Post -ContentType "application/json; charset=utf-8" -Headers @{ "x-storepulse-connector-token" = $Token } -Body $json -TimeoutSec $TimeoutSeconds -UseBasicParsing
-    return ([string]$response.Content | ConvertFrom-Json)
+    try {
+        $response = Invoke-WebRequest -Uri $Endpoint -Method Post -ContentType "application/json; charset=utf-8" -Headers @{ "x-storepulse-connector-token" = $Token } -Body $json -TimeoutSec $TimeoutSeconds -UseBasicParsing
+        return ([string]$response.Content | ConvertFrom-Json)
+    }
+    catch {
+        $statusCode = $null
+        if ($null -ne $_.Exception.Response) {
+            try { $statusCode = [int]$_.Exception.Response.StatusCode } catch { $statusCode = $null }
+        }
+        $message = $_.Exception.Message
+        $code = Get-StorePulseErrorCode -Stage "heartbeat" -Message $message -HttpStatus $statusCode
+        throw "$code`: $message"
+    }
 }
 
 function Invoke-StorePulseConnectorHeartbeat {
@@ -134,7 +182,7 @@ function Invoke-StorePulseConnectorHeartbeat {
         return [PSCustomObject]@{
             enabled = $true
             status = "failed"
-            error_code = if ($ErrorCode) { $ErrorCode } else { Get-StorePulseErrorCode -Message $safe }
+            error_code = if ($ErrorCode) { $ErrorCode } else { Get-StorePulseErrorCode -Stage "heartbeat" -Message $safe }
             error_message = $safe
             payload = $payload
         }

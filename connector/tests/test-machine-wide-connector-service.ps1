@@ -168,7 +168,7 @@ try {
     $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
     Assert-Equal -Actual $manifest.service_name -Expected "StorePulseConnector" -Message "manifest service name"
     Assert-Equal -Actual $manifest.service_display_name -Expected "StorePulse Connector Service" -Message "manifest display name"
-    Assert-Equal -Actual $manifest.version -Expected "3.1.0-heartbeat1" -Message "manifest heartbeat package version"
+    Assert-Equal -Actual $manifest.version -Expected "3.1.1-heartbeat2" -Message "manifest heartbeat package version"
     Assert-True -Condition (($manifest.required_files -contains "service\storepulse-windows-service.ps1") -and ($manifest.required_files -contains "service\storepulse-service-entrypoint.ps1")) -Message "manifest includes service files"
     Assert-Equal -Actual $manifest.bundled_node_runtime_relative_path -Expected "runtime\node" -Message "manifest declares private Node runtime path"
     Assert-True -Condition ($manifest.required_files -contains "service\node-runtime-manifest.json") -Message "manifest includes Node runtime manifest"
@@ -345,6 +345,32 @@ try {
     $configText = Get-Content -LiteralPath $configPath -Raw
     Assert-True -Condition ($configText -notmatch "commander_password|connector_token|commander_username") -Message "config excludes secret names"
 
+    $oldConfig = New-TestConfig -Root $programDataRoot -InstallRoot $installRoot
+    $oldConfig.live_poll_interval_seconds = 120
+    $oldConfig.closed_day_worker_enabled = $false
+    $oldConfig.closed_day_once_enabled = $false
+    foreach ($propertyName in @("heartbeat_enabled", "heartbeat_endpoint_url", "heartbeat_payload_version", "heartbeat_timeout_seconds")) {
+        $oldConfig.PSObject.Properties.Remove($propertyName)
+    }
+    $oldConfigPath = Join-Path $programDataRoot "old-300-config.json"
+    $oldConfig | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $oldConfigPath -Encoding UTF8
+    $syntheticSecretsPath = Join-Path $programDataRoot "old-300-secrets.json"
+    Set-Content -LiteralPath $syntheticSecretsPath -Value '{"commander_username":"encrypted","commander_password":"encrypted","connector_token":"encrypted"}' -Encoding UTF8
+    $secretsHashBefore = (Get-FileHash -LiteralPath $syntheticSecretsPath -Algorithm SHA256).Hash
+    $migrationResult = Update-StorePulseMachineConfigForHeartbeat -Path $oldConfigPath -CreateBackup
+    $upgradedConfig = Get-Content -LiteralPath $oldConfigPath -Raw | ConvertFrom-Json
+    $secretsHashAfter = (Get-FileHash -LiteralPath $syntheticSecretsPath -Algorithm SHA256).Hash
+    Assert-True -Condition ([bool]$migrationResult.changed) -Message "old 3.0 config receives heartbeat defaults during upgrade"
+    Assert-True -Condition ([bool]$upgradedConfig.heartbeat_enabled) -Message "heartbeat is enabled after config upgrade"
+    Assert-Equal -Actual $upgradedConfig.heartbeat_endpoint_url -Expected "https://example.invalid/functions/v1/report-pos-connector-heartbeat" -Message "upgraded config derives heartbeat endpoint"
+    Assert-Equal -Actual ([int]$upgradedConfig.live_poll_interval_seconds) -Expected 120 -Message "upgrade preserves 120-second live poll interval"
+    Assert-Equal -Actual ([bool]$upgradedConfig.closed_day_worker_enabled) -Expected $false -Message "upgrade preserves closed-day disabled worker setting"
+    Assert-Equal -Actual ([bool]$upgradedConfig.closed_day_once_enabled) -Expected $false -Message "upgrade preserves closed-day one-shot disabled setting"
+    Assert-Equal -Actual $secretsHashAfter -Expected $secretsHashBefore -Message "config upgrade preserves encrypted secrets file hash"
+    Restore-StorePulseMachineConfigBackup -Path $oldConfigPath -BackupPath $migrationResult.backup_path | Out-Null
+    $rolledBackConfigText = Get-Content -LiteralPath $oldConfigPath -Raw
+    Assert-True -Condition ($rolledBackConfigText -notmatch "heartbeat_endpoint_url") -Message "config backup restores after simulated later upgrade failure"
+
     $installationIdPath = Get-StorePulseInstallationIdPath -ProgramDataRoot $programDataRoot
     $installationId1 = Get-StorePulseInstallationId -ProgramDataRoot $programDataRoot
     $installationId2 = Get-StorePulseInstallationId -ProgramDataRoot $programDataRoot
@@ -363,7 +389,7 @@ try {
         connector_token = "synthetic-token-value-that-is-long-enough"
     }
     $heartbeatStatus = [ordered]@{
-        runtime_version = "3.1.0-heartbeat1"
+        runtime_version = "3.1.1-heartbeat2"
         process_id = $PID
         started_at = (Get-Date).ToString("o")
         mode = "Run"
@@ -371,6 +397,7 @@ try {
             status = "succeeded"
             consecutive_failures = 0
             last_started_at = (Get-Date).ToString("o")
+            last_completed_at = (Get-Date).ToString("o")
             last_success_at = (Get-Date).ToString("o")
             last_failure_at = $null
             last_error = $null
@@ -394,6 +421,7 @@ try {
     Assert-Equal -Actual $heartbeatResult.status -Expected "succeeded" -Message "heartbeat reporter handles success response"
     Assert-Equal -Actual $heartbeatPayload.reported_state -Expected "ready" -Message "heartbeat payload reports ready state"
     Assert-Equal -Actual $heartbeatPayload.canonical_record_count -Expected 342 -Message "heartbeat payload includes latest canonical count"
+    Assert-Equal -Actual $heartbeatPayload.last_sync_completed_at -Expected $heartbeatStatus.live_worker.last_completed_at -Message "heartbeat payload uses latest worker completion timestamp"
     Assert-True -Condition ($global:HeartbeatHttpCapture.Headers["x-storepulse-connector-token"] -eq "synthetic-token-value-that-is-long-enough") -Message "heartbeat sends connector token header"
     Assert-True -Condition ($global:HeartbeatHttpCapture.Json -notmatch "synthetic-token-value-that-is-long-enough|synthetic-password") -Message "heartbeat JSON excludes secrets"
     $failedHeartbeat = Invoke-StorePulseConnectorHeartbeat -Config $heartbeatConfig -Secrets $heartbeatSecrets -RuntimeStatus $heartbeatStatus -ReportedState "ready" -HttpExecutor {
@@ -402,6 +430,18 @@ try {
     }
     Assert-Equal -Actual $failedHeartbeat.status -Expected "failed" -Message "heartbeat reporter handles server failure"
     Assert-True -Condition ($failedHeartbeat.error_message -match '\[REDACTED\]' -and $failedHeartbeat.error_message -notmatch "synthetic-token-value-that-is-long-enough") -Message "heartbeat reporter redacts secrets from errors"
+    Assert-Equal -Actual (Get-StorePulseErrorCode -Stage "commander" -Message "Commander authentication failed" -HttpStatus 401) -Expected "commander_authentication_failed" -Message "Commander authentication failure receives Commander code"
+    Assert-Equal -Actual (Get-StorePulseErrorCode -Stage "commander" -Message "Commander connection timed out") -Expected "commander_unreachable" -Message "Commander unreachable receives Commander code"
+    Assert-Equal -Actual (Get-StorePulseErrorCode -Stage "cloud" -Message "HTTP 401 unauthorized" -HttpStatus 401) -Expected "cloud_unauthorized" -Message "Cloud 401 receives cloud_unauthorized"
+    Assert-Equal -Actual (Get-StorePulseErrorCode -Stage "heartbeat" -Message "HTTP 401 unauthorized" -HttpStatus 401) -Expected "heartbeat_unauthorized" -Message "Heartbeat 401 receives heartbeat_unauthorized"
+    Assert-Equal -Actual (Get-StorePulseErrorCode -Stage "heartbeat" -Message "installation_mismatch" -HttpStatus 409) -Expected "installation_mismatch" -Message "Heartbeat 409 installation mismatch receives installation_mismatch"
+    Assert-Equal -Actual (Get-StorePulseErrorCode -Stage "heartbeat" -Message "connection timeout") -Expected "heartbeat_unreachable" -Message "Heartbeat timeout receives heartbeat_unreachable"
+    Assert-Equal -Actual (Get-StorePulseCommanderStatus -ErrorCode "commander_authentication_failed" -ReportedState "degraded") -Expected "authentication_failed" -Message "Commander auth code maps to authentication_failed status"
+    Assert-Equal -Actual (Get-StorePulseCommanderStatus -ErrorCode "commander_unreachable" -ReportedState "degraded") -Expected "unreachable" -Message "Commander unreachable code maps to unreachable status"
+    Assert-Equal -Actual (Get-StorePulseCommanderStatus -ErrorCode "commander_response_invalid" -ReportedState "degraded") -Expected "error" -Message "Commander invalid response maps to error status"
+    Assert-Equal -Actual (Get-StorePulseCommanderStatus -ErrorCode $null -ReportedState "ready") -Expected "connected" -Message "Commander success maps to connected status"
+    Assert-Equal -Actual (Get-StorePulseCloudStatus -ErrorCode "cloud_rejected" -ReportedState "degraded") -Expected "error" -Message "Cloud transaction failure maps to cloud error"
+    Assert-Equal -Actual (Get-StorePulseCloudStatus -ErrorCode "heartbeat_unauthorized" -ReportedState "degraded") -Expected "unknown" -Message "Heartbeat failure does not alter transaction cloud status"
 
     Assert-Throws -ScriptBlock { $bad = New-TestConfig -Root $programDataRoot -InstallRoot $installRoot; $bad.live_endpoint_url = "http://example.invalid"; Test-StorePulseMachineConfig -Config $bad | Out-Null } -Message "non-HTTPS URL rejected"
     Assert-Throws -ScriptBlock { $bad = New-TestConfig -Root $programDataRoot -InstallRoot $installRoot; $bad.source_store_number = "bad/store"; Test-StorePulseMachineConfig -Config $bad | Out-Null } -Message "invalid store number rejected"
@@ -588,6 +628,7 @@ try {
     $heartbeatRuntimeStatus = Get-Content -LiteralPath (Get-StorePulseRuntimeStatusPath -ProgramDataRoot $programDataRoot) -Raw | ConvertFrom-Json
     Assert-Equal -Actual $heartbeatRuntimeStatus.heartbeat_reporter.status -Expected "succeeded" -Message "runtime records successful heartbeat reporter"
     Assert-Equal -Actual $heartbeatRuntimeStatus.heartbeat_reporter.consecutive_failures -Expected 0 -Message "heartbeat reporter failure count clears after success"
+    Assert-True -Condition (-not [string]::IsNullOrWhiteSpace([string]$heartbeatRuntimeStatus.live_worker.last_completed_at)) -Message "successful worker attempt sets last_completed_at"
 
     $global:HeartbeatFailureStates = @()
     Invoke-StorePulseServiceRuntime `
@@ -604,6 +645,7 @@ try {
     Assert-True -Condition (($global:HeartbeatFailureStates -join ",") -match "degraded" -and ($global:HeartbeatFailureStates -join ",") -match "error") -Message "runtime sends degraded then error after repeated live failures"
     Assert-True -Condition (($global:HeartbeatFailureStates -join ",") -match "cloud_rejected") -Message "runtime uses safe cloud error code"
     Assert-True -Condition ([int]$heartbeatFailureStatus.heartbeat_reporter.consecutive_failures -gt 0) -Message "heartbeat reporter tracks independent failure count"
+    Assert-True -Condition (-not [string]::IsNullOrWhiteSpace([string]$heartbeatFailureStatus.live_worker.last_completed_at)) -Message "failed worker attempt sets last_completed_at"
     Invoke-StorePulseServiceRuntime `
         -Mode Once `
         -ConfigPath $configPath `

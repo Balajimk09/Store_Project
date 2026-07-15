@@ -8,6 +8,7 @@ alter table public.store_pos_connectors
   add column if not exists reported_state text,
   add column if not exists runtime_started_at timestamptz,
   add column if not exists last_heartbeat_at timestamptz,
+  add column if not exists reported_heartbeat_at timestamptz,
   add column if not exists last_sync_started_at timestamptz,
   add column if not exists last_sync_completed_at timestamptz,
   add column if not exists last_failure_at timestamptz,
@@ -92,6 +93,59 @@ end $$;
 create index if not exists store_pos_connectors_store_heartbeat_idx
   on public.store_pos_connectors(store_id, last_heartbeat_at desc);
 
+create or replace function public.prevent_authenticated_connector_heartbeat_update()
+returns trigger
+language plpgsql
+security invoker
+set search_path = public
+as $$
+declare
+  request_role text := coalesce(
+    nullif(current_setting('request.jwt.claim.role', true), ''),
+    current_user
+  );
+begin
+  if request_role = 'authenticated' and (
+    new.installation_id is distinct from old.installation_id
+    or new.service_version is distinct from old.service_version
+    or new.runtime_mode is distinct from old.runtime_mode
+    or new.reported_state is distinct from old.reported_state
+    or new.runtime_started_at is distinct from old.runtime_started_at
+    or new.last_heartbeat_at is distinct from old.last_heartbeat_at
+    or new.reported_heartbeat_at is distinct from old.reported_heartbeat_at
+    or new.last_sync_started_at is distinct from old.last_sync_started_at
+    or new.last_sync_completed_at is distinct from old.last_sync_completed_at
+    or new.last_failure_at is distinct from old.last_failure_at
+    or new.last_error_code is distinct from old.last_error_code
+    or new.commander_status is distinct from old.commander_status
+    or new.cloud_status is distinct from old.cloud_status
+    or new.live_poll_interval_seconds is distinct from old.live_poll_interval_seconds
+    or new.last_canonical_record_count is distinct from old.last_canonical_record_count
+    or new.last_inserted_count is distinct from old.last_inserted_count
+    or new.last_updated_count is distinct from old.last_updated_count
+    or new.last_unchanged_count is distinct from old.last_unchanged_count
+    or new.last_failed_count is distinct from old.last_failed_count
+    or new.last_request_id is distinct from old.last_request_id
+    or new.heartbeat_payload_version is distinct from old.heartbeat_payload_version
+  ) then
+    raise exception using
+      errcode = '42501',
+      message = 'connector heartbeat fields are service managed';
+  end if;
+  return new;
+end;
+$$;
+
+revoke all on function public.prevent_authenticated_connector_heartbeat_update() from public, anon, authenticated;
+
+drop trigger if exists prevent_authenticated_connector_heartbeat_update
+  on public.store_pos_connectors;
+
+create trigger prevent_authenticated_connector_heartbeat_update
+before update on public.store_pos_connectors
+for each row
+execute function public.prevent_authenticated_connector_heartbeat_update();
+
 grant select (
   installation_id,
   service_version,
@@ -99,6 +153,7 @@ grant select (
   reported_state,
   runtime_started_at,
   last_heartbeat_at,
+  reported_heartbeat_at,
   last_sync_started_at,
   last_sync_completed_at,
   last_success_at,
@@ -122,5 +177,7 @@ comment on column public.store_pos_connectors.installation_id is
   'Stable machine installation UUID reported by the connector. Replacement requires an authorized reset workflow.';
 comment on column public.store_pos_connectors.last_heartbeat_at is
   'Server authoritative time at which a valid heartbeat was received.';
+comment on column public.store_pos_connectors.reported_heartbeat_at is
+  'Connector laptop-reported heartbeat timestamp from the validated payload; server receipt time remains last_heartbeat_at.';
 
 notify pgrst, 'reload schema';

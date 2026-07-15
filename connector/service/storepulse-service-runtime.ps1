@@ -16,7 +16,7 @@ if (-not (Get-Command Invoke-StorePulseConnectorHeartbeat -ErrorAction SilentlyC
     . (Join-Path $PSScriptRoot "storepulse-connector-heartbeat.ps1")
 }
 
-$script:StorePulseRuntimeVersion = "3.1.0-heartbeat1"
+$script:StorePulseRuntimeVersion = "3.1.1-heartbeat2"
 
 function Get-StorePulseStateRoot {
     param([string]$ProgramDataRoot = "")
@@ -66,8 +66,10 @@ function New-StorePulseWorkerStatus {
         consecutive_failures = 0
         next_delay_seconds = 0
         last_started_at = $null
+        last_completed_at = $null
         last_success_at = $null
         last_failure_at = $null
+        last_error_code = $null
         last_error = $null
         last_result = $null
     }
@@ -125,7 +127,7 @@ function Invoke-StorePulseRuntimeHeartbeat {
         [scriptblock]$HeartbeatReporter = $null,
         [AllowNull()][string]$ErrorMessage = $null
     )
-    $errorCode = if ([string]::IsNullOrWhiteSpace($ErrorMessage)) { $null } else { Get-StorePulseErrorCode -Message $ErrorMessage }
+    $errorCode = if ([string]::IsNullOrWhiteSpace($ErrorMessage)) { $null } else { Get-StorePulseErrorCode -Stage "worker" -Message $ErrorMessage }
     if ($null -eq $HeartbeatReporter) {
         $result = Invoke-StorePulseConnectorHeartbeat -Config $Config -Secrets $Secrets -RuntimeStatus $Status -ReportedState $ReportedState -ErrorCode $errorCode -ErrorMessage $ErrorMessage
     }
@@ -249,8 +251,11 @@ function Invoke-StorePulseWorkerOnce {
     $WorkerStatus.last_started_at = (Get-Date).ToString("o")
     try {
         $workerResult = & $Worker $Config $Secrets $InstallRoot
+        $completedAt = (Get-Date).ToString("o")
         $WorkerStatus.status = "succeeded"
-        $WorkerStatus.last_success_at = (Get-Date).ToString("o")
+        $WorkerStatus.last_completed_at = $completedAt
+        $WorkerStatus.last_success_at = $completedAt
+        $WorkerStatus.last_error_code = $null
         $WorkerStatus.last_error = $null
         $WorkerStatus.last_result = $workerResult
         $WorkerStatus.consecutive_failures = 0
@@ -258,9 +263,12 @@ function Invoke-StorePulseWorkerOnce {
         Write-StorePulseJsonLog -LogsRoot $LogsRoot -Level "info" -Event "$Name worker succeeded" -Secrets $Secrets
     }
     catch {
+        $completedAt = (Get-Date).ToString("o")
         $WorkerStatus.status = "failed"
-        $WorkerStatus.last_failure_at = (Get-Date).ToString("o")
+        $WorkerStatus.last_completed_at = $completedAt
+        $WorkerStatus.last_failure_at = $completedAt
         $WorkerStatus.last_error = ConvertTo-StorePulseSafeText -Value $_.Exception.Message -Secrets $Secrets
+        $WorkerStatus.last_error_code = Get-StorePulseErrorCode -Stage "worker" -Message $WorkerStatus.last_error
         $WorkerStatus.consecutive_failures = [int]$WorkerStatus.consecutive_failures + 1
         $WorkerStatus.next_delay_seconds = Get-StorePulseBackoffSeconds -ConsecutiveFailures ([int]$WorkerStatus.consecutive_failures) -BaseSeconds 5 -MaxSeconds 300
         Write-StorePulseJsonLog -LogsRoot $LogsRoot -Level "error" -Event "$Name worker failed" -Data @{ error = $WorkerStatus.last_error } -Secrets $Secrets

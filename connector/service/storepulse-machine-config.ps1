@@ -149,3 +149,50 @@ function Write-StorePulseMachineConfig {
     $Config | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $configPath -Encoding UTF8
     return $configPath
 }
+
+function Update-StorePulseMachineConfigForHeartbeat {
+    param(
+        [string]$Path = "",
+        [switch]$CreateBackup
+    )
+    $configPath = if ([string]::IsNullOrWhiteSpace($Path)) { Get-StorePulseConfigPath } else { $Path }
+    $beforeText = Get-Content -LiteralPath $configPath -Raw
+    $config = $beforeText | ConvertFrom-Json
+    Add-StorePulseHeartbeatConfigDefaults -Config $config | Out-Null
+    Test-StorePulseMachineConfig -Config $config | Out-Null
+    $afterText = ($config | ConvertTo-Json -Depth 20)
+    $changed = ($beforeText.Trim() -ne $afterText.Trim())
+    $backupPath = $null
+    if ($changed) {
+        if ($CreateBackup) {
+            $backupPath = $configPath + ".pre-heartbeat-" + (Get-Date -Format "yyyyMMddHHmmss") + ".bak"
+            Copy-Item -LiteralPath $configPath -Destination $backupPath -Force
+        }
+        $tempPath = $configPath + ".tmp-" + [guid]::NewGuid().ToString("N")
+        try {
+            Set-Content -LiteralPath $tempPath -Value $afterText -Encoding UTF8
+            Move-Item -LiteralPath $tempPath -Destination $configPath -Force
+        }
+        catch {
+            Remove-Item -LiteralPath $tempPath -Force -ErrorAction SilentlyContinue
+            throw
+        }
+    }
+    return [PSCustomObject]@{
+        changed = $changed
+        path = $configPath
+        backup_path = $backupPath
+        config = $config
+    }
+}
+
+function Restore-StorePulseMachineConfigBackup {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [AllowNull()][string]$BackupPath
+    )
+    if ([string]::IsNullOrWhiteSpace($BackupPath)) { return $false }
+    if (-not (Test-Path -LiteralPath $BackupPath -PathType Leaf)) { throw "Config backup is missing: $BackupPath" }
+    Copy-Item -LiteralPath $BackupPath -Destination $Path -Force
+    return $true
+}

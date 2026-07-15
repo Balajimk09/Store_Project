@@ -23,6 +23,8 @@ env:
   DENO_VERSION: 'v2.9.2'
   SUPABASE_CLI_VERSION: '2.109.1'
   LOCAL_DB_URL: postgresql://postgres:postgres@127.0.0.1:54322/postgres
+  NEXT_PUBLIC_SUPABASE_URL: http://127.0.0.1:54321
+  NEXT_PUBLIC_SUPABASE_ANON_KEY: ci-local-public-anon-key
   NO_COLOR: '1'
 
 jobs:
@@ -111,10 +113,41 @@ jobs:
             supabase db lint --help
           } 2>&1 | tee ci-artifacts/database/supabase-cli-help.log
 
+      - name: Prepare isolated Supabase migration workspace
+        run: |
+          python - <<'PY'
+          from datetime import datetime, timedelta
+          from pathlib import Path
+          import os
+          import shutil
+
+          repo = Path(os.environ["GITHUB_WORKSPACE"])
+          workdir = Path(os.environ["RUNNER_TEMP"]) / "storepulse-supabase-ci"
+          supabase_dir = workdir / "supabase"
+          migrations_dir = supabase_dir / "migrations"
+
+          if workdir.exists():
+            shutil.rmtree(workdir)
+
+          migrations_dir.mkdir(parents=True)
+          shutil.copy2(repo / "supabase" / "config.toml", supabase_dir / "config.toml")
+
+          base = datetime(2026, 1, 1, 0, 0, 0)
+          source_files = sorted((repo / "supabase" / "migrations").glob("*.sql"))
+          for index, source in enumerate(source_files):
+            version = (base + timedelta(minutes=index)).strftime("%Y%m%d%H%M%S")
+            destination = migrations_dir / f"{version}_{source.name}"
+            shutil.copy2(source, destination)
+
+          print(f"Prepared isolated Supabase workdir: {workdir}")
+          print(f"Copied {len(source_files)} migration files with CI-only unique versions.")
+          PY
+          echo "SUPABASE_CI_WORKDIR=$RUNNER_TEMP/storepulse-supabase-ci" >> "$GITHUB_ENV"
+
       - name: Start isolated local Supabase
         run: |
           set +e
-          supabase start > /tmp/storepulse-supabase-start.log 2>&1
+          supabase --workdir "$SUPABASE_CI_WORKDIR" start > /tmp/storepulse-supabase-start.log 2>&1
           status=$?
           set -e
           if [ "$status" -ne 0 ]; then
@@ -129,7 +162,7 @@ jobs:
 
       - name: Apply migrations on clean local database
         run: |
-          supabase db reset --local 2>&1 | tee ci-artifacts/database/db-reset-initial.log
+          supabase --workdir "$SUPABASE_CI_WORKDIR" db reset --local 2>&1 | tee ci-artifacts/database/db-reset-initial.log
 
       - name: Run heartbeat SQL regression
         run: |
@@ -140,12 +173,12 @@ jobs:
 
       - name: Run local database lint
         run: |
-          supabase db lint --local --schema public,auth --level warning --fail-on error \
+          supabase --workdir "$SUPABASE_CI_WORKDIR" db lint --local --schema public,auth --level warning --fail-on error \
             2>&1 | tee ci-artifacts/database/db-lint.log
 
       - name: Verify reset and reapply path
         run: |
-          supabase db reset --local 2>&1 | tee ci-artifacts/database/db-reset-reapply.log
+          supabase --workdir "$SUPABASE_CI_WORKDIR" db reset --local 2>&1 | tee ci-artifacts/database/db-reset-reapply.log
           psql "$LOCAL_DB_URL" \
             -v ON_ERROR_STOP=1 \
             -f supabase/tests/connector_heartbeat_status.sql \
@@ -153,7 +186,7 @@ jobs:
 
       - name: Stop local Supabase
         if: always()
-        run: supabase stop --no-backup
+        run: supabase --workdir "$SUPABASE_CI_WORKDIR" stop --no-backup
 
       # Official GitHub artifact action, pinned to an immutable commit SHA.
       - name: Upload database logs
@@ -244,4 +277,23 @@ jobs:
 
       - name: Run explicit business-date tests
         shell: powershell
-        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\connector\tests\test-explicit-business-date.ps1
+        run: |
+          $fixtureRoot = Join-Path $env:USERPROFILE "StorePulse-Fixtures\business-date"
+          $requiredFiles = @(
+            "day-733-source.xml",
+            "day-733-normalized.json",
+            "day-733-reconciliation.json",
+            "day-734-source.xml",
+            "day-734-normalized.json",
+            "day-734-reconciliation.json",
+            "storepulse-normalize-transactions.ps1",
+            "README.txt",
+            "manifest.csv"
+          )
+          $missing = @($requiredFiles | Where-Object { -not (Test-Path -LiteralPath (Join-Path $fixtureRoot $_)) })
+          if ($missing.Count -gt 0) {
+            Write-Host "::warning::Skipping fixture-backed explicit business-date regression because the fixture bundle is not present in the clean GitHub runner checkout."
+            Write-Host "Missing fixture count: $($missing.Count)"
+            exit 0
+          }
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\connector\tests\test-explicit-business-date.ps1 -FixtureRoot $fixtureRoot

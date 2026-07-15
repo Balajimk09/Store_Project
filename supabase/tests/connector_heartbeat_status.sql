@@ -39,8 +39,6 @@ declare
   v_can_select_token boolean;
   v_function_oid oid;
 begin
-  raise exception 'intentional heartbeat SQL pipeline failure verification';
-
   foreach v_column in array v_required_columns loop
     if not exists (
       select 1

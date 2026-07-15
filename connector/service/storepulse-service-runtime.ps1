@@ -12,8 +12,11 @@ if (-not (Get-Command Read-StorePulseMachineSecrets -ErrorAction SilentlyContinu
 if (-not (Get-Command Test-StorePulseNodeRuntime -ErrorAction SilentlyContinue)) {
     . (Join-Path $PSScriptRoot "storepulse-node-runtime.ps1")
 }
+if (-not (Get-Command Invoke-StorePulseConnectorHeartbeat -ErrorAction SilentlyContinue)) {
+    . (Join-Path $PSScriptRoot "storepulse-connector-heartbeat.ps1")
+}
 
-$script:StorePulseRuntimeVersion = "3.0.0-servicehost-cutover1"
+$script:StorePulseRuntimeVersion = "3.1.0-heartbeat1"
 
 function Get-StorePulseStateRoot {
     param([string]$ProgramDataRoot = "")
@@ -41,7 +44,9 @@ function Test-StorePulseServiceScripts {
         "storepulse-connector.mjs",
         "storepulse-finalize-closed-day.ps1",
         "storepulse-normalize-transactions.ps1",
-        "storepulse-upload-finalized-business-day.ps1"
+        "storepulse-upload-finalized-business-day.ps1",
+        "service\storepulse-machine-identity.ps1",
+        "service\storepulse-connector-heartbeat.ps1"
     )
     foreach ($name in $required) {
         $path = Join-Path $Root $name
@@ -66,6 +71,69 @@ function New-StorePulseWorkerStatus {
         last_error = $null
         last_result = $null
     }
+}
+
+function New-StorePulseHeartbeatReporterStatus {
+    param([bool]$Enabled)
+    [ordered]@{
+        enabled = $Enabled
+        status = if ($Enabled) { "idle" } else { "disabled" }
+        consecutive_failures = 0
+        last_attempt_at = $null
+        last_success_at = $null
+        last_failure_at = $null
+        last_error = $null
+        last_request_id = $null
+    }
+}
+
+function Update-StorePulseHeartbeatReporterStatus {
+    param(
+        [Parameter(Mandatory)]$ReporterStatus,
+        [Parameter(Mandatory)]$Result,
+        [Parameter(Mandatory)]$Secrets
+    )
+    if ($Result.enabled -eq $false) {
+        $ReporterStatus.enabled = $false
+        $ReporterStatus.status = "disabled"
+        return
+    }
+    $ReporterStatus.enabled = $true
+    $ReporterStatus.last_attempt_at = (Get-Date).ToString("o")
+    if ($Result.status -eq "succeeded") {
+        $ReporterStatus.status = "succeeded"
+        $ReporterStatus.consecutive_failures = 0
+        $ReporterStatus.last_success_at = (Get-Date).ToString("o")
+        $ReporterStatus.last_error = $null
+        $ReporterStatus.last_request_id = $Result.request_id
+    }
+    else {
+        $ReporterStatus.status = "failed"
+        $ReporterStatus.consecutive_failures = [int]$ReporterStatus.consecutive_failures + 1
+        $ReporterStatus.last_failure_at = (Get-Date).ToString("o")
+        $ReporterStatus.last_error = ConvertTo-StorePulseSafeText -Value ([string]$Result.error_message) -Secrets $Secrets
+        $ReporterStatus.last_request_id = $null
+    }
+}
+
+function Invoke-StorePulseRuntimeHeartbeat {
+    param(
+        [Parameter(Mandatory)]$Config,
+        [Parameter(Mandatory)]$Secrets,
+        [Parameter(Mandatory)]$Status,
+        [Parameter(Mandatory)][ValidateSet("starting", "syncing", "ready", "degraded", "error", "stopping")][string]$ReportedState,
+        [scriptblock]$HeartbeatReporter = $null,
+        [AllowNull()][string]$ErrorMessage = $null
+    )
+    $errorCode = if ([string]::IsNullOrWhiteSpace($ErrorMessage)) { $null } else { Get-StorePulseErrorCode -Message $ErrorMessage }
+    if ($null -eq $HeartbeatReporter) {
+        $result = Invoke-StorePulseConnectorHeartbeat -Config $Config -Secrets $Secrets -RuntimeStatus $Status -ReportedState $ReportedState -ErrorCode $errorCode -ErrorMessage $ErrorMessage
+    }
+    else {
+        $result = & $HeartbeatReporter $Config $Secrets $Status $ReportedState $errorCode $ErrorMessage
+    }
+    Update-StorePulseHeartbeatReporterStatus -ReporterStatus $Status.heartbeat_reporter -Result $result -Secrets $Secrets
+    return $result
 }
 
 function ConvertTo-StorePulseSafeText {
@@ -299,6 +367,7 @@ function Invoke-StorePulseServiceRuntime {
         [string]$InstallRoot = "",
         [scriptblock]$LiveWorker = $null,
         [scriptblock]$ClosedDayWorker = $null,
+        [scriptblock]$HeartbeatReporter = $null,
         [scriptblock]$Sleep = $null,
         [int]$MaxIterations = 0
     )
@@ -320,6 +389,7 @@ function Invoke-StorePulseServiceRuntime {
 
     $liveEnabled = Get-StorePulseConfigBool -Config $config -Name "live_worker_enabled" -Default $true
     $closedEnabled = Get-StorePulseConfigBool -Config $config -Name "closed_day_worker_enabled" -Default $true
+    $heartbeatEnabled = Get-StorePulseConfigBool -Config $config -Name "heartbeat_enabled" -Default $false
     if ($null -eq $LiveWorker) { $LiveWorker = New-StorePulseDefaultLiveWorker }
     if ($null -eq $ClosedDayWorker) { $ClosedDayWorker = New-StorePulseDefaultClosedDayWorker }
     if ($null -eq $Sleep) { $Sleep = { param([int]$Seconds) Start-Sleep -Seconds $Seconds } }
@@ -332,6 +402,7 @@ function Invoke-StorePulseServiceRuntime {
         mode = $Mode
         live_worker = New-StorePulseWorkerStatus -Name "live" -Enabled $liveEnabled
         closed_day_worker = New-StorePulseWorkerStatus -Name "closed_day" -Enabled $closedEnabled
+        heartbeat_reporter = New-StorePulseHeartbeatReporterStatus -Enabled $heartbeatEnabled
         stop_file = $stopPath
     }
     Write-StorePulseRuntimeStatus -Path $statusPath -Status $status -Secrets $secrets
@@ -354,6 +425,8 @@ function Invoke-StorePulseServiceRuntime {
     }
 
     try {
+        Invoke-StorePulseRuntimeHeartbeat -Config $config -Secrets $secrets -Status $status -ReportedState "starting" -HeartbeatReporter $HeartbeatReporter | Out-Null
+        Write-StorePulseRuntimeStatus -Path $statusPath -Status $status -Secrets $secrets
         $iteration = 0
         do {
             $iteration += 1
@@ -363,7 +436,15 @@ function Invoke-StorePulseServiceRuntime {
                 break
             }
             if ($liveEnabled) {
+                Invoke-StorePulseRuntimeHeartbeat -Config $config -Secrets $secrets -Status $status -ReportedState "syncing" -HeartbeatReporter $HeartbeatReporter | Out-Null
                 Invoke-StorePulseWorkerOnce -Name "live" -WorkerStatus $status.live_worker -Config $config -Secrets $secrets -InstallRoot $resolvedInstallRoot -Worker $LiveWorker -LogsRoot ([string]$config.logs_root)
+                if ($status.live_worker.status -eq "succeeded") {
+                    Invoke-StorePulseRuntimeHeartbeat -Config $config -Secrets $secrets -Status $status -ReportedState "ready" -HeartbeatReporter $HeartbeatReporter | Out-Null
+                }
+                else {
+                    $state = if ([int]$status.live_worker.consecutive_failures -ge 3) { "error" } else { "degraded" }
+                    Invoke-StorePulseRuntimeHeartbeat -Config $config -Secrets $secrets -Status $status -ReportedState $state -HeartbeatReporter $HeartbeatReporter -ErrorMessage ([string]$status.live_worker.last_error) | Out-Null
+                }
             }
             if ($closedEnabled) {
                 Invoke-StorePulseWorkerOnce -Name "closed_day" -WorkerStatus $status.closed_day_worker -Config $config -Secrets $secrets -InstallRoot $resolvedInstallRoot -Worker $ClosedDayWorker -LogsRoot ([string]$config.logs_root)
@@ -377,6 +458,7 @@ function Invoke-StorePulseServiceRuntime {
             & $Sleep ([int]$delay)
         } while ($Mode -eq "Run" -and ($MaxIterations -le 0 -or $iteration -lt $MaxIterations))
         $status.last_heartbeat_at = (Get-Date).ToString("o")
+        Invoke-StorePulseRuntimeHeartbeat -Config $config -Secrets $secrets -Status $status -ReportedState "stopping" -HeartbeatReporter $HeartbeatReporter | Out-Null
         Write-StorePulseRuntimeStatus -Path $statusPath -Status $status -Secrets $secrets
         return [PSCustomObject]@{ ok = $true; iterations = $iteration; status_path = $statusPath; stop_path = $stopPath; lock_path = $lockPath }
     }

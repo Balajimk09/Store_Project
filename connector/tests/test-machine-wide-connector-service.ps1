@@ -39,6 +39,10 @@ function New-TestConfig {
         commander_install_path = Join-Path $InstallRoot "Commander"
         live_endpoint_url = "https://example.invalid/functions/v1/ingest-pos-transactions"
         finalization_endpoint_url = "https://example.invalid/functions/v1/finalize-pos-business-day"
+        heartbeat_enabled = $false
+        heartbeat_endpoint_url = "https://example.invalid/functions/v1/report-pos-connector-heartbeat"
+        heartbeat_payload_version = "1"
+        heartbeat_timeout_seconds = 15
         live_poll_interval_seconds = 300
         closed_day_poll_interval_seconds = 3600
         install_root = $InstallRoot
@@ -146,6 +150,8 @@ try {
     . (Join-Path $serviceRoot "storepulse-service-runtime.ps1")
     . (Join-Path $serviceRoot "storepulse-windows-service.ps1")
     . (Join-Path $serviceRoot "storepulse-node-runtime.ps1")
+    . (Join-Path $serviceRoot "storepulse-machine-identity.ps1")
+    . (Join-Path $serviceRoot "storepulse-connector-heartbeat.ps1")
 
     [Environment]::SetEnvironmentVariable("STOREPULSE_PROGRAMDATA_ROOT", (Join-Path $tempRoot "ProgramData"), "Process")
     [Environment]::SetEnvironmentVariable("STOREPULSE_INSTALL_ROOT", (Join-Path $tempRoot "ProgramFiles\StorePulse\Connector"), "Process")
@@ -162,10 +168,11 @@ try {
     $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
     Assert-Equal -Actual $manifest.service_name -Expected "StorePulseConnector" -Message "manifest service name"
     Assert-Equal -Actual $manifest.service_display_name -Expected "StorePulse Connector Service" -Message "manifest display name"
-    Assert-Equal -Actual $manifest.version -Expected "3.0.0-servicehost-cutover1" -Message "manifest cutover hotfix version"
+    Assert-Equal -Actual $manifest.version -Expected "3.1.0-heartbeat1" -Message "manifest heartbeat package version"
     Assert-True -Condition (($manifest.required_files -contains "service\storepulse-windows-service.ps1") -and ($manifest.required_files -contains "service\storepulse-service-entrypoint.ps1")) -Message "manifest includes service files"
     Assert-Equal -Actual $manifest.bundled_node_runtime_relative_path -Expected "runtime\node" -Message "manifest declares private Node runtime path"
     Assert-True -Condition ($manifest.required_files -contains "service\node-runtime-manifest.json") -Message "manifest includes Node runtime manifest"
+    Assert-True -Condition ($manifest.required_files -contains "service\storepulse-machine-identity.ps1" -and $manifest.required_files -contains "service\storepulse-connector-heartbeat.ps1") -Message "manifest includes heartbeat scripts"
 
     $programDataRoot = Get-StorePulseProgramDataRoot
     $installRoot = Get-StorePulseInstallRoot
@@ -180,6 +187,8 @@ try {
     New-Item -ItemType Directory -Path $serviceSubdir -Force | Out-Null
     Set-Content -LiteralPath (Join-Path $serviceSubdir "storepulse-service-entrypoint.ps1") -Value "placeholder" -Encoding UTF8
     Set-Content -LiteralPath (Join-Path $serviceSubdir "storepulse-current-shift-worker.ps1") -Value "placeholder" -Encoding UTF8
+    Set-Content -LiteralPath (Join-Path $serviceSubdir "storepulse-machine-identity.ps1") -Value "placeholder" -Encoding UTF8
+    Set-Content -LiteralPath (Join-Path $serviceSubdir "storepulse-connector-heartbeat.ps1") -Value "placeholder" -Encoding UTF8
     $testNode = Install-TestNodeRuntime -InstallRoot $installRoot
     $hostRoot = Join-Path $serviceSubdir "host"
     New-Item -ItemType Directory -Path $hostRoot -Force | Out-Null
@@ -329,10 +338,70 @@ try {
 
     $config = New-TestConfig -Root $programDataRoot -InstallRoot $installRoot
     Assert-True -Condition (Test-StorePulseMachineConfig -Config $config) -Message "valid config accepted"
+    Assert-Equal -Actual (Get-StorePulseDerivedHeartbeatEndpoint -LiveEndpointUrl "https://example.invalid/functions/v1/ingest-pos-transactions") -Expected "https://example.invalid/functions/v1/report-pos-connector-heartbeat" -Message "heartbeat endpoint derives safely from ingest endpoint"
+    Assert-Throws -ScriptBlock { Get-StorePulseDerivedHeartbeatEndpoint -LiveEndpointUrl "https://example.invalid/functions/v1/not-ingest" | Out-Null } -Message "unsafe heartbeat derivation fails"
     $configPath = Write-StorePulseMachineConfig -Config $config -CreateDirectories
     Assert-True -Condition (Test-Path -LiteralPath $configPath -PathType Leaf) -Message "config written"
     $configText = Get-Content -LiteralPath $configPath -Raw
     Assert-True -Condition ($configText -notmatch "commander_password|connector_token|commander_username") -Message "config excludes secret names"
+
+    $installationIdPath = Get-StorePulseInstallationIdPath -ProgramDataRoot $programDataRoot
+    $installationId1 = Get-StorePulseInstallationId -ProgramDataRoot $programDataRoot
+    $installationId2 = Get-StorePulseInstallationId -ProgramDataRoot $programDataRoot
+    Assert-True -Condition (Test-StorePulseUuidText -Value $installationId1) -Message "installation ID is a UUID"
+    Assert-Equal -Actual $installationId2 -Expected $installationId1 -Message "installation ID is stable across reads"
+    Assert-True -Condition (Test-Path -LiteralPath $installationIdPath -PathType Leaf) -Message "installation ID file created under ProgramData state"
+    Set-Content -LiteralPath $installationIdPath -Value "not-a-uuid" -Encoding ASCII
+    Assert-Throws -ScriptBlock { Get-StorePulseInstallationId -ProgramDataRoot $programDataRoot | Out-Null } -Message "malformed existing installation ID fails closed"
+    Set-Content -LiteralPath $installationIdPath -Value $installationId1 -Encoding ASCII
+
+    $heartbeatConfig = New-TestConfig -Root $programDataRoot -InstallRoot $installRoot
+    $heartbeatConfig.heartbeat_enabled = $true
+    $heartbeatSecrets = [PSCustomObject]@{
+        commander_username = "synthetic-user"
+        commander_password = "synthetic-password"
+        connector_token = "synthetic-token-value-that-is-long-enough"
+    }
+    $heartbeatStatus = [ordered]@{
+        runtime_version = "3.1.0-heartbeat1"
+        process_id = $PID
+        started_at = (Get-Date).ToString("o")
+        mode = "Run"
+        live_worker = [ordered]@{
+            status = "succeeded"
+            consecutive_failures = 0
+            last_started_at = (Get-Date).ToString("o")
+            last_success_at = (Get-Date).ToString("o")
+            last_failure_at = $null
+            last_error = $null
+            last_result = [PSCustomObject]@{
+                canonical_record_count = 342
+                inserted_count = 3
+                updated_count = 19
+                unchanged_count = 320
+                failed_count = 0
+                request_id = "synthetic-request"
+            }
+        }
+    }
+    $global:HeartbeatHttpCapture = $null
+    $heartbeatResult = Invoke-StorePulseConnectorHeartbeat -Config $heartbeatConfig -Secrets $heartbeatSecrets -RuntimeStatus $heartbeatStatus -ReportedState "ready" -HttpExecutor {
+        param($Endpoint, $Headers, $Json, $TimeoutSeconds)
+        $global:HeartbeatHttpCapture = [PSCustomObject]@{ Endpoint = $Endpoint; Headers = $Headers; Json = $Json; TimeoutSeconds = $TimeoutSeconds }
+        [PSCustomObject]@{ ok = $true; request_id = "heartbeat-request"; connector_id = "connector-id"; server_received_at = (Get-Date).ToString("o"); installation_bound = $false }
+    }
+    $heartbeatPayload = $global:HeartbeatHttpCapture.Json | ConvertFrom-Json
+    Assert-Equal -Actual $heartbeatResult.status -Expected "succeeded" -Message "heartbeat reporter handles success response"
+    Assert-Equal -Actual $heartbeatPayload.reported_state -Expected "ready" -Message "heartbeat payload reports ready state"
+    Assert-Equal -Actual $heartbeatPayload.canonical_record_count -Expected 342 -Message "heartbeat payload includes latest canonical count"
+    Assert-True -Condition ($global:HeartbeatHttpCapture.Headers["x-storepulse-connector-token"] -eq "synthetic-token-value-that-is-long-enough") -Message "heartbeat sends connector token header"
+    Assert-True -Condition ($global:HeartbeatHttpCapture.Json -notmatch "synthetic-token-value-that-is-long-enough|synthetic-password") -Message "heartbeat JSON excludes secrets"
+    $failedHeartbeat = Invoke-StorePulseConnectorHeartbeat -Config $heartbeatConfig -Secrets $heartbeatSecrets -RuntimeStatus $heartbeatStatus -ReportedState "ready" -HttpExecutor {
+        param($Endpoint, $Headers, $Json, $TimeoutSeconds)
+        throw "server rejected synthetic-token-value-that-is-long-enough"
+    }
+    Assert-Equal -Actual $failedHeartbeat.status -Expected "failed" -Message "heartbeat reporter handles server failure"
+    Assert-True -Condition ($failedHeartbeat.error_message -match '\[REDACTED\]' -and $failedHeartbeat.error_message -notmatch "synthetic-token-value-that-is-long-enough") -Message "heartbeat reporter redacts secrets from errors"
 
     Assert-Throws -ScriptBlock { $bad = New-TestConfig -Root $programDataRoot -InstallRoot $installRoot; $bad.live_endpoint_url = "http://example.invalid"; Test-StorePulseMachineConfig -Config $bad | Out-Null } -Message "non-HTTPS URL rejected"
     Assert-Throws -ScriptBlock { $bad = New-TestConfig -Root $programDataRoot -InstallRoot $installRoot; $bad.source_store_number = "bad/store"; Test-StorePulseMachineConfig -Config $bad | Out-Null } -Message "invalid store number rejected"
@@ -500,10 +569,55 @@ try {
     Assert-Equal -Actual $global:MachineLiveCount -Expected 1 -Message "Once mode invokes live worker once"
     Assert-Equal -Actual $global:MachineClosedCount -Expected 1 -Message "Once mode invokes closed worker once"
 
+    $heartbeatRuntimeConfig = New-TestConfig -Root $programDataRoot -InstallRoot $installRoot
+    $heartbeatRuntimeConfig.heartbeat_enabled = $true
+    $heartbeatRuntimeConfig.closed_day_worker_enabled = $false
+    $heartbeatRuntimeConfigPath = Join-Path $programDataRoot "heartbeat-runtime-config.json"
+    Write-StorePulseMachineConfig -Config $heartbeatRuntimeConfig -Path $heartbeatRuntimeConfigPath | Out-Null
+    $global:HeartbeatStates = @()
+    Invoke-StorePulseServiceRuntime `
+        -Mode Once `
+        -ConfigPath $heartbeatRuntimeConfigPath `
+        -SecretsPath $secretsPathForRuntime `
+        -InstallRoot $installRoot `
+        -LiveWorker { param($Config,$Secrets,$Root) [PSCustomObject]@{ canonical_record_count = 12; inserted_count = 1; updated_count = 2; unchanged_count = 9; failed_count = 0; request_id = "live-request" } } `
+        -ClosedDayWorker { param($Config,$Secrets,$Root) } `
+        -HeartbeatReporter { param($Config,$Secrets,$Status,$State,$ErrorCode,$ErrorMessage) $global:HeartbeatStates += $State; [PSCustomObject]@{ enabled = $true; status = "succeeded"; request_id = "hb-$State" } } `
+        -Sleep { param($Seconds) } | Out-Null
+    Assert-True -Condition (($global:HeartbeatStates -join ",") -match "starting" -and ($global:HeartbeatStates -join ",") -match "syncing" -and ($global:HeartbeatStates -join ",") -match "ready" -and ($global:HeartbeatStates -join ",") -match "stopping") -Message "runtime sends starting/syncing/ready/stopping heartbeats"
+    $heartbeatRuntimeStatus = Get-Content -LiteralPath (Get-StorePulseRuntimeStatusPath -ProgramDataRoot $programDataRoot) -Raw | ConvertFrom-Json
+    Assert-Equal -Actual $heartbeatRuntimeStatus.heartbeat_reporter.status -Expected "succeeded" -Message "runtime records successful heartbeat reporter"
+    Assert-Equal -Actual $heartbeatRuntimeStatus.heartbeat_reporter.consecutive_failures -Expected 0 -Message "heartbeat reporter failure count clears after success"
+
+    $global:HeartbeatFailureStates = @()
+    Invoke-StorePulseServiceRuntime `
+        -Mode Run `
+        -ConfigPath $heartbeatRuntimeConfigPath `
+        -SecretsPath $secretsPathForRuntime `
+        -InstallRoot $installRoot `
+        -LiveWorker { param($Config,$Secrets,$Root) throw "cloud rejected synthetic-token" } `
+        -ClosedDayWorker { param($Config,$Secrets,$Root) } `
+        -HeartbeatReporter { param($Config,$Secrets,$Status,$State,$ErrorCode,$ErrorMessage) $global:HeartbeatFailureStates += "$State/$ErrorCode"; [PSCustomObject]@{ enabled = $true; status = "failed"; error_message = "heartbeat failed" } } `
+        -Sleep { param($Seconds) } `
+        -MaxIterations 3 | Out-Null
+    $heartbeatFailureStatus = Get-Content -LiteralPath (Get-StorePulseRuntimeStatusPath -ProgramDataRoot $programDataRoot) -Raw | ConvertFrom-Json
+    Assert-True -Condition (($global:HeartbeatFailureStates -join ",") -match "degraded" -and ($global:HeartbeatFailureStates -join ",") -match "error") -Message "runtime sends degraded then error after repeated live failures"
+    Assert-True -Condition (($global:HeartbeatFailureStates -join ",") -match "cloud_rejected") -Message "runtime uses safe cloud error code"
+    Assert-True -Condition ([int]$heartbeatFailureStatus.heartbeat_reporter.consecutive_failures -gt 0) -Message "heartbeat reporter tracks independent failure count"
+    Invoke-StorePulseServiceRuntime `
+        -Mode Once `
+        -ConfigPath $configPath `
+        -SecretsPath $secretsPathForRuntime `
+        -InstallRoot $installRoot `
+        -LiveWorker { param($Config,$Secrets,$Root) } `
+        -ClosedDayWorker { param($Config,$Secrets,$Root) } `
+        -Sleep { param($Seconds) } | Out-Null
+
     $statusPath = Get-StorePulseRuntimeStatusPath -ProgramDataRoot $programDataRoot
     $status = Get-Content -LiteralPath $statusPath -Raw | ConvertFrom-Json
     Assert-Equal -Actual $status.live_worker.status -Expected "succeeded" -Message "heartbeat records live worker success"
     Assert-Equal -Actual $status.closed_day_worker.status -Expected "succeeded" -Message "heartbeat records closed worker success"
+    Assert-Equal -Actual $status.heartbeat_reporter.status -Expected "disabled" -Message "runtime status records disabled heartbeat reporter"
     Assert-True -Condition (-not [string]::IsNullOrWhiteSpace([string]$status.last_heartbeat_at)) -Message "heartbeat timestamp written"
     Assert-True -Condition (($status | ConvertTo-Json -Depth 20) -notmatch "synthetic-password|synthetic-token") -Message "status excludes secrets"
 
@@ -680,7 +794,12 @@ writeFileSync(summaryPath, JSON.stringify({
     foreach ($file in Get-ChildItem -LiteralPath $serviceRoot -Filter "*.ps1") {
         $content = Get-Content -LiteralPath $file.FullName -Raw
         Assert-True -Condition ($content -notmatch "Deepika|AB123|C:\\Users\\|Register-ScheduledTask|New-Service|192\.168\.|ABC") -Message "$($file.Name) has no user/store/service hardcoding"
-        Assert-True -Condition ($content -notmatch "Invoke-RestMethod|Invoke-WebRequest") -Message "$($file.Name) performs no network calls"
+        if ($file.Name -eq "storepulse-connector-heartbeat.ps1") {
+            Assert-True -Condition ($content -match "Invoke-WebRequest") -Message "$($file.Name) owns heartbeat HTTP transport"
+        }
+        else {
+            Assert-True -Condition ($content -notmatch "Invoke-RestMethod|Invoke-WebRequest") -Message "$($file.Name) performs no network calls"
+        }
     }
 
     Write-Host ("PASS: machine-wide connector service tests passed ({0} assertions)." -f $global:MachineServicePassCount)

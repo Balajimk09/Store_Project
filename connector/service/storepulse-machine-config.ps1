@@ -61,6 +61,32 @@ function Test-StorePulseUrl {
     if ($uri.Scheme -ne "https") { throw "$Name must use HTTPS." }
 }
 
+function Get-StorePulseDerivedHeartbeatEndpoint {
+    param([Parameter(Mandatory)][string]$LiveEndpointUrl)
+    if ([string]::IsNullOrWhiteSpace($LiveEndpointUrl)) { throw "live_endpoint_url is required to derive heartbeat endpoint." }
+    if ($LiveEndpointUrl -notmatch '/ingest-pos-transactions/?$') {
+        throw "heartbeat_endpoint_url cannot be safely derived because live_endpoint_url does not end with ingest-pos-transactions."
+    }
+    return ($LiveEndpointUrl -replace '/ingest-pos-transactions/?$', '/report-pos-connector-heartbeat')
+}
+
+function Add-StorePulseHeartbeatConfigDefaults {
+    param([Parameter(Mandatory)]$Config)
+    if (-not $Config.PSObject.Properties["heartbeat_enabled"]) {
+        Add-Member -InputObject $Config -NotePropertyName "heartbeat_enabled" -NotePropertyValue $true
+    }
+    if (-not $Config.PSObject.Properties["heartbeat_payload_version"]) {
+        Add-Member -InputObject $Config -NotePropertyName "heartbeat_payload_version" -NotePropertyValue "1"
+    }
+    if (-not $Config.PSObject.Properties["heartbeat_timeout_seconds"]) {
+        Add-Member -InputObject $Config -NotePropertyName "heartbeat_timeout_seconds" -NotePropertyValue 15
+    }
+    if (-not $Config.PSObject.Properties["heartbeat_endpoint_url"] -or [string]::IsNullOrWhiteSpace([string]$Config.heartbeat_endpoint_url)) {
+        Add-Member -InputObject $Config -NotePropertyName "heartbeat_endpoint_url" -NotePropertyValue (Get-StorePulseDerivedHeartbeatEndpoint -LiveEndpointUrl ([string]$Config.live_endpoint_url)) -Force
+    }
+    return $Config
+}
+
 function Test-StorePulsePathValue {
     param([AllowNull()][string]$Value, [Parameter(Mandatory)][string]$Name)
     if ([string]::IsNullOrWhiteSpace($Value)) { throw "$Name is required." }
@@ -82,6 +108,17 @@ function Test-StorePulseMachineConfig {
     Test-StorePulsePathValue -Value ([string]$Config.commander_install_path) -Name "commander_install_path"
     Test-StorePulseUrl -Value ([string]$Config.live_endpoint_url) -Name "live_endpoint_url"
     Test-StorePulseUrl -Value ([string]$Config.finalization_endpoint_url) -Name "finalization_endpoint_url"
+    if ($Config.PSObject.Properties["heartbeat_enabled"] -and [bool]$Config.heartbeat_enabled) {
+        if (-not $Config.PSObject.Properties["heartbeat_endpoint_url"] -or [string]::IsNullOrWhiteSpace([string]$Config.heartbeat_endpoint_url)) {
+            throw "heartbeat_endpoint_url is required when heartbeat_enabled is true."
+        }
+        Test-StorePulseUrl -Value ([string]$Config.heartbeat_endpoint_url) -Name "heartbeat_endpoint_url"
+    }
+    if ($Config.PSObject.Properties["heartbeat_payload_version"] -and [string]$Config.heartbeat_payload_version -ne "1") { throw "heartbeat_payload_version must be 1." }
+    if ($Config.PSObject.Properties["heartbeat_timeout_seconds"]) {
+        $timeout = [int]$Config.heartbeat_timeout_seconds
+        if ($timeout -lt 1 -or $timeout -gt 120) { throw "heartbeat_timeout_seconds must be between 1 and 120." }
+    }
     $livePoll = [int]$Config.live_poll_interval_seconds
     $closedPoll = [int]$Config.closed_day_poll_interval_seconds
     if ($livePoll -lt 60 -or $livePoll -gt 86400) { throw "live_poll_interval_seconds must be between 60 and 86400." }
@@ -99,6 +136,7 @@ function Write-StorePulseMachineConfig {
         [string]$Path = "",
         [switch]$CreateDirectories
     )
+    Add-StorePulseHeartbeatConfigDefaults -Config $Config | Out-Null
     Test-StorePulseMachineConfig -Config $Config | Out-Null
     $configPath = if ([string]::IsNullOrWhiteSpace($Path)) { Get-StorePulseConfigPath } else { $Path }
     $parent = Split-Path -Parent $configPath

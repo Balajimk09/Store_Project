@@ -228,10 +228,45 @@ It contains:
 - last heartbeat timestamp
 - live worker status
 - closed-day worker status
+- heartbeat reporter status
 - last success/failure timestamps
 - bounded non-secret error summaries
 
 Secrets are redacted before status is written.
+
+## Remote Connector Heartbeat
+
+Package version `3.1.0-heartbeat1` adds remote heartbeat reporting for future Online, Ready, Syncing, Delayed, Offline, Error, Setup Required, connector-version, and last-sync monitoring. Heartbeat fields extend the existing `store_pos_connectors` row; StorePulse does not create a competing connector-status table and does not overload the administrative `status = active/disabled` column.
+
+The machine stores a stable non-secret installation UUID at:
+
+```text
+C:\ProgramData\StorePulse\state\installation-id.txt
+```
+
+The ID is created once, preserved during repair and upgrade, and not included in packages. If the file exists but is malformed, the service fails closed instead of silently regenerating it. The first valid heartbeat may bind the server connector row to this installation ID. A different ID later returns `409 installation_mismatch`; laptop replacement requires a future authorized reset workflow.
+
+Heartbeat config fields are:
+
+- `heartbeat_enabled`
+- `heartbeat_endpoint_url`
+- `heartbeat_payload_version`
+- `heartbeat_timeout_seconds`
+
+When upgrading existing config, `heartbeat_endpoint_url` can be derived from `live_endpoint_url` only when the live URL ends with `ingest-pos-transactions`; the derived URL ends with `report-pos-connector-heartbeat`.
+
+The runtime reports `starting`, `syncing`, `ready`, `degraded`, `error`, and best-effort `stopping`. The laptop never reports `offline`; the future UI derives offline from stale server-side `last_heartbeat_at`.
+
+Heartbeat upload failures are isolated from transaction ingestion. A failed heartbeat updates local `heartbeat_reporter` state and redacted logs, then retries on the next opportunity. It must not fail an otherwise successful Current Shift sync.
+
+Safe error codes include `commander_unreachable`, `commander_authentication_failed`, `commander_response_invalid`, `normalization_failed`, `cloud_unreachable`, `cloud_unauthorized`, `cloud_rejected`, `heartbeat_unreachable`, `heartbeat_unauthorized`, `heartbeat_rejected`, and `unknown_error`.
+
+Backend deployment after isolated validation:
+
+```powershell
+supabase db push
+supabase functions deploy report-pos-connector-heartbeat --no-verify-jwt
+```
 
 ## Backoff
 

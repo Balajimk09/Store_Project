@@ -59,6 +59,10 @@ function Get-StorePulseExistingOrDefaultConfig {
         commander_install_path = ""
         live_endpoint_url = ""
         finalization_endpoint_url = ""
+        heartbeat_enabled = $true
+        heartbeat_endpoint_url = ""
+        heartbeat_payload_version = "1"
+        heartbeat_timeout_seconds = 15
         live_poll_interval_seconds = 300
         closed_day_poll_interval_seconds = 3600
         install_root = (Get-StorePulseInstallRoot -Root $InstallRoot)
@@ -117,6 +121,9 @@ Set-StorePulseConfigValue -Config $config -Name "commander_ip" -Value $Commander
 Set-StorePulseConfigValue -Config $config -Name "commander_install_path" -Value $CommanderInstallPath
 Set-StorePulseConfigValue -Config $config -Name "finalization_endpoint_url" -Value $FinalizationUrl
 Set-StorePulseConfigValue -Config $config -Name "live_endpoint_url" -Value $LiveUploadUrl
+if ([string]::IsNullOrWhiteSpace([string]$config.heartbeat_endpoint_url) -and -not [string]::IsNullOrWhiteSpace([string]$config.live_endpoint_url)) {
+    $config.heartbeat_endpoint_url = Get-StorePulseDerivedHeartbeatEndpoint -LiveEndpointUrl ([string]$config.live_endpoint_url)
+}
 if ($LivePollSeconds -gt 0) { $config.live_poll_interval_seconds = $LivePollSeconds }
 if ($ClosedDayPollSeconds -gt 0) { $config.closed_day_poll_interval_seconds = $ClosedDayPollSeconds }
 Set-StorePulseConfigValue -Config $config -Name "install_root" -Value (Get-StorePulseInstallRoot -Root $InstallRoot)
@@ -129,6 +136,7 @@ if ($Interactive) {
     if ([string]::IsNullOrWhiteSpace([string]$config.source_store_number)) { $config.source_store_number = Read-Host "Source store number" }
     if ([string]::IsNullOrWhiteSpace([string]$config.commander_ip)) { $config.commander_ip = Read-Host "Commander host or IP" }
     if ([string]::IsNullOrWhiteSpace([string]$config.live_endpoint_url)) { $config.live_endpoint_url = Read-Host "Live upload HTTPS URL" }
+    if ([string]::IsNullOrWhiteSpace([string]$config.heartbeat_endpoint_url)) { $config.heartbeat_endpoint_url = Get-StorePulseDerivedHeartbeatEndpoint -LiveEndpointUrl ([string]$config.live_endpoint_url) }
     if ([string]::IsNullOrWhiteSpace([string]$config.finalization_endpoint_url)) { $config.finalization_endpoint_url = Read-Host "Closed-day finalization HTTPS URL" }
     if ($null -eq $CommanderUsername) { $CommanderUsername = Read-Host "Commander username" -AsSecureString }
     if ($null -eq $CommanderPassword) { $CommanderPassword = Read-Host "Commander password" -AsSecureString }
@@ -155,6 +163,7 @@ $summary = [ordered]@{
     commander_install_path = [string]$config.commander_install_path
     live_endpoint_url = [string]$config.live_endpoint_url
     finalization_endpoint_url = [string]$config.finalization_endpoint_url
+    heartbeat_endpoint_url = [string]$config.heartbeat_endpoint_url
     live_poll_interval_seconds = [int]$config.live_poll_interval_seconds
     closed_day_poll_interval_seconds = [int]$config.closed_day_poll_interval_seconds
     logs_root = [string]$config.logs_root

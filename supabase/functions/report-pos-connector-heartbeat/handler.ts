@@ -7,6 +7,14 @@ import {
 } from '../_shared/connector-auth.ts'
 
 type JsonRecord = Record<string, unknown>
+type HeartbeatConnectorUpdateRow = Pick<ConnectorRow, 'id' | 'status' | 'installation_id'>
+type HeartbeatConnectorQuery = {
+  update: (payload: JsonRecord) => HeartbeatConnectorQuery
+  select: (fields: string) => HeartbeatConnectorQuery
+  eq: (field: string, value: unknown) => HeartbeatConnectorQuery
+  is: (field: string, value: unknown) => HeartbeatConnectorQuery
+  maybeSingle: () => Promise<{ data: HeartbeatConnectorUpdateRow | null; error: unknown }>
+}
 
 export const MAX_BODY_BYTES = 64 * 1024
 const MAX_SAFE_TEXT = 1000
@@ -15,6 +23,22 @@ const FUTURE_TOLERANCE_MS = 10 * 60 * 1000
 const REPORTING_STATES = new Set(['starting', 'ready', 'syncing', 'degraded', 'error', 'stopping'])
 const COMMANDER_STATES = new Set(['unknown', 'connected', 'unreachable', 'authentication_failed', 'error'])
 const CLOUD_STATES = new Set(['unknown', 'connected', 'error'])
+const RUNTIME_MODES = new Set(['Validate', 'Once', 'Run'])
+const ERROR_CODES = new Set([
+  'commander_unreachable',
+  'commander_authentication_failed',
+  'commander_response_invalid',
+  'cloud_unreachable',
+  'cloud_unauthorized',
+  'cloud_rejected',
+  'heartbeat_unreachable',
+  'heartbeat_unauthorized',
+  'heartbeat_rejected',
+  'installation_mismatch',
+  'normalization_failed',
+  'unknown_error',
+])
+const HEARTBEAT_UPDATE_SELECT = 'id, status, installation_id'
 
 export type HeartbeatPayload = ReturnType<typeof validateHeartbeat>
 
@@ -93,6 +117,10 @@ function publicError(error: unknown): { code: string; status: number } {
   return { code: 'service_unavailable', status: 503 }
 }
 
+function timeMillis(value: string | null): number | null {
+  return value === null ? null : Date.parse(value)
+}
+
 export function validateHeartbeat(body: unknown, connector: ConnectorRow, now: Date) {
   if (!isRecord(body)) throw new ValidationError('request_body_must_be_object')
   const allowed = new Set([
@@ -127,37 +155,72 @@ export function validateHeartbeat(body: unknown, connector: ConnectorRow, now: D
   if (connector.source_system !== VERIFONE_SOURCE_SYSTEM) throw new ValidationError('connector_misconfigured', 409)
   const payloadVersion = requiredString(body.payload_version, 'payload_version', 10)
   if (payloadVersion !== '1') throw new ValidationError('payload_version_unsupported')
-  const sourceStoreNumber = optionalString(body.source_store_number, 100)
+  const sourceStoreNumber = optionalString(body.source_store_number, 64)
+  if (sourceStoreNumber && !/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(sourceStoreNumber)) {
+    throw new ValidationError('source_store_number_invalid')
+  }
   if (sourceStoreNumber && connector.source_store_number && sourceStoreNumber !== connector.source_store_number) {
     throw new ValidationError('source_store_mismatch', 409)
   }
   const pollInterval = count(body.live_poll_interval_seconds, 'live_poll_interval_seconds')
   if (pollInterval < 1 || pollInterval > 86400) throw new ValidationError('live_poll_interval_seconds_invalid')
   const consecutiveFailures = count(body.consecutive_failure_count, 'consecutive_failure_count')
+  const runtimeStartedAt = timestamp(body.runtime_started_at, 'runtime_started_at', now)
+  const heartbeatAt = timestamp(body.heartbeat_at, 'heartbeat_at', now)
+  const lastSyncStartedAt = timestamp(body.last_sync_started_at, 'last_sync_started_at', now, true)
+  const lastSyncCompletedAt = timestamp(body.last_sync_completed_at, 'last_sync_completed_at', now, true)
+  const lastSuccessAt = timestamp(body.last_success_at, 'last_success_at', now, true)
+  const lastFailureAt = timestamp(body.last_failure_at, 'last_failure_at', now, true)
+  const lastErrorCode = optionalString(body.last_error_code, 100)
+  const canonicalRecordCount = count(body.canonical_record_count, 'canonical_record_count')
+  const insertedCount = count(body.inserted_count, 'inserted_count')
+  const updatedCount = count(body.updated_count, 'updated_count')
+  const unchangedCount = count(body.unchanged_count, 'unchanged_count')
+  const failedCount = count(body.failed_count, 'failed_count')
+
+  if (timeMillis(runtimeStartedAt)! > timeMillis(heartbeatAt)!) throw new ValidationError('runtime_started_at_after_heartbeat')
+  if (
+    lastSyncStartedAt &&
+    lastSyncCompletedAt &&
+    timeMillis(lastSyncCompletedAt)! < timeMillis(lastSyncStartedAt)!
+  ) {
+    throw new ValidationError('last_sync_completed_at_before_started')
+  }
+  if (lastSuccessAt && lastSyncCompletedAt && timeMillis(lastSuccessAt)! > timeMillis(lastSyncCompletedAt)!) {
+    throw new ValidationError('last_success_at_after_completion')
+  }
+  if (lastFailureAt && lastSyncCompletedAt && timeMillis(lastFailureAt)! > timeMillis(lastSyncCompletedAt)!) {
+    throw new ValidationError('last_failure_at_after_completion')
+  }
+  if (lastErrorCode && !ERROR_CODES.has(lastErrorCode)) throw new ValidationError('last_error_code_invalid')
+  if (insertedCount + updatedCount + unchangedCount + failedCount > canonicalRecordCount) {
+    throw new ValidationError('count_totals_exceed_canonical')
+  }
+
   return {
     payloadVersion,
     installationId: requiredUuid(body.installation_id, 'installation_id'),
     sourceStoreNumber,
     serviceVersion: requiredString(body.service_version, 'service_version', MAX_VERSION_LENGTH),
-    runtimeMode: requiredString(body.runtime_mode, 'runtime_mode', 50),
+    runtimeMode: enumValue(body.runtime_mode, 'runtime_mode', RUNTIME_MODES),
     reportedState: enumValue(body.reported_state, 'reported_state', REPORTING_STATES),
-    runtimeStartedAt: timestamp(body.runtime_started_at, 'runtime_started_at', now),
-    heartbeatAt: timestamp(body.heartbeat_at, 'heartbeat_at', now),
-    lastSyncStartedAt: timestamp(body.last_sync_started_at, 'last_sync_started_at', now, true),
-    lastSyncCompletedAt: timestamp(body.last_sync_completed_at, 'last_sync_completed_at', now, true),
-    lastSuccessAt: timestamp(body.last_success_at, 'last_success_at', now, true),
-    lastFailureAt: timestamp(body.last_failure_at, 'last_failure_at', now, true),
-    lastErrorCode: optionalString(body.last_error_code, 100),
+    runtimeStartedAt,
+    heartbeatAt,
+    lastSyncStartedAt,
+    lastSyncCompletedAt,
+    lastSuccessAt,
+    lastFailureAt,
+    lastErrorCode,
     lastErrorMessage: optionalString(body.last_error_message, MAX_SAFE_TEXT),
     consecutiveFailures,
     commanderStatus: enumValue(body.commander_status, 'commander_status', COMMANDER_STATES),
     cloudStatus: enumValue(body.cloud_status, 'cloud_status', CLOUD_STATES),
     livePollInterval: pollInterval,
-    canonicalRecordCount: count(body.canonical_record_count, 'canonical_record_count'),
-    insertedCount: count(body.inserted_count, 'inserted_count'),
-    updatedCount: count(body.updated_count, 'updated_count'),
-    unchangedCount: count(body.unchanged_count, 'unchanged_count'),
-    failedCount: count(body.failed_count, 'failed_count'),
+    canonicalRecordCount,
+    insertedCount,
+    updatedCount,
+    unchangedCount,
+    failedCount,
     lastRequestId: optionalString(body.last_request_id, 200),
   }
 }
@@ -166,31 +229,47 @@ async function defaultAuthenticateConnector(request: Request, requestId: string)
   return await authenticateConnector(request, requestId, { sourceSystem: VERIFONE_SOURCE_SYSTEM })
 }
 
-async function defaultUpdateHeartbeat(
+export async function defaultUpdateHeartbeat(
   auth: ConnectorAuthResult,
   payload: HeartbeatPayload,
   updatePayload: JsonRecord,
 ): Promise<HeartbeatUpdateResult | 'installation_mismatch' | 'unauthorized' | 'not_found'> {
-  const { data, error } = await auth.supabase
-    .from('store_pos_connectors')
+  const table = () => auth.supabase.from('store_pos_connectors') as unknown as HeartbeatConnectorQuery
+
+  const { data: boundData, error: boundError } = await table()
     .update(updatePayload)
     .eq('id', auth.connector.id)
     .eq('status', 'active')
-    .or(`installation_id.is.null,installation_id.eq.${payload.installationId}`)
-    .select('id, status, installation_id')
+    .is('installation_id', null)
+    .select(HEARTBEAT_UPDATE_SELECT)
     .maybeSingle()
 
-  if (error) throw error
-  if (data?.id === auth.connector.id && data.status === 'active' && data.installation_id === payload.installationId) {
+  if (boundError) throw boundError
+  if (boundData?.id === auth.connector.id && boundData.status === 'active' && boundData.installation_id === payload.installationId) {
     return {
-      connector: data as Pick<ConnectorRow, 'id' | 'status' | 'installation_id'>,
-      installationBound: !auth.connector.installation_id,
+      connector: boundData as Pick<ConnectorRow, 'id' | 'status' | 'installation_id'>,
+      installationBound: true,
     }
   }
 
-  const { data: current, error: currentError } = await auth.supabase
-    .from('store_pos_connectors')
-    .select('id, status, installation_id')
+  const { data: matchingData, error: matchingError } = await table()
+    .update(updatePayload)
+    .eq('id', auth.connector.id)
+    .eq('status', 'active')
+    .eq('installation_id', payload.installationId)
+    .select(HEARTBEAT_UPDATE_SELECT)
+    .maybeSingle()
+
+  if (matchingError) throw matchingError
+  if (matchingData?.id === auth.connector.id && matchingData.status === 'active' && matchingData.installation_id === payload.installationId) {
+    return {
+      connector: matchingData as Pick<ConnectorRow, 'id' | 'status' | 'installation_id'>,
+      installationBound: false,
+    }
+  }
+
+  const { data: current, error: currentError } = await table()
+    .select(HEARTBEAT_UPDATE_SELECT)
     .eq('id', auth.connector.id)
     .maybeSingle()
   if (currentError) throw currentError
@@ -216,7 +295,13 @@ export function createHeartbeatHandler(dependencies: HeartbeatDependencies = {})
       return jsonResponse({ error: 'payload_too_large', request_id: requestId }, 413)
     }
 
-    const auth = await authenticate(request, requestId)
+    let auth: ConnectorAuthResult | Response
+    try {
+      auth = await authenticate(request, requestId)
+    } catch (error) {
+      console.error(JSON.stringify({ request_id: requestId, stage: 'connector_auth', error: 'connector_auth_failed' }))
+      return jsonResponse({ error: 'service_unavailable', request_id: requestId }, 503)
+    }
     if (auth instanceof Response) return auth
 
     let body: unknown
@@ -286,7 +371,8 @@ export function createHeartbeatHandler(dependencies: HeartbeatDependencies = {})
         next_heartbeat_seconds: payload.livePollInterval,
       })
     } catch (error) {
-      console.error(JSON.stringify({ request_id: requestId, stage: 'heartbeat_handler', error: error instanceof Error ? error.message : String(error) }))
+      const safeLogCode = error instanceof ValidationError ? error.code : 'heartbeat_handler_failed'
+      console.error(JSON.stringify({ request_id: requestId, stage: 'heartbeat_handler', error: safeLogCode }))
       const publicErrorValue = publicError(error)
       return jsonResponse({ error: publicErrorValue.code, request_id: requestId }, publicErrorValue.status)
     }

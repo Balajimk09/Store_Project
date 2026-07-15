@@ -1,5 +1,5 @@
 import { CONNECTOR_TOKEN_HEADER, jsonResponse, type ConnectorAuthResult, type ConnectorRow } from '../_shared/connector-auth.ts'
-import { createHeartbeatHandler, type HeartbeatPayload, type HeartbeatUpdateResult } from './handler.ts'
+import { createHeartbeatHandler, defaultUpdateHeartbeat, validateHeartbeat, type HeartbeatPayload, type HeartbeatUpdateResult } from './handler.ts'
 
 type UpdateCall = {
   auth: ConnectorAuthResult
@@ -38,7 +38,7 @@ function payload(overrides: Record<string, unknown> = {}) {
     payload_version: '1',
     installation_id: INSTALLATION_ID,
     source_store_number: 'SYNTH',
-    service_version: '3.1.1-heartbeat2',
+    service_version: '3.1.2-heartbeat3',
     runtime_mode: 'Run',
     reported_state: 'ready',
     runtime_started_at: '2026-07-14T14:00:00.000Z',
@@ -232,7 +232,10 @@ Deno.test('Matching installation ID succeeds', async () => {
 })
 
 Deno.test('Different installation ID returns 409', async () => {
-  const { handler } = testHarness({ connector: connector({ installation_id: OTHER_INSTALLATION_ID }) })
+  const { handler } = testHarness({
+    connector: connector({ installation_id: OTHER_INSTALLATION_ID }),
+    update: async () => 'installation_mismatch',
+  })
   const response = await handler(request(payload(), { token: 'valid-token-value-that-is-long-enough' }))
   assertEquals(response.status, 409, 'different installation status')
 })
@@ -304,7 +307,7 @@ Deno.test('Response excludes token and secrets', async () => {
 
 Deno.test('Ready state clears old safe errors when counts show success', async () => {
   const { handler, calls } = testHarness()
-  await handler(request(payload({ last_error_code: 'old', last_error_message: 'old', consecutive_failure_count: 0, failed_count: 0 }), { token: 'valid-token-value-that-is-long-enough' }))
+  await handler(request(payload({ last_error_code: 'unknown_error', last_error_message: 'old', consecutive_failure_count: 0, failed_count: 0 }), { token: 'valid-token-value-that-is-long-enough' }))
   assertEquals(calls[0].updatePayload.last_error, null, 'ready clears error')
   assertEquals(calls[0].updatePayload.last_error_code, null, 'ready clears code')
 })
@@ -321,4 +324,302 @@ Deno.test('Installation mismatch never leaks the currently bound installation ID
   const text = await (await handler(request(payload(), { token: 'valid-token-value-that-is-long-enough' }))).text()
   assert(!text.includes(OTHER_INSTALLATION_ID), 'mismatch hides bound installation ID')
   assert(text.includes('installation_mismatch'), 'mismatch reports safe code')
+})
+
+Deno.test('Oversized optional error text is safely truncated', async () => {
+  const { handler, calls } = testHarness()
+  await handler(request(payload({
+    reported_state: 'error',
+    commander_status: 'error',
+    cloud_status: 'unknown',
+    last_error_code: 'unknown_error',
+    last_error_message: 'x'.repeat(1200),
+    consecutive_failure_count: 1,
+    failed_count: 1,
+    canonical_record_count: 1,
+    inserted_count: 0,
+    updated_count: 0,
+    unchanged_count: 0,
+  }), { token: 'valid-token-value-that-is-long-enough' }))
+  assertEquals(String(calls[0].updatePayload.last_error).length, 1000, 'truncated error length')
+})
+
+Deno.test('Sync completion cannot precede sync start', async () => {
+  const { handler } = testHarness()
+  const response = await handler(request(payload({
+    last_sync_started_at: '2026-07-14T14:59:30.000Z',
+    last_sync_completed_at: '2026-07-14T14:59:00.000Z',
+  }), { token: 'valid-token-value-that-is-long-enough' }))
+  assertEquals((await json(response)).error, 'last_sync_completed_at_before_started', 'timestamp ordering error')
+})
+
+Deno.test('Success timestamp cannot be after sync completion', async () => {
+  const { handler } = testHarness()
+  const response = await handler(request(payload({
+    last_sync_completed_at: '2026-07-14T14:59:00.000Z',
+    last_success_at: '2026-07-14T14:59:30.000Z',
+  }), { token: 'valid-token-value-that-is-long-enough' }))
+  assertEquals((await json(response)).error, 'last_success_at_after_completion', 'success timestamp ordering error')
+})
+
+Deno.test('Failure timestamp cannot be after sync completion', async () => {
+  const { handler } = testHarness()
+  const response = await handler(request(payload({
+    reported_state: 'degraded',
+    commander_status: 'error',
+    cloud_status: 'unknown',
+    last_error_code: 'unknown_error',
+    last_error_message: 'failed',
+    consecutive_failure_count: 1,
+    last_sync_completed_at: '2026-07-14T14:59:00.000Z',
+    last_success_at: null,
+    last_failure_at: '2026-07-14T14:59:30.000Z',
+  }), { token: 'valid-token-value-that-is-long-enough' }))
+  assertEquals((await json(response)).error, 'last_failure_at_after_completion', 'failure timestamp ordering error')
+})
+
+Deno.test('Runtime start cannot be after heartbeat time', async () => {
+  const { handler } = testHarness()
+  const response = await handler(request(payload({
+    runtime_started_at: '2026-07-14T15:00:00.000Z',
+    heartbeat_at: '2026-07-14T14:59:00.000Z',
+  }), { token: 'valid-token-value-that-is-long-enough' }))
+  assertEquals((await json(response)).error, 'runtime_started_at_after_heartbeat', 'runtime timestamp ordering error')
+})
+
+Deno.test('Count totals cannot exceed canonical count', async () => {
+  const { handler } = testHarness()
+  const response = await handler(request(payload({
+    canonical_record_count: 1,
+    inserted_count: 1,
+    updated_count: 1,
+    unchanged_count: 0,
+    failed_count: 0,
+  }), { token: 'valid-token-value-that-is-long-enough' }))
+  assertEquals((await json(response)).error, 'count_totals_exceed_canonical', 'count consistency error')
+})
+
+Deno.test('last_error_code allowlist is enforced', async () => {
+  const { handler } = testHarness()
+  const response = await handler(request(payload({
+    reported_state: 'degraded',
+    commander_status: 'error',
+    cloud_status: 'unknown',
+    last_error_code: 'raw_secret_stack_trace',
+    last_error_message: 'failed',
+    consecutive_failure_count: 1,
+  }), { token: 'valid-token-value-that-is-long-enough' }))
+  assertEquals((await json(response)).error, 'last_error_code_invalid', 'error code allowlist error')
+})
+
+Deno.test('runtime_mode allowlist is enforced', async () => {
+  const { handler } = testHarness()
+  const response = await handler(request(payload({ runtime_mode: 'DebugShell' }), { token: 'valid-token-value-that-is-long-enough' }))
+  assertEquals((await json(response)).error, 'runtime_mode_invalid', 'runtime mode error')
+})
+
+Deno.test('source store number length and characters are validated', async () => {
+  const { handler } = testHarness({ connector: connector({ source_store_number: null }) })
+  const response = await handler(request(payload({ source_store_number: '../bad' }), { token: 'valid-token-value-that-is-long-enough' }))
+  assertEquals((await json(response)).error, 'source_store_number_invalid', 'source store format error')
+})
+
+Deno.test('Database adapter exception returns 503 without details', async () => {
+  const { handler } = testHarness({ update: async () => { throw new Error('internal database detail') } })
+  const response = await handler(request(payload(), { token: 'valid-token-value-that-is-long-enough' }))
+  const body = await json(response)
+  assertEquals(response.status, 503, 'database exception status')
+  assertEquals(body.error, 'service_unavailable', 'database exception public error')
+  assertEquals(body.request_id, 'request-test', 'database exception request id')
+  assert(!JSON.stringify(body).includes('internal database detail'), 'database detail hidden')
+})
+
+Deno.test('Authentication exception is handled safely', async () => {
+  const handler = createHeartbeatHandler({
+    now: () => NOW,
+    requestId: () => 'request-test',
+    authenticateConnector: async () => {
+      throw new Error('raw auth failure detail')
+    },
+  })
+  const response = await handler(request(payload(), { token: 'valid-token-value-that-is-long-enough' }))
+  const body = await json(response)
+  assertEquals(response.status, 503, 'auth exception status')
+  assertEquals(body.error, 'service_unavailable', 'auth exception public error')
+  assertEquals(body.request_id, 'request-test', 'auth exception request id')
+  assert(!JSON.stringify(body).includes('raw auth failure detail'), 'auth detail hidden')
+})
+
+Deno.test('Response always has cache-control no-store', async () => {
+  const { handler } = testHarness()
+  const response = await handler(request(payload(), { token: 'valid-token-value-that-is-long-enough' }))
+  assertEquals(response.headers.get('cache-control'), 'no-store', 'cache-control header')
+})
+
+type FakeConnectorRow = {
+  id: string
+  status: string
+  installation_id: string | null
+  token_hash?: string
+}
+
+type FakeTableState = {
+  row: FakeConnectorRow | null
+  selectedFields: string[]
+  updates: Record<string, unknown>[]
+  failUpdate?: boolean
+}
+
+class FakeQuery {
+  private readonly filters: Record<string, unknown> = {}
+  private updatePayload: Record<string, unknown> | null = null
+  private selected = ''
+
+  constructor(private readonly state: FakeTableState) {}
+
+  update(payload: Record<string, unknown>) {
+    this.updatePayload = payload
+    return this
+  }
+
+  select(fields: string) {
+    this.selected = fields
+    this.state.selectedFields.push(fields)
+    return this
+  }
+
+  eq(field: string, value: unknown) {
+    this.filters[field] = value
+    return this
+  }
+
+  is(field: string, value: unknown) {
+    this.filters[field] = value
+    return this
+  }
+
+  async maybeSingle() {
+    if (this.state.failUpdate && this.updatePayload) {
+      return { data: null, error: { message: 'synthetic update failure' } }
+    }
+    const row = this.state.row
+    if (!row || !this.matches(row)) return { data: null, error: null }
+    if (this.updatePayload) {
+      this.state.updates.push(this.updatePayload)
+      this.state.row = { ...row, ...this.updatePayload } as FakeConnectorRow
+      return { data: this.project(this.state.row), error: null }
+    }
+    return { data: this.project(row), error: null }
+  }
+
+  private matches(row: FakeConnectorRow) {
+    for (const [field, value] of Object.entries(this.filters)) {
+      if ((row as unknown as Record<string, unknown>)[field] !== value) return false
+    }
+    return true
+  }
+
+  private project(row: FakeConnectorRow) {
+    const result: Record<string, unknown> = {}
+    for (const field of this.selected.split(',').map((part) => part.trim()).filter(Boolean)) {
+      result[field] = (row as unknown as Record<string, unknown>)[field]
+    }
+    return result
+  }
+}
+
+function fakeSupabase(state: FakeTableState) {
+  return {
+    from(name: string) {
+      assertEquals(name, 'store_pos_connectors', 'fake table name')
+      return new FakeQuery(state)
+    },
+  } as unknown as ConnectorAuthResult['supabase']
+}
+
+function fakeAuth(state: FakeTableState): ConnectorAuthResult {
+  return {
+    connector: connector({ id: 'connector-1', installation_id: state.row?.installation_id ?? null }),
+    store: { owner_id: 'owner-1' },
+    supabase: fakeSupabase(state),
+  }
+}
+
+function validatedPayload(overrides: Record<string, unknown> = {}) {
+  return validateHeartbeat(payload(overrides), connector(), NOW)
+}
+
+Deno.test('Default adapter binds null installation ID and returns installation_bound true', async () => {
+  const state: FakeTableState = { row: { id: 'connector-1', status: 'active', installation_id: null, token_hash: 'secret' }, selectedFields: [], updates: [] }
+  const result = await defaultUpdateHeartbeat(fakeAuth(state), validatedPayload(), { installation_id: INSTALLATION_ID, service_version: '3.1.2-heartbeat3' })
+  assert(typeof result !== 'string', 'adapter returns success')
+  assertEquals(result.installationBound, true, 'binding request is true')
+  assertEquals(state.row?.installation_id, INSTALLATION_ID, 'row bound to installation')
+  assert(state.selectedFields.every((fields) => !fields.includes('token_hash')), 'token_hash never selected')
+})
+
+Deno.test('Default adapter matching installation update returns installation_bound false', async () => {
+  const state: FakeTableState = { row: { id: 'connector-1', status: 'active', installation_id: INSTALLATION_ID, token_hash: 'secret' }, selectedFields: [], updates: [] }
+  const result = await defaultUpdateHeartbeat(fakeAuth(state), validatedPayload(), { installation_id: INSTALLATION_ID, reported_state: 'ready' })
+  assert(typeof result !== 'string', 'adapter returns success')
+  assertEquals(result.installationBound, false, 'matching request is false')
+  assertEquals(state.row?.status, 'active', 'administrative status unchanged')
+  assert(state.selectedFields.every((fields) => !fields.includes('token_hash')), 'token_hash never selected')
+})
+
+Deno.test('Default adapter mismatched installation returns installation_mismatch', async () => {
+  const state: FakeTableState = { row: { id: 'connector-1', status: 'active', installation_id: OTHER_INSTALLATION_ID }, selectedFields: [], updates: [] }
+  const result = await defaultUpdateHeartbeat(fakeAuth(state), validatedPayload(), { installation_id: INSTALLATION_ID })
+  assertEquals(result, 'installation_mismatch', 'mismatch result')
+})
+
+Deno.test('Default adapter disabled connector cannot update', async () => {
+  const state: FakeTableState = { row: { id: 'connector-1', status: 'disabled', installation_id: null }, selectedFields: [], updates: [] }
+  const result = await defaultUpdateHeartbeat(fakeAuth(state), validatedPayload(), { installation_id: INSTALLATION_ID })
+  assertEquals(result, 'unauthorized', 'disabled result')
+  assertEquals(state.updates.length, 0, 'disabled row not updated')
+})
+
+Deno.test('Default adapter deleted connector returns not_found', async () => {
+  const state: FakeTableState = { row: null, selectedFields: [], updates: [] }
+  const result = await defaultUpdateHeartbeat(fakeAuth(state), validatedPayload(), { installation_id: INSTALLATION_ID })
+  assertEquals(result, 'not_found', 'deleted result')
+})
+
+Deno.test('Default adapter database update error is thrown', async () => {
+  const state: FakeTableState = { row: { id: 'connector-1', status: 'active', installation_id: null }, selectedFields: [], updates: [], failUpdate: true }
+  let threw = false
+  try {
+    await defaultUpdateHeartbeat(fakeAuth(state), validatedPayload(), { installation_id: INSTALLATION_ID })
+  } catch {
+    threw = true
+  }
+  assert(threw, 'database update error thrown')
+})
+
+Deno.test('Default adapter concurrent same-ID binding has exactly one true result', async () => {
+  const state: FakeTableState = { row: { id: 'connector-1', status: 'active', installation_id: null }, selectedFields: [], updates: [] }
+  const results = await Promise.all([
+    defaultUpdateHeartbeat(fakeAuth(state), validatedPayload(), { installation_id: INSTALLATION_ID }),
+    defaultUpdateHeartbeat(fakeAuth(state), validatedPayload(), { installation_id: INSTALLATION_ID }),
+  ])
+  const boundCount = results.filter((result) => typeof result !== 'string' && result.installationBound).length
+  const successCount = results.filter((result) => typeof result !== 'string').length
+  assertEquals(successCount, 2, 'both same-ID requests succeed')
+  assertEquals(boundCount, 1, 'exactly one request reports binding')
+})
+
+Deno.test('Default adapter concurrent different-ID binding cannot overwrite', async () => {
+  const state: FakeTableState = { row: { id: 'connector-1', status: 'active', installation_id: null }, selectedFields: [], updates: [] }
+  const firstPayload = validatedPayload({ installation_id: INSTALLATION_ID })
+  const secondPayload = validatedPayload({ installation_id: OTHER_INSTALLATION_ID })
+  const results = await Promise.all([
+    defaultUpdateHeartbeat(fakeAuth(state), firstPayload, { installation_id: INSTALLATION_ID }),
+    defaultUpdateHeartbeat(fakeAuth(state), secondPayload, { installation_id: OTHER_INSTALLATION_ID }),
+  ])
+  const successCount = results.filter((result) => typeof result !== 'string').length
+  const mismatchCount = results.filter((result) => result === 'installation_mismatch').length
+  assertEquals(successCount, 1, 'one different-ID request succeeds')
+  assertEquals(mismatchCount, 1, 'one different-ID request mismatches')
+  assertEquals(state.row?.installation_id, INSTALLATION_ID, 'first binding is preserved')
 })

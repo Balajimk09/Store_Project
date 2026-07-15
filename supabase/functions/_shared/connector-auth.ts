@@ -108,9 +108,10 @@ export async function authenticateConnector(
     .eq('id', connector.store_id)
     .single()
 
-  if (storeError || !storeData?.owner_id) {
+  const store = storeData as StoreRow | null
+  if (storeError || !store?.owner_id) {
     return jsonResponse({ error: 'connector_misconfigured', request_id: requestId }, 409)
   }
 
-  return { supabase, connector, store: storeData as StoreRow }
+  return { supabase, connector, store }
 }

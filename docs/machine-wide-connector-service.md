@@ -236,7 +236,7 @@ Secrets are redacted before status is written.
 
 ## Remote Connector Heartbeat
 
-Package version `3.1.1-heartbeat2` adds hardened remote heartbeat reporting for future Online, Ready, Syncing, Delayed, Offline, Error, Setup Required, connector-version, and last-sync monitoring. Heartbeat fields extend the existing `store_pos_connectors` row; StorePulse does not create a competing connector-status table and does not overload the administrative `status = active/disabled` column.
+Package version `3.1.2-heartbeat3` adds hardened remote heartbeat reporting for future Online, Ready, Syncing, Delayed, Offline, Error, Setup Required, connector-version, and last-sync monitoring. Heartbeat fields extend the existing `store_pos_connectors` row; StorePulse does not create a competing connector-status table and does not overload the administrative `status = active/disabled` column.
 
 The machine stores a stable non-secret installation UUID at:
 

@@ -16,7 +16,7 @@ if (-not (Get-Command Invoke-StorePulseConnectorHeartbeat -ErrorAction SilentlyC
     . (Join-Path $PSScriptRoot "storepulse-connector-heartbeat.ps1")
 }
 
-$script:StorePulseRuntimeVersion = "3.1.1-heartbeat2"
+$script:StorePulseRuntimeVersion = "3.1.2-heartbeat3"
 
 function Get-StorePulseStateRoot {
     param([string]$ProgramDataRoot = "")

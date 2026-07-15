@@ -168,7 +168,7 @@ try {
     $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
     Assert-Equal -Actual $manifest.service_name -Expected "StorePulseConnector" -Message "manifest service name"
     Assert-Equal -Actual $manifest.service_display_name -Expected "StorePulse Connector Service" -Message "manifest display name"
-    Assert-Equal -Actual $manifest.version -Expected "3.1.1-heartbeat2" -Message "manifest heartbeat package version"
+    Assert-Equal -Actual $manifest.version -Expected "3.1.2-heartbeat3" -Message "manifest heartbeat package version"
     Assert-True -Condition (($manifest.required_files -contains "service\storepulse-windows-service.ps1") -and ($manifest.required_files -contains "service\storepulse-service-entrypoint.ps1")) -Message "manifest includes service files"
     Assert-Equal -Actual $manifest.bundled_node_runtime_relative_path -Expected "runtime\node" -Message "manifest declares private Node runtime path"
     Assert-True -Condition ($manifest.required_files -contains "service\node-runtime-manifest.json") -Message "manifest includes Node runtime manifest"
@@ -389,7 +389,7 @@ try {
         connector_token = "synthetic-token-value-that-is-long-enough"
     }
     $heartbeatStatus = [ordered]@{
-        runtime_version = "3.1.1-heartbeat2"
+        runtime_version = "3.1.2-heartbeat3"
         process_id = $PID
         started_at = (Get-Date).ToString("o")
         mode = "Run"

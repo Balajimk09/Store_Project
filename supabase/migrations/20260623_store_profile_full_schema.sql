@@ -85,11 +85,62 @@ create index if not exists stores_has_fuel_idx on public.stores(has_fuel);
 create index if not exists stores_business_legal_name_idx on public.stores(business_legal_name);
 create index if not exists stores_dba_name_idx on public.stores(dba_name);
 
-update public.stores
-set
-  address_line1 = coalesce(address_line1, address),
-  country = coalesce(country, 'United States'),
-  timezone = coalesce(timezone, 'America/Chicago'),
-  updated_at = now()
-where address is not null
-  and address_line1 is null;
+do $$
+declare
+  source_address_column text;
+  has_updated_at boolean;
+begin
+  if exists (
+    select 1
+    from information_schema.columns
+    where table_schema = 'public'
+      and table_name = 'stores'
+      and column_name = 'address'
+  ) then
+    source_address_column := 'address';
+  elsif exists (
+    select 1
+    from information_schema.columns
+    where table_schema = 'public'
+      and table_name = 'stores'
+      and column_name = 'store_address'
+  ) then
+    source_address_column := 'store_address';
+  end if;
+
+  if source_address_column is null then
+    return;
+  end if;
+
+  select exists (
+    select 1
+    from information_schema.columns
+    where table_schema = 'public'
+      and table_name = 'stores'
+      and column_name = 'updated_at'
+  )
+  into has_updated_at;
+
+  if has_updated_at then
+    execute format(
+      'update public.stores
+       set address_line1 = coalesce(address_line1, %1$I),
+           country = coalesce(country, ''United States''),
+           timezone = coalesce(timezone, ''America/Chicago''),
+           updated_at = now()
+       where %1$I is not null
+         and address_line1 is null',
+      source_address_column
+    );
+  else
+    execute format(
+      'update public.stores
+       set address_line1 = coalesce(address_line1, %1$I),
+           country = coalesce(country, ''United States''),
+           timezone = coalesce(timezone, ''America/Chicago'')
+       where %1$I is not null
+         and address_line1 is null',
+      source_address_column
+    );
+  end if;
+end $$;

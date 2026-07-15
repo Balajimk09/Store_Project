@@ -1,0 +1,10 @@
+{
+  "required_node_major": 20,
+  "expected_relative_path": "runtime\\node",
+  "executable_name": "node.exe",
+  "architecture": "x64",
+  "sha256": "56C1520EE33B801E8BDB92FB321CF2E98529735B6D12BD4A2A6DEC0AC0BAB937",
+  "source": "Official Node.js Windows x64 ZIP verified against SHASUMS256.txt",
+  "version": "20.20.2",
+  "notes": "Private StorePulse runtime. Do not fall back to globally installed Node."
+}

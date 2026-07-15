@@ -169,3 +169,11 @@ To start the connector automatically when Windows boots:
 Windows Task Scheduler is a more robust future option for production store laptops, but Task Scheduler setup is not built here.
 
 Before using the launcher on a real store laptop, make sure `connector/.env` exists and contains real connector values. Never commit `connector/.env` to git.
+
+## POS business dates for normalized transactions
+
+`connector/storepulse-normalize-transactions.ps1` supports an optional `-BusinessDate YYYY-MM-DD` parameter for closed Verifone periods.
+
+Live/current-shift payloads should omit `-BusinessDate`. When it is omitted, the normalizer does not emit a `business_date` field, and StorePulse derives `business_date` from `transaction_time` using the store timezone.
+
+Closed-period payloads should provide the POS business date explicitly. When `-BusinessDate` is supplied, every emitted canonical transaction includes that exact `business_date`, and the database uses it instead of deriving the date from the transaction timestamp. This is required for closed periods that continue after midnight.

@@ -162,6 +162,7 @@ try {
     $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
     Assert-Equal -Actual $manifest.service_name -Expected "StorePulseConnector" -Message "manifest service name"
     Assert-Equal -Actual $manifest.service_display_name -Expected "StorePulse Connector Service" -Message "manifest display name"
+    Assert-Equal -Actual $manifest.version -Expected "3.0.0-servicehost-cutover1" -Message "manifest cutover hotfix version"
     Assert-True -Condition (($manifest.required_files -contains "service\storepulse-windows-service.ps1") -and ($manifest.required_files -contains "service\storepulse-service-entrypoint.ps1")) -Message "manifest includes service files"
     Assert-Equal -Actual $manifest.bundled_node_runtime_relative_path -Expected "runtime\node" -Message "manifest declares private Node runtime path"
     Assert-True -Condition ($manifest.required_files -contains "service\node-runtime-manifest.json") -Message "manifest includes Node runtime manifest"
@@ -228,7 +229,7 @@ try {
 
     $global:CapturedServiceCommands = @()
     $serviceExecutor = { param([string]$Wrapper, [string[]]$Arguments) $global:CapturedServiceCommands += ,($Wrapper + " " + ($Arguments -join " ")); return "mocked" }
-    Install-StorePulseWindowsService -InstallRoot $installRoot -ProgramDataRoot $programDataRoot -StartupMode ManualPilot -Executor $serviceExecutor | Out-Null
+    Install-StorePulseWindowsService -InstallRoot $installRoot -ProgramDataRoot $programDataRoot -StartupMode ManualPilot -Executor $serviceExecutor -GetService { param($Name) $false } | Out-Null
     Assert-True -Condition (($global:CapturedServiceCommands -join "`n") -match "StorePulseConnector\.exe install") -Message "install command registers through WinSW wrapper"
     Assert-True -Condition (Test-Path -LiteralPath (Join-Path $hostRoot "StorePulseConnector.xml") -PathType Leaf) -Message "installer writes WinSW XML beside wrapper"
     $installedXml = Get-Content -LiteralPath (Join-Path $hostRoot "StorePulseConnector.xml") -Raw
@@ -236,6 +237,72 @@ try {
     Assert-True -Condition ($installedXml -match '<delayedAutoStart>false</delayedAutoStart>') -Message "ManualPilot remains stopped and not delayed auto"
     Assert-True -Condition ($installedXml -match '<onfailure action=\"restart\" delay=\"1 min\"' -and $installedXml -match '<onfailure action=\"restart\" delay=\"5 min\"' -and $installedXml -match '<onfailure action=\"restart\" delay=\"15 min\"') -Message "WinSW XML contains restart recovery policy"
     Assert-True -Condition (($global:CapturedServiceCommands -join "`n") -notmatch "synthetic-token|synthetic-password") -Message "service command generation excludes secrets"
+    Assert-Throws -ScriptBlock {
+        Install-StorePulseWindowsService -InstallRoot $installRoot -ProgramDataRoot $programDataRoot -StartupMode ManualPilot -Executor $serviceExecutor -GetService { param($Name) $true } | Out-Null
+    } -Message "fresh Install fails when service already exists"
+
+    $global:StartupState = [PSCustomObject]@{
+        name = "StorePulseConnector"
+        status = "Stopped"
+        start_mode = "Manual"
+        startup_mode = "ManualPilot"
+        delayed_auto_start = $false
+        account = "LocalSystem"
+        image_path = $wrapperPath
+    }
+    $global:ScCommands = @()
+    $stateReader = { param($Name) $global:StartupState }
+    $scExecutor = {
+        param([string]$Executable, [string[]]$Arguments)
+        $global:ScCommands += ,($Executable + " " + ($Arguments -join " "))
+        $mode = $Arguments[-1]
+        if ($mode -eq "delayed-auto") {
+            $global:StartupState.start_mode = "Auto"
+            $global:StartupState.startup_mode = "AutomaticDelayed"
+            $global:StartupState.delayed_auto_start = $true
+        }
+        elseif ($mode -eq "demand") {
+            $global:StartupState.start_mode = "Manual"
+            $global:StartupState.startup_mode = "ManualPilot"
+            $global:StartupState.delayed_auto_start = $false
+        }
+        return "mock sc"
+    }
+    Set-StorePulseServiceStartupMode -InstallRoot $installRoot -ProgramDataRoot $programDataRoot -StartupMode AutomaticDelayed -ScExecutor $scExecutor -StateReader $stateReader | Out-Null
+    $automaticXml = Get-Content -LiteralPath (Join-Path $hostRoot "StorePulseConnector.xml") -Raw
+    Assert-True -Condition (($global:ScCommands -join "`n") -match "sc\.exe config StorePulseConnector start= delayed-auto") -Message "SetAutomaticDelayed uses SCM delayed-auto configuration"
+    Assert-True -Condition ($automaticXml -match '<startmode>Automatic</startmode>' -and $automaticXml -match '<delayedAutoStart>true</delayedAutoStart>') -Message "SetAutomaticDelayed writes Automatic XML"
+    Assert-Equal -Actual $global:StartupState.status -Expected "Stopped" -Message "SetAutomaticDelayed leaves service stopped"
+    Assert-True -Condition (($global:ScCommands -join "`n") -notmatch "StorePulseConnector\.exe install") -Message "existing AutomaticDelayed transition does not invoke WinSW install"
+    Set-StorePulseServiceStartupMode -InstallRoot $installRoot -ProgramDataRoot $programDataRoot -StartupMode ManualPilot -ScExecutor $scExecutor -StateReader $stateReader | Out-Null
+    $manualXml = Get-Content -LiteralPath (Join-Path $hostRoot "StorePulseConnector.xml") -Raw
+    Assert-True -Condition (($global:ScCommands -join "`n") -match "sc\.exe config StorePulseConnector start= demand") -Message "SetManualPilot uses SCM demand configuration"
+    Assert-True -Condition ($manualXml -match '<startmode>Manual</startmode>' -and $manualXml -match '<delayedAutoStart>false</delayedAutoStart>') -Message "SetManualPilot writes Manual XML"
+    Assert-True -Condition (-not [bool]$global:StartupState.delayed_auto_start) -Message "SetManualPilot clears delayed-auto state"
+    $global:StartupState.status = "Running"
+    Assert-Throws -ScriptBlock {
+        Set-StorePulseServiceStartupMode -InstallRoot $installRoot -ProgramDataRoot $programDataRoot -StartupMode AutomaticDelayed -ScExecutor $scExecutor -StateReader $stateReader | Out-Null
+    } -Message "SetAutomaticDelayed fails before modifying a running service"
+    Assert-Throws -ScriptBlock {
+        Set-StorePulseServiceStartupMode -InstallRoot $installRoot -ProgramDataRoot $programDataRoot -StartupMode ManualPilot -ScExecutor $scExecutor -StateReader $stateReader | Out-Null
+    } -Message "SetManualPilot fails before modifying a running service"
+    $global:StartupState.status = "Stopped"
+    $previousXmlForRollback = Get-Content -LiteralPath (Join-Path $hostRoot "StorePulseConnector.xml") -Raw
+    $failingSc = { param([string]$Executable, [string[]]$Arguments) throw "synthetic sc failure" }
+    Assert-Throws -ScriptBlock {
+        Set-StorePulseServiceStartupMode -InstallRoot $installRoot -ProgramDataRoot $programDataRoot -StartupMode AutomaticDelayed -ScExecutor $failingSc -StateReader $stateReader | Out-Null
+    } -Message "SCM update failure fails closed"
+    Assert-Equal -Actual (Get-Content -LiteralPath (Join-Path $hostRoot "StorePulseConnector.xml") -Raw) -Expected $previousXmlForRollback -Message "SCM failure restores previous XML"
+    $mismatchSc = {
+        param([string]$Executable, [string[]]$Arguments)
+        $global:StartupState.start_mode = "Manual"
+        $global:StartupState.startup_mode = "ManualPilot"
+        $global:StartupState.delayed_auto_start = $false
+        return "mock mismatch"
+    }
+    Assert-Throws -ScriptBlock {
+        Set-StorePulseServiceStartupMode -InstallRoot $installRoot -ProgramDataRoot $programDataRoot -StartupMode AutomaticDelayed -ScExecutor $mismatchSc -StateReader $stateReader | Out-Null
+    } -Message "verification mismatch fails and rolls back"
 
     $global:ControlServiceState = [PSCustomObject]@{ Status = "Stopped" }
     Assert-True -Condition (-not (Test-StorePulseServiceInstalled -GetService { param($Name) $null })) -Message "service installed test handles absent service"
@@ -598,14 +665,14 @@ writeFileSync(summaryPath, JSON.stringify({
     Assert-True -Condition (($uninstallOutput -join "`n") -match "preserved") -Message "uninstall WhatIf preserves ProgramData"
 
     $controlSource = Get-Content -LiteralPath (Join-Path $serviceRoot "storepulse-service-control.ps1") -Raw
-    Assert-True -Condition ($controlSource -match 'InstallStatus' -and $controlSource -match 'PilotStatus' -and $controlSource -match 'SetAutomaticDelayed' -and $controlSource -match '"Start"' -and $controlSource -match '"Restart"') -Message "control script exposes native service lifecycle commands"
+    Assert-True -Condition ($controlSource -match 'InstallStatus' -and $controlSource -match 'PilotStatus' -and $controlSource -match 'CutoverStatus' -and $controlSource -match 'SetAutomaticDelayed' -and $controlSource -match '"Start"' -and $controlSource -match '"Restart"') -Message "control script exposes native service lifecycle commands"
     Assert-True -Condition ($controlSource -match 'StorePulse-CurrentShift-Sync' -and $controlSource -match 'AllowPilotWithScheduledTask') -Message "control Start has scheduled-task duplicate guard with explicit override"
     Assert-True -Condition ($controlSource.Contains('Remove-Item -LiteralPath $stopPath') -and $controlSource.Contains('Set-Content -LiteralPath $stopPath')) -Message "control Start clears stale stop file and Stop writes graceful stop file"
     $uninstallSource = Get-Content -LiteralPath (Join-Path $serviceRoot "uninstall-storepulse-machine-connector.ps1") -Raw
     Assert-True -Condition ($uninstallSource -match 'PurgeData' -and $uninstallSource -match 'ConfirmImpact = "High"') -Message "uninstall purge requires explicit destructive mode"
     $installerSource = Get-Content -LiteralPath (Join-Path $serviceRoot "install-storepulse-machine-connector.ps1") -Raw
-    Assert-True -Condition ($installerSource -match 'backupRoot' -and $installerSource -match 'Stop-StorePulseWindowsService' -and $installerSource -notmatch 'Start-StorePulseWindowsService') -Message "installer contains upgrade rollback without automatic service start"
-    Assert-True -Condition ($installerSource -match 'Repair' -and $installerSource -match 'Install-StorePulseWindowsService') -Message "installer contains repair registration path"
+    Assert-True -Condition ($installerSource -match 'backupRoot' -and $installerSource -notmatch 'Start-StorePulseWindowsService') -Message "installer contains upgrade rollback without automatic service start"
+    Assert-True -Condition ($installerSource -match 'Resolve-StorePulseInstallerStartupMode' -and $installerSource -match 'Set-StorePulseServiceStartupMode') -Message "installer preserves or explicitly applies startup mode for existing services"
     Assert-True -Condition ($installerSource.IndexOf('Test-StorePulseNodeRuntime') -lt $installerSource.LastIndexOf('Install-StorePulseWindowsService -InstallRoot $resolvedInstallRoot')) -Message "installer validates Node runtime before service registration"
     Assert-True -Condition ($installerSource.IndexOf('Test-StorePulseWinSWBinary') -lt $installerSource.LastIndexOf('Install-StorePulseWindowsService -InstallRoot $resolvedInstallRoot')) -Message "installer validates WinSW before service registration"
     Assert-True -Condition ($installerSource -match 'Read-StorePulseMachineConfig' -and $installerSource -match 'Read-StorePulseMachineSecrets') -Message "installer validates config and secrets before registration"

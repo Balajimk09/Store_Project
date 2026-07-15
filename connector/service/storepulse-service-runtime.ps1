@@ -13,7 +13,7 @@ if (-not (Get-Command Test-StorePulseNodeRuntime -ErrorAction SilentlyContinue))
     . (Join-Path $PSScriptRoot "storepulse-node-runtime.ps1")
 }
 
-$script:StorePulseRuntimeVersion = "3.0.0-checkpoint2"
+$script:StorePulseRuntimeVersion = "3.0.0-servicehost-cutover1"
 
 function Get-StorePulseStateRoot {
     param([string]$ProgramDataRoot = "")

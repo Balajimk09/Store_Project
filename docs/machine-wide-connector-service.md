@@ -134,6 +134,10 @@ Startup is explicit:
 - `ManualPilot`: service is installed as Manual and remains stopped. This is the default pilot mode so a reboot cannot start a duplicate connector while the legacy scheduled task is still active.
 - `AutomaticDelayed`: service is installed as Automatic delayed-start and is used only during explicit cutover.
 
+Fresh service registration and existing-service reconfiguration are separate operations. WinSW `install` is used only when `StorePulseConnector` is not already registered. Installed-service startup-mode changes update both the WinSW XML and the Service Control Manager registration with `sc.exe config StorePulseConnector start= demand` for `ManualPilot` or `sc.exe config StorePulseConnector start= delayed-auto` for `AutomaticDelayed`.
+
+Startup-mode transitions require the service to be stopped. `SetAutomaticDelayed` also requires valid config, encrypted machine secrets, private Node, WinSW, Verifone runtime, and the legacy `StorePulse-CurrentShift-Sync` scheduled task to be disabled. `SetManualPilot` is the safe rollback mode and can be used whether the legacy scheduled task is enabled or disabled. If XML or SCM update verification fails, the helper restores the previous XML/SCM state and leaves the service stopped.
+
 Service start fails closed when `StorePulse-CurrentShift-Sync` is enabled unless an administrator passes the explicit pilot override. Source code never disables that scheduled task automatically.
 
 This repository checkpoint intentionally does not:
@@ -250,6 +254,10 @@ Each event includes a timestamp, level, event name, and sanitized data object. L
 `storepulse-service-control.ps1` provides local commands only:
 
 - `InstallStatus`: report whether the Windows Service registration exists.
+- `PilotStatus`: report the ManualPilot plan and legacy scheduled-task state.
+- `CutoverStatus`: report service, config, secrets, runtime, task, worker-enable, and readiness fields without changing anything.
+- `SetManualPilot`: configure an installed stopped service as Manual without invoking WinSW `install`.
+- `SetAutomaticDelayed`: configure an installed stopped service as Automatic delayed-start only after cutover prerequisites pass.
 - `Status`: print the heartbeat/status JSON.
 - `Start`: request Windows Service start.
 - `Stop`: create the stop file and, for service control flows, request service stop through the service helper.
@@ -330,7 +338,9 @@ Logs must not include:
 
 ## Upgrades
 
-Upgrade stops `StorePulseConnector`, backs up the existing Program Files connector tree, replaces binaries, restores the previous binaries on copy/registration failure, and restarts the service after a successful upgrade. ProgramData config, secrets, logs, working data, archives, and state are durable machine state and must survive binary replacement.
+Upgrade requires `StorePulseConnector` to be stopped, backs up the existing Program Files connector tree, replaces binaries, restores the previous binaries on copy or startup-mode failure, regenerates the WinSW XML, reapplies the preserved or explicitly requested SCM startup mode, and leaves the service stopped. ProgramData config, secrets, logs, working data, archives, and state are durable machine state and must survive binary replacement.
+
+Repair and upgrade preserve the existing startup mode when `-StartupMode` is omitted. Passing `-StartupMode ManualPilot` or `-StartupMode AutomaticDelayed` explicitly changes the installed mode after package files are repaired or upgraded. Neither repair nor upgrade invokes WinSW `install` when the service already exists.
 
 Rollback checklist:
 

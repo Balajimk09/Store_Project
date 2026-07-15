@@ -7,7 +7,7 @@ param(
     [string]$SourceRoot = "",
     [string]$InstallRoot = "",
     [string]$ProgramDataRoot = "",
-    [ValidateSet("ManualPilot", "AutomaticDelayed")][string]$StartupMode = "ManualPilot"
+    [ValidateSet("", "ManualPilot", "AutomaticDelayed")][string]$StartupMode = ""
 )
 
 Set-StrictMode -Version Latest
@@ -71,14 +71,39 @@ function Copy-StorePulseInstalledFiles {
     }
 }
 
+function Resolve-StorePulseInstallerStartupMode {
+    param(
+        [Parameter(Mandatory)][string]$Mode,
+        [string]$RequestedStartupMode = "",
+        [Parameter(Mandatory)][string]$InstallRoot,
+        [bool]$ServiceInstalled
+    )
+    if (-not [string]::IsNullOrWhiteSpace($RequestedStartupMode)) {
+        return $RequestedStartupMode
+    }
+    if ($Mode -eq "Install") {
+        return "ManualPilot"
+    }
+    if ($ServiceInstalled) {
+        return Get-StorePulseInstalledStartupMode -InstallRoot $InstallRoot
+    }
+    return "ManualPilot"
+}
+
 $resolvedSourceRoot = if ([string]::IsNullOrWhiteSpace($SourceRoot)) { Split-Path -Parent $PSScriptRoot } else { $SourceRoot }
 $resolvedInstallRoot = Get-StorePulseInstallRoot -Root $InstallRoot
 $resolvedProgramDataRoot = Get-StorePulseProgramDataRoot -Root $ProgramDataRoot
 $manifest = Read-StorePulseInstallManifest -SourceRoot $resolvedSourceRoot
 $mode = if ($Install) { "Install" } elseif ($Repair) { "Repair" } elseif ($Upgrade) { "Upgrade" } else { "ValidateOnly" }
+$startupModeWasExplicit = $PSBoundParameters.ContainsKey("StartupMode") -and -not [string]::IsNullOrWhiteSpace($StartupMode)
+$serviceInstalledBefore = Test-StorePulseServiceInstalled
+$effectiveStartupMode = Resolve-StorePulseInstallerStartupMode -Mode $mode -RequestedStartupMode $StartupMode -InstallRoot $resolvedInstallRoot -ServiceInstalled:$serviceInstalledBefore
 
 if ($mode -ne "ValidateOnly" -and -not (Test-StorePulseElevation)) {
     throw "$mode must be run from an elevated PowerShell session."
+}
+if ($mode -eq "Install" -and $serviceInstalledBefore) {
+    throw "StorePulseConnector is already installed. Use -Repair or -Upgrade for an existing service."
 }
 
 Write-Host "StorePulse machine connector installer"
@@ -87,7 +112,8 @@ Write-Host ("Source root: {0}" -f $resolvedSourceRoot)
 Write-Host ("Install root: {0}" -f $resolvedInstallRoot)
 Write-Host ("ProgramData root: {0}" -f $resolvedProgramDataRoot)
 Write-Host ("Service: {0}" -f $manifest.service_name)
-Write-Host ("Startup mode: {0}" -f $StartupMode)
+Write-Host ("Startup mode: {0}" -f $effectiveStartupMode)
+Write-Host ("Startup mode source: {0}" -f $(if ($startupModeWasExplicit) { "explicit" } elseif ($serviceInstalledBefore -and $mode -in @("Repair", "Upgrade")) { "preserved" } else { "default" }))
 Write-Host "ProgramData config, secrets, logs, working data, archive, and state are preserved."
 Write-Host "No employee Windows password is requested."
 Write-Host "A private Node runtime is expected under runtime\\node; this installer never installs Node globally."
@@ -97,7 +123,7 @@ foreach ($relative in $manifest.required_files) {
     if (-not (Test-Path -LiteralPath $source -PathType Leaf)) { throw "Missing source file: $source" }
 }
 
-$servicePlan = Install-StorePulseWindowsService -InstallRoot $resolvedInstallRoot -ProgramDataRoot $resolvedProgramDataRoot -StartupMode $StartupMode -ValidateOnly
+$servicePlan = Install-StorePulseWindowsService -InstallRoot $resolvedInstallRoot -ProgramDataRoot $resolvedProgramDataRoot -StartupMode $effectiveStartupMode -ValidateOnly
 Write-Host ("Planned service executable: {0}" -f $servicePlan.wrapper_path)
 Write-Host ("Planned service ImagePath: {0}" -f $servicePlan.image_path)
 Write-Host ("Planned service startup mode: {0}" -f $servicePlan.startup_mode)
@@ -136,14 +162,24 @@ if ($PSCmdlet.ShouldProcess($resolvedInstallRoot, "$mode StorePulse connector fi
     if ($Upgrade -and (Test-Path -LiteralPath $resolvedInstallRoot -PathType Container)) {
         $backupRoot = Join-Path ([IO.Path]::GetTempPath()) ("storepulse-upgrade-backup-" + [guid]::NewGuid().ToString("N"))
         Copy-Item -LiteralPath $resolvedInstallRoot -Destination $backupRoot -Recurse -Force
-        Stop-StorePulseWindowsService -ErrorAction SilentlyContinue
+        if ($serviceInstalledBefore) {
+            $serviceState = Get-StorePulseServiceConfiguration
+            if ([string]$serviceState.status -ne "Stopped") {
+                throw "Upgrade requires StorePulseConnector to be Stopped."
+            }
+        }
     }
 
     try {
         Copy-StorePulseInstalledFiles -Manifest $manifest -SourceRoot $resolvedSourceRoot -InstallRoot $resolvedInstallRoot
         Test-StorePulseNodeRuntime -InstallRoot $resolvedInstallRoot -ManifestPath (Join-Path (Join-Path $resolvedInstallRoot "service") "node-runtime-manifest.json") | Out-Null
         Test-StorePulseWinSWBinary -InstallRoot $resolvedInstallRoot -ManifestPath (Join-Path (Join-Path $resolvedInstallRoot "service") "winsw-manifest.json") | Out-Null
-        Install-StorePulseWindowsService -InstallRoot $resolvedInstallRoot -ProgramDataRoot $resolvedProgramDataRoot -StartupMode $StartupMode | Out-Null
+        if ($serviceInstalledBefore) {
+            Set-StorePulseServiceStartupMode -InstallRoot $resolvedInstallRoot -ProgramDataRoot $resolvedProgramDataRoot -StartupMode $effectiveStartupMode | Out-Null
+        }
+        else {
+            Install-StorePulseWindowsService -InstallRoot $resolvedInstallRoot -ProgramDataRoot $resolvedProgramDataRoot -StartupMode $effectiveStartupMode | Out-Null
+        }
     }
     catch {
         if ($null -ne $backupRoot -and (Test-Path -LiteralPath $backupRoot -PathType Container)) {
@@ -156,6 +192,6 @@ if ($PSCmdlet.ShouldProcess($resolvedInstallRoot, "$mode StorePulse connector fi
         if ($null -ne $backupRoot) { Remove-Item -LiteralPath $backupRoot -Recurse -Force -ErrorAction SilentlyContinue }
     }
     Write-Host ("Install layer complete. Service executable: {0}" -f (Get-StorePulseServiceWrapperPath -InstallRoot $resolvedInstallRoot))
-    Write-Host ("Installed startup mode: {0}" -f $StartupMode)
+    Write-Host ("Installed startup mode: {0}" -f $effectiveStartupMode)
     Write-Host "Next safe step: verify pilot readiness, then use service-control Start only during controlled cutover."
 }

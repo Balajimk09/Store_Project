@@ -10,6 +10,8 @@ if (-not (Get-Command Get-StorePulseInstallRoot -ErrorAction SilentlyContinue)) 
 $script:StorePulseServiceName = "StorePulseConnector"
 $script:StorePulseServiceDisplayName = "StorePulse Connector Service"
 $script:StorePulseServiceDescription = "Runs the StorePulse machine-wide POS connector runtime."
+$script:StorePulseManualPilot = "ManualPilot"
+$script:StorePulseAutomaticDelayed = "AutomaticDelayed"
 
 function ConvertTo-StorePulseQuotedArgument {
     param([Parameter(Mandatory)][string]$Value)
@@ -177,6 +179,24 @@ function Write-StorePulseWinSWXml {
     return $xmlPath
 }
 
+function Read-StorePulseWinSWXmlStartupMode {
+    param([Parameter(Mandatory)][string]$InstallRoot)
+    $xmlPath = Get-StorePulseServiceWrapperXmlPath -InstallRoot $InstallRoot
+    if (-not (Test-Path -LiteralPath $xmlPath -PathType Leaf)) {
+        return $null
+    }
+    [xml]$xml = Get-Content -LiteralPath $xmlPath -Raw
+    $startMode = [string]$xml.service.startmode
+    $delayed = [string]$xml.service.delayedAutoStart
+    if ($startMode -ieq "Automatic" -and $delayed -ieq "true") {
+        return $script:StorePulseAutomaticDelayed
+    }
+    if ($startMode -ieq "Manual") {
+        return $script:StorePulseManualPilot
+    }
+    return $null
+}
+
 function Get-StorePulseServiceBinaryPath {
     param([string]$InstallRoot = "")
     $resolvedInstallRoot = Get-StorePulseInstallRoot -Root $InstallRoot
@@ -230,6 +250,27 @@ function Invoke-StorePulseWinSWCommand {
     return $output
 }
 
+function Invoke-StorePulseScConfig {
+    param(
+        [Parameter(Mandatory)][ValidateSet("ManualPilot", "AutomaticDelayed")][string]$StartupMode,
+        [scriptblock]$Executor = $null
+    )
+    $startValue = if ($StartupMode -eq $script:StorePulseAutomaticDelayed) { "delayed-auto" } else { "demand" }
+    $arguments = @("config", $script:StorePulseServiceName, "start=", $startValue)
+    if ($null -ne $Executor) {
+        return & $Executor "sc.exe" $arguments
+    }
+    $sc = Get-Command sc.exe -ErrorAction SilentlyContinue
+    if ($null -eq $sc) {
+        throw "sc.exe was not found."
+    }
+    $output = & $sc.Source @arguments 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        throw "SCM startup-mode update failed: sc.exe $($arguments -join ' ') $($output -join ' ')"
+    }
+    return $output
+}
+
 function Test-StorePulseServiceInstalled {
     param(
         [string]$Name = $script:StorePulseServiceName,
@@ -257,6 +298,177 @@ function Get-StorePulseServiceStatus {
     return Get-Service -Name $Name -ErrorAction Stop
 }
 
+function Get-StorePulseServiceConfiguration {
+    param(
+        [string]$Name = $script:StorePulseServiceName,
+        [scriptblock]$Reader = $null
+    )
+    if ($null -ne $Reader) {
+        return & $Reader $Name
+    }
+    $service = Get-CimInstance -ClassName Win32_Service -Filter ("Name='{0}'" -f $Name.Replace("'", "''")) -ErrorAction Stop
+    if ($null -eq $service) {
+        throw "Service is not installed: $Name"
+    }
+    $registryPath = "HKLM:\SYSTEM\CurrentControlSet\Services\$Name"
+    $delayedAutoStart = $false
+    if (Test-Path -LiteralPath $registryPath) {
+        $registry = Get-ItemProperty -LiteralPath $registryPath -ErrorAction SilentlyContinue
+        if ($null -ne $registry -and $registry.PSObject.Properties["DelayedAutoStart"]) {
+            $delayedAutoStart = ([int]$registry.DelayedAutoStart -eq 1)
+        }
+    }
+    $startupMode = if ([string]$service.StartMode -eq "Auto" -and $delayedAutoStart) {
+        $script:StorePulseAutomaticDelayed
+    }
+    elseif ([string]$service.StartMode -eq "Manual") {
+        $script:StorePulseManualPilot
+    }
+    else {
+        [string]$service.StartMode
+    }
+    return [PSCustomObject]@{
+        name = [string]$service.Name
+        status = [string]$service.State
+        start_mode = [string]$service.StartMode
+        startup_mode = $startupMode
+        delayed_auto_start = $delayedAutoStart
+        account = [string]$service.StartName
+        image_path = [string]$service.PathName
+    }
+}
+
+function Assert-StorePulseInstalledServiceStopped {
+    param(
+        [Parameter(Mandatory)]$Configuration,
+        [string]$Operation = "Service reconfiguration"
+    )
+    if ($null -eq $Configuration) {
+        throw "$Operation requires StorePulseConnector to be installed."
+    }
+    if ([string]$Configuration.status -ne "Stopped") {
+        throw "$Operation requires StorePulseConnector to be Stopped."
+    }
+}
+
+function Assert-StorePulseServiceStartupModeState {
+    param(
+        [Parameter(Mandatory)]$Configuration,
+        [Parameter(Mandatory)][ValidateSet("ManualPilot", "AutomaticDelayed")][string]$ExpectedStartupMode
+    )
+    if ($ExpectedStartupMode -eq $script:StorePulseAutomaticDelayed) {
+        if ([string]$Configuration.start_mode -notin @("Auto", "Automatic")) {
+            throw "Service StartMode is not Automatic."
+        }
+        if (-not [bool]$Configuration.delayed_auto_start) {
+            throw "Service delayed-auto state is not enabled."
+        }
+        return $true
+    }
+    if ([string]$Configuration.start_mode -ne "Manual") {
+        throw "Service StartMode is not Manual."
+    }
+    if ([bool]$Configuration.delayed_auto_start) {
+        throw "Service delayed-auto state is still enabled."
+    }
+    return $true
+}
+
+function Get-StorePulseInstalledStartupMode {
+    param(
+        [string]$InstallRoot = "",
+        [scriptblock]$StateReader = $null
+    )
+    $config = Get-StorePulseServiceConfiguration -Reader $StateReader
+    if ($config.startup_mode -in @($script:StorePulseManualPilot, $script:StorePulseAutomaticDelayed)) {
+        return [string]$config.startup_mode
+    }
+    $xmlMode = Read-StorePulseWinSWXmlStartupMode -InstallRoot (Get-StorePulseInstallRoot -Root $InstallRoot)
+    if ($null -ne $xmlMode) {
+        return $xmlMode
+    }
+    throw "Installed service startup mode could not be determined."
+}
+
+function Set-StorePulseServiceStartupMode {
+    [CmdletBinding(SupportsShouldProcess = $true)]
+    param(
+        [string]$InstallRoot = "",
+        [string]$ProgramDataRoot = "",
+        [Parameter(Mandatory)][ValidateSet("ManualPilot", "AutomaticDelayed")][string]$StartupMode,
+        [scriptblock]$ScExecutor = $null,
+        [scriptblock]$StateReader = $null
+    )
+    $resolvedInstallRoot = Get-StorePulseInstallRoot -Root $InstallRoot
+    $resolvedProgramDataRoot = Get-StorePulseProgramDataRoot -Root $ProgramDataRoot
+    $xmlPath = Get-StorePulseServiceWrapperXmlPath -InstallRoot $resolvedInstallRoot
+    $previousXmlExists = Test-Path -LiteralPath $xmlPath -PathType Leaf
+    $previousXml = if ($previousXmlExists) { Get-Content -LiteralPath $xmlPath -Raw } else { $null }
+    $previousMode = $null
+    $previousConfig = Get-StorePulseServiceConfiguration -Reader $StateReader
+    Assert-StorePulseInstalledServiceStopped -Configuration $previousConfig -Operation "Startup-mode update"
+    if ($previousConfig.startup_mode -in @($script:StorePulseManualPilot, $script:StorePulseAutomaticDelayed)) {
+        $previousMode = [string]$previousConfig.startup_mode
+    }
+    else {
+        $previousMode = Read-StorePulseWinSWXmlStartupMode -InstallRoot $resolvedInstallRoot
+    }
+
+    $xmlWritten = $false
+    try {
+        if ($PSCmdlet.ShouldProcess($script:StorePulseServiceName, "Set startup mode to $StartupMode")) {
+            Write-StorePulseWinSWXml -InstallRoot $resolvedInstallRoot -ProgramDataRoot $resolvedProgramDataRoot -StartupMode $StartupMode | Out-Null
+            $xmlWritten = $true
+            Invoke-StorePulseScConfig -StartupMode $StartupMode -Executor $ScExecutor | Out-Null
+            $newConfig = Get-StorePulseServiceConfiguration -Reader $StateReader
+            Assert-StorePulseInstalledServiceStopped -Configuration $newConfig -Operation "Startup-mode verification"
+            Assert-StorePulseServiceStartupModeState -Configuration $newConfig -ExpectedStartupMode $StartupMode | Out-Null
+            $xmlMode = Read-StorePulseWinSWXmlStartupMode -InstallRoot $resolvedInstallRoot
+            if ($xmlMode -ne $StartupMode) {
+                throw "WinSW XML startup mode does not match $StartupMode."
+            }
+        }
+        return [PSCustomObject]@{
+            ok = $true
+            service_name = $script:StorePulseServiceName
+            startup_mode = $StartupMode
+            status = "Stopped"
+            xml_path = $xmlPath
+        }
+    }
+    catch {
+        $original = $_.Exception.Message
+        $rollbackErrors = New-Object System.Collections.Generic.List[string]
+        try {
+            if ($previousXmlExists) {
+                $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+                [IO.File]::WriteAllText($xmlPath, $previousXml, $utf8NoBom)
+            }
+            elseif ($xmlWritten -and (Test-Path -LiteralPath $xmlPath -PathType Leaf)) {
+                Remove-Item -LiteralPath $xmlPath -Force
+            }
+        }
+        catch {
+            [void]$rollbackErrors.Add("XML rollback failed: $($_.Exception.Message)")
+        }
+        if ($previousMode -in @($script:StorePulseManualPilot, $script:StorePulseAutomaticDelayed)) {
+            try {
+                Invoke-StorePulseScConfig -StartupMode $previousMode -Executor $ScExecutor | Out-Null
+                $restored = Get-StorePulseServiceConfiguration -Reader $StateReader
+                Assert-StorePulseInstalledServiceStopped -Configuration $restored -Operation "Startup-mode rollback verification"
+                Assert-StorePulseServiceStartupModeState -Configuration $restored -ExpectedStartupMode $previousMode | Out-Null
+            }
+            catch {
+                [void]$rollbackErrors.Add("SCM rollback failed: $($_.Exception.Message)")
+            }
+        }
+        if ($rollbackErrors.Count -gt 0) {
+            throw "$original Rollback also failed: $($rollbackErrors -join ' ')"
+        }
+        throw $original
+    }
+}
+
 function Install-StorePulseWindowsService {
     [CmdletBinding(SupportsShouldProcess = $true)]
     param(
@@ -264,12 +476,16 @@ function Install-StorePulseWindowsService {
         [string]$ProgramDataRoot = "",
         [ValidateSet("ManualPilot", "AutomaticDelayed")][string]$StartupMode = "ManualPilot",
         [switch]$ValidateOnly,
-        [scriptblock]$Executor = $null
+        [scriptblock]$Executor = $null,
+        [scriptblock]$GetService = $null
     )
     $resolvedInstallRoot = Get-StorePulseInstallRoot -Root $InstallRoot
     $resolvedProgramDataRoot = Get-StorePulseProgramDataRoot -Root $ProgramDataRoot
     $plan = Get-StorePulseServicePlan -InstallRoot $resolvedInstallRoot -ProgramDataRoot $resolvedProgramDataRoot -StartupMode $StartupMode
     if ($ValidateOnly) { return $plan }
+    if (Test-StorePulseServiceInstalled -GetService $GetService) {
+        throw "StorePulseConnector is already installed; use Set-StorePulseServiceStartupMode for startup-mode changes."
+    }
     Test-StorePulseWinSWBinary -InstallRoot $resolvedInstallRoot -ManifestPath (Get-StorePulseWinSWManifestPath -InstallRoot $resolvedInstallRoot) | Out-Null
     Write-StorePulseWinSWXml -InstallRoot $resolvedInstallRoot -ProgramDataRoot $resolvedProgramDataRoot -StartupMode $StartupMode | Out-Null
     if ($PSCmdlet.ShouldProcess($script:StorePulseServiceName, "Install StorePulse WinSW service")) {

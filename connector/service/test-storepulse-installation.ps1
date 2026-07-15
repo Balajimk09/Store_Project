@@ -62,6 +62,40 @@ if ($Mode -in @("ValidateServicePlan", "All")) {
         Add-StorePulseCheckResult $checks "service_plan" $true ("Service plan valid for " + $plan.service_name + " using " + $plan.startup_mode)
     }
     catch { Add-StorePulseCheckResult $checks "service_plan" $false $_.Exception.Message }
+    try {
+        $state = [PSCustomObject]@{
+            name = "StorePulseConnector"
+            status = "Stopped"
+            start_mode = "Manual"
+            startup_mode = "ManualPilot"
+            delayed_auto_start = $false
+            account = "LocalSystem"
+            image_path = Get-StorePulseServiceWrapperPath -InstallRoot $resolvedInstallRoot
+        }
+        $commands = New-Object System.Collections.ArrayList
+        $reader = { param($Name) $state }
+        $executor = {
+            param([string]$Executable, [string[]]$Arguments)
+            [void]$commands.Add($Executable + " " + ($Arguments -join " "))
+            if ($Arguments[-1] -eq "delayed-auto") {
+                $state.start_mode = "Auto"
+                $state.startup_mode = "AutomaticDelayed"
+                $state.delayed_auto_start = $true
+            }
+            elseif ($Arguments[-1] -eq "demand") {
+                $state.start_mode = "Manual"
+                $state.startup_mode = "ManualPilot"
+                $state.delayed_auto_start = $false
+            }
+        }
+        Set-StorePulseServiceStartupMode -InstallRoot $resolvedInstallRoot -ProgramDataRoot $programData -StartupMode AutomaticDelayed -ScExecutor $executor -StateReader $reader | Out-Null
+        Set-StorePulseServiceStartupMode -InstallRoot $resolvedInstallRoot -ProgramDataRoot $programData -StartupMode ManualPilot -ScExecutor $executor -StateReader $reader | Out-Null
+        $commandText = $commands -join "`n"
+        if ($commandText -match "StorePulseConnector\.exe install") { throw "Existing-service transition invoked WinSW install." }
+        if ($commandText -notmatch "start= delayed-auto" -or $commandText -notmatch "start= demand") { throw "SCM startup-mode commands were not generated." }
+        Add-StorePulseCheckResult $checks "service_startup_transitions" $true "Existing-service startup-mode transitions use SCM config without WinSW install."
+    }
+    catch { Add-StorePulseCheckResult $checks "service_startup_transitions" $false $_.Exception.Message }
 }
 if ($Mode -in @("SmokeTestOnce", "All")) {
     try {

@@ -7,7 +7,9 @@
     "build": "next build",
     "start": "next start",
     "lint": "next lint",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test:pos-publish-jobs": "node --test scripts/test-pos-publish-jobs.mjs",
+    "test:pos-publish-jobs:sql": "node scripts/test-pos-publish-jobs-sql.mjs"
   },
   "dependencies": {
     "@hookform/resolvers": "^3.9.0",
@@ -75,5 +77,8 @@
     "vaul": "^0.9.9",
     "xlsx": "^0.18.5",
     "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "pg": "^8.16.3"
   }
 }

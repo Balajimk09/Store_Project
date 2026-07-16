@@ -69,6 +69,7 @@ export function createClaimPosPublishJobHandler(dependencies: ClaimDependencies 
       validateClaimRequest(await readBoundedJsonBody(request))
       const job = await claimJob(auth)
       if (!job) return new Response(null, { status: 204, headers: { 'cache-control': 'no-store' } })
+      if (!isSafeClaimedPublishJob(job)) throw new Error('invalid_claim_result')
       return jsonResponse({
         job_id: job.job_id,
         operation: job.operation,

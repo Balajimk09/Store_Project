@@ -5,6 +5,7 @@ import { usePathname, useRouter } from 'next/navigation';
 import { useEffect, useState, type ElementType, type ReactNode } from 'react';
 import {
   BarChart3,
+  Cable,
   Building2,
   Crown,
   CreditCard,
@@ -31,6 +32,7 @@ import { cn } from '@/lib/utils';
 const superadminNavItems = [
   { href: '/superadmin', label: 'Overview', icon: LayoutDashboard },
   { href: '/superadmin/stores', label: 'Stores', icon: Store },
+  { href: '/superadmin/connectors', label: 'Connectors', icon: Cable },
   { href: '/superadmin/products', label: 'Products', icon: Package },
   { href: '/superadmin/vendors', label: 'Vendors', icon: Truck },
   { href: '/superadmin/users', label: 'Users', icon: Users },

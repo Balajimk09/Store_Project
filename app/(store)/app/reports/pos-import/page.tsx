@@ -7,6 +7,7 @@ import { DashboardShell, PageHeader } from '@/components/layout/sidebar';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { useAuth } from '@/lib/auth';
+import { deriveConnectorStatus, type ConnectorStatusSeverity } from '@/lib/connector-status';
 import { supabase } from '@/lib/supabase';
 
 type ImportSummary = {
@@ -94,9 +95,29 @@ type ConnectorStatusRow = {
   connector_name: string;
   source_system: string;
   status: 'active' | 'disabled' | string;
+  service_version: string | null;
+  runtime_mode: string | null;
+  reported_state: string | null;
+  runtime_started_at: string | null;
+  last_heartbeat_at: string | null;
+  reported_heartbeat_at: string | null;
   last_seen_at: string | null;
   last_upload_at: string | null;
+  last_sync_started_at: string | null;
+  last_sync_completed_at: string | null;
+  last_success_at: string | null;
+  last_failure_at: string | null;
+  last_error_code: string | null;
   last_error: string | null;
+  commander_status: string | null;
+  cloud_status: string | null;
+  live_poll_interval_seconds: number | null;
+  last_canonical_record_count: number | null;
+  last_inserted_count: number | null;
+  last_updated_count: number | null;
+  last_unchanged_count: number | null;
+  last_failed_count: number | null;
+  heartbeat_payload_version: string | null;
   created_at: string | null;
   updated_at: string | null;
 };
@@ -147,20 +168,11 @@ function formatSourceSystem(value: string) {
     .join(' ');
 }
 
-function getConnectorStatusLabel(connector: ConnectorStatusRow) {
-  if (connector.status === 'disabled') return 'Disabled';
-  if (!connector.last_seen_at) return 'Never connected';
-
-  const lastSeen = new Date(connector.last_seen_at).getTime();
-  if (Number.isNaN(lastSeen)) return 'Never connected';
-
-  const fifteenMinutes = 15 * 60 * 1000;
-  return Date.now() - lastSeen <= fifteenMinutes ? 'Online recently' : 'Not seen recently';
-}
-
-function getConnectorStatusClass(label: string) {
-  if (label === 'Disabled') return 'bg-destructive/10 text-destructive';
-  if (label === 'Online recently') return 'bg-emerald-100 text-emerald-700';
+function getConnectorStatusClass(severity: ConnectorStatusSeverity) {
+  if (severity === 'success') return 'bg-emerald-100 text-emerald-700';
+  if (severity === 'danger') return 'bg-destructive/10 text-destructive';
+  if (severity === 'warning') return 'bg-amber-100 text-amber-800';
+  if (severity === 'info') return 'bg-primary/10 text-primary';
   return 'bg-secondary text-muted-foreground';
 }
 
@@ -206,9 +218,29 @@ export default function PosImportPage() {
           connector_name,
           source_system,
           status,
+          service_version,
+          runtime_mode,
+          reported_state,
+          runtime_started_at,
+          last_heartbeat_at,
+          reported_heartbeat_at,
           last_seen_at,
           last_upload_at,
+          last_sync_started_at,
+          last_sync_completed_at,
+          last_success_at,
+          last_failure_at,
+          last_error_code,
           last_error,
+          commander_status,
+          cloud_status,
+          live_poll_interval_seconds,
+          last_canonical_record_count,
+          last_inserted_count,
+          last_updated_count,
+          last_unchanged_count,
+          last_failed_count,
+          heartbeat_payload_version,
           created_at,
           updated_at
         `)
@@ -432,7 +464,7 @@ export default function PosImportPage() {
           ) : (
             <div className="mt-5 space-y-3">
               {connectors.map((connector) => {
-                const statusLabel = getConnectorStatusLabel(connector);
+                const derivedStatus = deriveConnectorStatus(connector);
                 return (
                   <div key={connector.id} className="rounded-xl border border-border bg-background p-4">
                     <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
@@ -440,15 +472,20 @@ export default function PosImportPage() {
                         <h3 className="font-semibold text-foreground">{connector.connector_name}</h3>
                         <p className="text-sm text-muted-foreground">{formatSourceSystem(connector.source_system)}</p>
                       </div>
-                      <span className={`inline-flex w-fit rounded-full px-3 py-1 text-xs font-medium ${getConnectorStatusClass(statusLabel)}`}>
-                        {statusLabel}
+                      <span className={`inline-flex w-fit rounded-full px-3 py-1 text-xs font-medium ${getConnectorStatusClass(derivedStatus.severity)}`} title={derivedStatus.explanation}>
+                        {derivedStatus.label}
                       </span>
                     </div>
                     <div className="mt-4 grid gap-3 text-sm sm:grid-cols-2 lg:grid-cols-4">
-                      <ConnectorDetail label="Status" value={connector.status || 'Unknown'} />
-                      <ConnectorDetail label="Last seen" value={formatDate(connector.last_seen_at)} />
-                      <ConnectorDetail label="Last upload" value={formatDate(connector.last_upload_at)} />
-                      <ConnectorDetail label="Created" value={formatDate(connector.created_at)} />
+                      <ConnectorDetail label="Connector version" value={connector.service_version || 'Unknown'} />
+                      <ConnectorDetail label="Commander status" value={connector.commander_status || 'Unknown'} />
+                      <ConnectorDetail label="Cloud status" value={connector.cloud_status || 'Unknown'} />
+                      <ConnectorDetail label="Last heartbeat" value={formatDate(connector.last_heartbeat_at || connector.last_seen_at)} />
+                      <ConnectorDetail label="Last successful sync" value={formatDate(connector.last_success_at)} />
+                      <ConnectorDetail label="Inserted" value={String(connector.last_inserted_count ?? 0)} />
+                      <ConnectorDetail label="Updated" value={String(connector.last_updated_count ?? 0)} />
+                      <ConnectorDetail label="Unchanged" value={String(connector.last_unchanged_count ?? 0)} />
+                      <ConnectorDetail label="Failed" value={String(connector.last_failed_count ?? 0)} />
                     </div>
                     {connector.last_error ? (
                       <div className="mt-4 rounded-lg border border-border bg-secondary/30 p-3 text-sm">

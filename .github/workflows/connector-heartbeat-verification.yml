@@ -57,6 +57,9 @@ jobs:
             supabase/functions/report-pos-connector-heartbeat/index.ts \
             supabase/functions/report-pos-connector-heartbeat/handler.ts \
             supabase/functions/report-pos-connector-heartbeat/index.test.ts \
+            supabase/functions/_shared/connector-auth.test.ts \
+            supabase/functions/claim-pos-publish-job/index.test.ts \
+            supabase/functions/report-pos-publish-job-status/index.test.ts \
             2>&1 | tee ci-artifacts/deno/deno-check.log
 
       - name: Run heartbeat Edge Function tests
@@ -66,6 +69,9 @@ jobs:
             --node-modules-dir=none \
             --allow-env \
             supabase/functions/report-pos-connector-heartbeat/index.test.ts \
+            supabase/functions/_shared/connector-auth.test.ts \
+            supabase/functions/claim-pos-publish-job/index.test.ts \
+            supabase/functions/report-pos-publish-job-status/index.test.ts \
             2>&1 | tee ci-artifacts/deno/deno-test.log
 
       - name: Require executable Deno coverage
@@ -181,6 +187,7 @@ jobs:
             20260715232534
             20260716010554
             20260716051950
+            20260716162947
           )
           supabase migration repair --local --status reverted "${pending_versions[@]}" \
             2>&1 | tee ci-artifacts/database/migration-history-simulation-revert.log

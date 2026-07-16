@@ -179,6 +179,7 @@ jobs:
             20260714093000
             20260715170000
             20260715232534
+            20260716010554
           )
           supabase migration repair --local --status reverted "${pending_versions[@]}" \
             2>&1 | tee ci-artifacts/database/migration-history-simulation-revert.log

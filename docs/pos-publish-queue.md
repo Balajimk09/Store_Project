@@ -54,3 +54,24 @@ npm run test:pos-publish-jobs:sql
 ```
 
 Start the local Supabase stack first. The runner verifies the actual `pos_publish_jobs` constraints, trigger transitions, indexes, and owner-scoped RLS policies; it does not print database credentials or fixture data.
+
+## Connector publish API contract
+
+`claim-pos-publish-job` and `report-pos-publish-job-status` are connector-authenticated Edge Functions. They use the existing `x-storepulse-connector-token` hash lookup only to resolve the connector server-side. Request bodies never select a connector, store, owner, database URL, command, XML payload, or credential.
+
+The Edge Functions call service-role-only database RPCs. `claim_pos_publish_job` locks the oldest pending row for the authenticated connector with `FOR UPDATE SKIP LOCKED`, verifies the connector/store/product relationship, and returns only the product UPC, two-decimal requested price, and fixed update_price operation. Invalid product relationships, UPCs, or requested prices are safely terminal-failed without returning a job.
+
+`report_pos_publish_job_status` accepts only `sending`, `verifying`, `completed`, or `failed`. Completion requires a canonical UPC and price matching the queued values. Failure codes are allowlisted and messages are short, sanitized, and rejected if they resemble credentials, URLs, XML, or request dumps. The worker never receives a service-role key.
+
+Both connector endpoints accept `POST` with `Content-Type: application/json` only. They read request streams with an 8 KiB limit before JSON parsing, reject empty or malformed input, and require price strings with exactly two decimal places such as `1.25`. Failure messages are limited to 240 printable characters and reject credentials, authorization schemes, tokens, API keys, stack traces, request/response dumps, URLs, XML-like data, JWT-shaped strings, and long secret-shaped values. Rejected input is never echoed or stored.
+
+The claim and report RPCs are executable only by `service_role`; the Edge Functions resolve connector identity from the hashed `x-storepulse-connector-token` server-side and never accept connector, store, or owner identity from a request body. Connector authentication and worker processing are not deployed by this change.
+
+Run the local contract tests after `npx supabase@2.109.1 db reset --local`:
+
+```bash
+npm run test:connector-publish-api
+npm run test:pos-publish-jobs:rpc-sql
+```
+
+The standard RPC tests roll their fixtures back. The concurrency case must use two separately committed local sessions so `FOR UPDATE SKIP LOCKED` can be tested accurately; its uniquely generated auth, store, product, connector, and queue fixtures are removed in a `finally` block and then verified absent. It never contacts a linked or remote database.

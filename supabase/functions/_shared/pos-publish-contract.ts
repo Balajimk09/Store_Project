@@ -34,11 +34,14 @@ export const PUBLISH_FAILURE_CODES = new Set([
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 const PRICE_PATTERN = /^(?:0|[1-9]\d*)\.\d{2}$/
+const CANONICAL_UPC_PATTERN = /^[0-9]{14}$/
+const RFC3339_PATTERN = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,9})?(Z|[+-]\d{2}:\d{2})$/
 const VERSION_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/
 const SENSITIVE_MESSAGE_PATTERN = /(?:authorization|bearer|basic\s+auth|access[_ ]?token|refresh[_ ]?token|token|set-cookie|cookie|password|passwd|secret|api[_ ]?key|apikey|session|credential|private[_ ]?key|service(?:[_ -])?role|supabase[_ ]?key|stack\s*trace|traceback|request\s*(?:headers|body|dump)|response\s*(?:headers|body|dump)|curl|https?:\/\/|<[^>]*>|<\?xml|xmlns\s*=|eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}|\b[0-9a-f]{32,}\b|\b[A-Za-z0-9+/_-]{48,}={0,2}\b)/i
 
 export const MAX_JSON_BODY_BYTES = 8 * 1024
 export const MAX_FAILURE_MESSAGE_LENGTH = 240
+export const CANONICAL_UPC_LENGTH = 14
 
 export class PublishValidationError extends Error {
   constructor(public code: string, public status = 400) {
@@ -56,8 +59,30 @@ export function requiredUuid(value: unknown, code: string): string {
 }
 
 export function canonicalUpc(value: unknown, code: string): string {
-  if (typeof value !== 'string' || !/^\d+$/.test(value.trim())) throw new PublishValidationError(code)
-  return value.trim()
+  if (typeof value !== 'string' || !CANONICAL_UPC_PATTERN.test(value)) {
+    throw new PublishValidationError(code)
+  }
+  return value
+}
+
+export function strictRfc3339Timestamp(value: unknown, code: string): string {
+  if (typeof value !== 'string') throw new PublishValidationError(code)
+  const match = RFC3339_PATTERN.exec(value)
+  if (!match) throw new PublishValidationError(code)
+  const [, yearText, monthText, dayText, hourText, minuteText, secondText, zone] = match
+  const year = Number(yearText)
+  const month = Number(monthText)
+  const day = Number(dayText)
+  const hour = Number(hourText)
+  const minute = Number(minuteText)
+  const second = Number(secondText)
+  const daysInMonth = new Date(Date.UTC(year, month, 0)).getUTCDate()
+  const offsetHour = zone === 'Z' ? 0 : Number(zone.slice(1, 3))
+  const offsetMinute = zone === 'Z' ? 0 : Number(zone.slice(4, 6))
+  if (month < 1 || month > 12 || day < 1 || day > daysInMonth || hour > 23 || minute > 59 || second > 59 || offsetHour > 14 || offsetMinute > 59 || (offsetHour === 14 && offsetMinute !== 0) || !Number.isFinite(Date.parse(value))) {
+    throw new PublishValidationError(code)
+  }
+  return value
 }
 
 export function decimalPrice(value: unknown, code: string): string {
@@ -200,8 +225,7 @@ export function isSafeClaimedPublishJob(value: unknown): value is ClaimedPublish
       && typeof value.attempt === 'number'
       && Number.isInteger(value.attempt)
       && value.attempt >= 1
-      && typeof value.claimed_at === 'string'
-      && Number.isFinite(Date.parse(value.claimed_at))
+      && strictRfc3339Timestamp(value.claimed_at, 'claimed_at_invalid') === value.claimed_at
   } catch {
     return false
   }

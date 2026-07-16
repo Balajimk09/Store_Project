@@ -15,7 +15,7 @@ const idempotencyKey = () => `local-rpc-${randomUUID()}`;
 const tokenHash = (value) => createHash('sha256').update(value).digest('hex');
 
 async function createFixtures(client) {
-  const ids = Object.fromEntries(['owner', 'otherOwner', 'store', 'otherStore', 'product', 'otherProduct', 'connector', 'sameStoreOtherConnector', 'otherConnector'].map((key) => [key, randomUUID()]));
+  const ids = Object.fromEntries(['owner', 'otherOwner', 'store', 'otherStore', 'product', 'invalidProduct', 'otherProduct', 'connector', 'sameStoreOtherConnector', 'otherConnector'].map((key) => [key, randomUUID()]));
   await client.query(
     `insert into auth.users (id, aud, role, email, encrypted_password, email_confirmed_at, raw_app_meta_data, raw_user_meta_data)
      values ($1, 'authenticated', 'authenticated', $2, 'local-test-password-hash', now(), '{}'::jsonb, '{}'::jsonb),
@@ -25,9 +25,10 @@ async function createFixtures(client) {
   await client.query(`insert into public.stores (id, owner_id, store_name) values ($1, $2, 'Local RPC test store'), ($3, $4, 'Other local RPC test store')`, [ids.store, ids.owner, ids.otherStore, ids.otherOwner]);
   await client.query(
     `insert into public.products (id, store_id, owner_id, upc, name, category, brand, cost_price, selling_price, stock, reorder_level)
-     values ($1, $2, $3, '0123456789012', 'Local RPC product', 'Test', 'StorePulse', 1, 1, 1, 0),
-            ($4, $5, $6, '0987654321098', 'Other RPC product', 'Test', 'StorePulse', 1, 1, 1, 0)`,
-    [ids.product, ids.store, ids.owner, ids.otherProduct, ids.otherStore, ids.otherOwner]
+     values ($1, $2, $3, '00012345678901', 'Local RPC product', 'Test', 'StorePulse', 1, 1, 1, 0),
+             ($4, $2, $3, '00000000000002', 'Invalid UPC RPC product', 'Test', 'StorePulse', 1, 1, 1, 0),
+             ($5, $6, $7, '00098765432109', 'Other RPC product', 'Test', 'StorePulse', 1, 1, 1, 0)`,
+    [ids.product, ids.store, ids.owner, ids.invalidProduct, ids.otherProduct, ids.otherStore, ids.otherOwner]
   );
   await client.query(
     `insert into public.store_pos_connectors (id, store_id, connector_name, source_system, token_hash, status, metadata)
@@ -49,12 +50,12 @@ async function createFixtures(client) {
 }
 
 async function insertJob(client, ids, overrides = {}) {
-  const values = { store: ids.store, product: ids.product, owner: ids.owner, connector: ids.connector, upc: '0123456789012', price: 1.25, key: idempotencyKey(), ...overrides };
+  const values = { store: ids.store, product: ids.product, owner: ids.owner, connector: ids.connector, upc: '00012345678901', price: 1.25, key: idempotencyKey(), createdAt: null, ...overrides };
   const { rows } = await client.query(
-    `insert into public.pos_publish_jobs (store_id, product_id, requested_by, assigned_connector_id, operation, status, payload, requested_price, idempotency_key)
-     values ($1, $2, $3, $4, 'update_price', 'pending', jsonb_build_object('price', $5::numeric), $5::numeric, $6)
+    `insert into public.pos_publish_jobs (store_id, product_id, requested_by, assigned_connector_id, operation, status, payload, requested_price, idempotency_key, created_at)
+     values ($1, $2, $3, $4, 'update_price', 'pending', jsonb_build_object('price', $5::numeric), $5::numeric, $6, coalesce($7::timestamptz, now()))
      returning id`,
-    [values.store, values.product, values.owner, values.connector, values.price, values.key]
+    [values.store, values.product, values.owner, values.connector, values.price, values.key, values.createdAt]
   );
   return rows[0].id;
 }
@@ -115,7 +116,7 @@ async function run() {
       const first = await insertJob(client, ids); await new Promise((resolve) => setTimeout(resolve, 3)); const second = await insertJob(client, ids);
       const { rows: expectedRows } = await client.query("select id from public.pos_publish_jobs where id in ($1, $2) order by created_at asc, id asc limit 1", [first, second]);
       const claim = await rpcClaim(client, ids.connector);
-      assert.equal(claim.job_id, expectedRows[0].id); assert.equal(claim.operation, 'update_price'); assert.equal(claim.price, '1.25'); assert.equal(claim.upc, '0123456789012');
+      assert.equal(claim.job_id, expectedRows[0].id); assert.equal(claim.operation, 'update_price'); assert.equal(claim.price, '1.25'); assert.equal(claim.upc, '00012345678901');
       assert.equal(await rpcClaim(client, ids.otherConnector), null);
       const { rows } = await client.query("select count(*)::int as pending_count from public.pos_publish_jobs where id in ($1, $2) and status = 'pending'", [first, second]); assert.equal(rows[0].pending_count, 1);
       await cancelPendingJobs(client, ids.connector);
@@ -134,13 +135,13 @@ async function run() {
       assert.equal(await rpcClaim(client, ids.connector), null);
       ({ rows } = await client.query('select status, audit_metadata ->> \'failure_code\' as code from public.pos_publish_jobs where id = $1', [missingJobId]));
       assert.deepEqual(rows[0], { status: 'failed', code: 'product_store_mismatch' });
-      await client.query("insert into public.products (id, store_id, owner_id, upc, name, category, brand, cost_price, selling_price, stock, reorder_level) values ($1, $2, $3, '0123456789012', 'Local RPC product', 'Test', 'StorePulse', 1, 1, 1, 0)", [ids.product, ids.store, ids.owner]);
+      await client.query("insert into public.products (id, store_id, owner_id, upc, name, category, brand, cost_price, selling_price, stock, reorder_level) values ($1, $2, $3, '00012345678901', 'Local RPC product', 'Test', 'StorePulse', 1, 1, 1, 0)", [ids.product, ids.store, ids.owner]);
 
       await client.query("update public.products set upc = 'bad-upc' where id = $1", [ids.product]);
       const jobId = await insertJob(client, ids); assert.equal(await rpcClaim(client, ids.connector), null);
       ({ rows } = await client.query('select status, audit_metadata ->> \'failure_code\' as code from public.pos_publish_jobs where id = $1', [jobId]));
       assert.deepEqual(rows[0], { status: 'failed', code: 'invalid_product_upc' });
-      await client.query("update public.products set upc = '0123456789012' where id = $1", [ids.product]);
+      await client.query("update public.products set upc = '00012345678901' where id = $1", [ids.product]);
 
       const invalidPriceJobId = await insertJob(client, ids);
       await client.query('alter table public.pos_publish_jobs drop constraint pos_publish_jobs_requested_price_check');
@@ -152,6 +153,76 @@ async function run() {
       ({ rows } = await client.query('select status, audit_metadata ->> \'failure_code\' as code from public.pos_publish_jobs where id = $1', [invalidPriceJobId]));
       assert.deepEqual(rows[0], { status: 'failed', code: 'invalid_requested_price' });
     });
+    test('claim accepts only fourteen-digit UPCs and safely terminal-fails invalid UPC jobs', async () => {
+      await cancelPendingJobs(client, ids.connector);
+      const invalidUpcs = ['0001234567890', '000123456789012', '1'.repeat(80), '00012345-678901', 'ABCDEFGHIJKLMN'];
+      for (const upc of invalidUpcs) {
+        await client.query('update public.products set upc = $1 where id = $2', [upc, ids.product]);
+        const jobId = await insertJob(client, ids);
+        assert.equal(await rpcClaim(client, ids.connector), null, 'invalid UPC job is never returned');
+        const { rows } = await client.query(
+          `select status, attempt_count, claimed_at, claimed_by_connector_id, audit_metadata ->> 'failure_code' as code, audit_metadata::text as metadata
+           from public.pos_publish_jobs where id = $1`,
+          [jobId],
+        );
+        assert.equal(rows[0].status, 'failed');
+        assert.equal(rows[0].attempt_count, 0, 'invalid UPC rejection does not consume an attempt');
+        assert.equal(rows[0].claimed_at, null);
+        assert.equal(rows[0].claimed_by_connector_id, null);
+        assert.equal(rows[0].code, 'invalid_product_upc');
+        assert.equal(rows[0].metadata.includes(upc), false, 'invalid UPC is absent from safe metadata');
+      }
+
+      await client.query("update public.products set upc = '00000000000001' where id = $1", [ids.product]);
+      const validJobId = await insertJob(client, ids);
+      const claimed = await rpcClaim(client, ids.connector);
+      assert.equal(claimed.job_id, validJobId);
+      assert.equal(claimed.upc, '00000000000001', 'leading zeros are preserved');
+      assert.equal((await rpcReport(client, ids.connector, validJobId, 'sending')).status, 'sending');
+      assert.equal((await rpcReport(client, ids.connector, validJobId, 'verifying')).status, 'verifying');
+      assert.equal((await rpcReport(client, ids.connector, validJobId, 'completed', { upc: '00000000000001', price: 1.25 })).status, 'completed');
+      await client.query("update public.products set upc = '00012345678901' where id = $1", [ids.product]);
+    });
+    test('an invalid oldest UPC job fails before a valid newer job is claimed without stranding either job', async () => {
+      await cancelPendingJobs(client, ids.connector);
+      await client.query("update public.products set upc = 'bad-upc' where id = $1", [ids.invalidProduct]);
+      const invalidJobId = await insertJob(client, ids, {
+        product: ids.invalidProduct,
+        createdAt: '2026-01-01T00:00:00.000Z',
+      });
+      const validJobId = await insertJob(client, ids, {
+        product: ids.product,
+        createdAt: '2026-01-01T00:00:01.000Z',
+      });
+
+      assert.equal(await rpcClaim(client, ids.connector), null, 'the invalid oldest job is never returned as work');
+      let { rows } = await client.query(
+        `select status, attempt_count, claimed_at, claimed_by_connector_id, audit_metadata ->> 'failure_code' as code, audit_metadata::text as metadata
+         from public.pos_publish_jobs where id = $1`,
+        [invalidJobId],
+      );
+      assert.deepEqual(rows[0], {
+        status: 'failed',
+        attempt_count: 0,
+        claimed_at: null,
+        claimed_by_connector_id: null,
+        code: 'invalid_product_upc',
+        metadata: '{"failure_code": "invalid_product_upc"}',
+      });
+
+      const claimed = await rpcClaim(client, ids.connector);
+      assert.equal(claimed.job_id, validJobId, 'a newer valid job remains claimable after the invalid job fails');
+      assert.equal(claimed.upc, '00012345678901', 'the valid leading-zero UPC is preserved');
+      assert.equal((await rpcReport(client, ids.connector, validJobId, 'sending')).status, 'sending');
+      assert.equal((await rpcReport(client, ids.connector, validJobId, 'verifying')).status, 'verifying');
+      assert.equal((await rpcReport(client, ids.connector, validJobId, 'completed', { upc: '00012345678901', price: 1.25 })).status, 'completed');
+
+      ({ rows } = await client.query('select id, status from public.pos_publish_jobs where id in ($1, $2) order by id', [invalidJobId, validJobId]));
+      assert.deepEqual(rows.sort((a, b) => a.id.localeCompare(b.id)), [
+        { id: invalidJobId, status: 'failed' },
+        { id: validJobId, status: 'completed' },
+      ].sort((a, b) => a.id.localeCompare(b.id)), 'the ordering fixtures leave no pending or claimed job stranded');
+    });
     test('report RPC enforces sending, verifying, and matching completion', async () => {
       await cancelPendingJobs(client, ids.connector);
       await insertJob(client, ids);
@@ -160,8 +231,8 @@ async function run() {
       assert.equal((await rpcReport(client, ids.connector, jobId, 'sending')).status, 'sending');
       assert.equal((await rpcReport(client, ids.connector, jobId, 'verifying')).status, 'verifying');
       await expectFailure(client, () => rpcReport(client, ids.connector, jobId, 'completed', { upc: '0000000000000', price: 1.25 }));
-      await expectFailure(client, () => rpcReport(client, ids.connector, jobId, 'completed', { upc: '0123456789012', price: 1.26 }));
-      assert.equal((await rpcReport(client, ids.connector, jobId, 'completed', { upc: '0123456789012', price: 1.25 })).status, 'completed');
+      await expectFailure(client, () => rpcReport(client, ids.connector, jobId, 'completed', { upc: '00012345678901', price: 1.26 }));
+      assert.equal((await rpcReport(client, ids.connector, jobId, 'completed', { upc: '00012345678901', price: 1.25 })).status, 'completed');
       await expectFailure(client, () => rpcReport(client, ids.connector, jobId, 'sending'));
     });
     test('report RPC prevents wrong and cross-store connectors, pending completion, unsafe failures, and unknown codes', async () => {
@@ -169,7 +240,7 @@ async function run() {
       const jobId = await insertJob(client, ids);
       await expectFailure(client, () => rpcReport(client, ids.sameStoreOtherConnector, jobId, 'sending'));
       await expectFailure(client, () => rpcReport(client, ids.otherConnector, jobId, 'sending'));
-      await expectFailure(client, () => rpcReport(client, ids.connector, jobId, 'completed', { upc: '0123456789012', price: 1.25 }));
+      await expectFailure(client, () => rpcReport(client, ids.connector, jobId, 'completed', { upc: '00012345678901', price: 1.25 }));
       const claimed = await rpcClaim(client, ids.connector);
       await expectFailure(client, () => rpcReport(client, ids.connector, claimed.job_id, 'failed', { code: 'unknown_code', message: 'safe message' }));
       await expectFailure(client, () => rpcReport(client, ids.connector, claimed.job_id, 'failed', { code: 'internal_connector_error', message: 'token=secret' }));

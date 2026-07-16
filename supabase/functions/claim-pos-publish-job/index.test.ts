@@ -83,7 +83,7 @@ Deno.test('claim returns only the allowlisted job shape', async () => {
       job_id: JOB_ID,
       operation: 'update_price',
       product_id: PRODUCT_ID,
-      upc: '0123456789012',
+      upc: '00012345678901',
       price: '1.25',
       attempt: 1,
       claimed_at: '2026-07-16T16:00:00.000Z',
@@ -100,6 +100,55 @@ Deno.test('claim returns only the allowlisted job shape', async () => {
   assert(!text.includes(RAW_TOKEN), 'raw token is omitted')
   assert(!text.includes('payload'), 'payload is omitted')
   assert(!text.includes('owner_id'), 'owner id is omitted')
+})
+
+Deno.test('claim rejects non-canonical UPCs and invalid timestamps without echoing the payload', async () => {
+  const invalidValues: unknown[] = [
+    '0001234567890',
+    '000123456789012',
+    '1'.repeat(64),
+    '1'.repeat(65),
+    '00012345-678901',
+    '00012345678901 ',
+    '+00123456789012',
+    12345678901234,
+  ]
+  for (const upc of invalidValues) {
+    const handler = createClaimPosPublishJobHandler({
+      authenticateConnector: async () => fakeAuth(),
+      claimJob: async () => ({
+        job_id: JOB_ID,
+        operation: 'update_price',
+        product_id: PRODUCT_ID,
+        upc,
+        price: '1.25',
+        attempt: 1,
+        claimed_at: '2026-07-16T16:00:00.000Z',
+      } as never),
+    })
+    const response = await handler(request(validBody))
+    const text = await response.text()
+    assertEquals(response.status, 503, 'invalid claim status')
+    assert(!text.includes(String(upc)), 'invalid UPC is not echoed')
+  }
+})
+
+Deno.test('shared claim contract accepts database timestamps and rejects non-RFC3339 timestamps', async () => {
+  const validTimestamps = ['2026-07-16T16:00:00.000Z', '2026-07-16T16:00:00Z', '2026-07-16T16:00:00+05:30']
+  for (const claimed_at of validTimestamps) {
+    const handler = createClaimPosPublishJobHandler({
+      authenticateConnector: async () => fakeAuth(),
+      claimJob: async () => ({ job_id: JOB_ID, operation: 'update_price', product_id: PRODUCT_ID, upc: '00012345678901', price: '1.25', attempt: 1, claimed_at }),
+    })
+    assertEquals((await handler(request(validBody))).status, 200, 'valid timestamp status')
+  }
+  for (const claimed_at of ['2026-07-16', '2026-07-16T16:00:00', '2026-02-30T16:00:00Z', '2026-07-16T16:00:00Z trailing', 'July 16, 2026']) {
+    const handler = createClaimPosPublishJobHandler({
+      authenticateConnector: async () => fakeAuth(),
+      claimJob: async () => ({ job_id: JOB_ID, operation: 'update_price', product_id: PRODUCT_ID, upc: '00012345678901', price: '1.25', attempt: 1, claimed_at }),
+    })
+    assertEquals((await handler(request(validBody))).status, 503, 'invalid timestamp status')
+  }
 })
 
 Deno.test('claim rejects worker identity and arbitrary capability fields', async () => {

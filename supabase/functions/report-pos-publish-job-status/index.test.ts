@@ -70,7 +70,7 @@ Deno.test('wrong verification UPC and non-two-decimal price are rejected by the 
     throw error
   })
   const wrongUpc = await tested(request({ job_id: JOB_ID, status: 'completed', verification: { upc: 'not-digits', price: '1.25' } }))
-  const wrongPrice = await tested(request({ job_id: JOB_ID, status: 'completed', verification: { upc: '0123456789012', price: '1.2' } }))
+  const wrongPrice = await tested(request({ job_id: JOB_ID, status: 'completed', verification: { upc: '00012345678901', price: '1.2' } }))
   assertEquals(wrongUpc.status, 400, 'wrong UPC rejected before RPC')
   assertEquals(wrongPrice.status, 400, 'wrong price rejected before RPC')
 })
@@ -118,7 +118,7 @@ Deno.test('report prevents other connectors and terminal or pending completion t
     error.code = '23514'
     throw error
   })
-  const pendingCompleted = await invalidTransition(request({ job_id: JOB_ID, status: 'completed', verification: { upc: '0123456789012', price: '1.25' } }))
+  const pendingCompleted = await invalidTransition(request({ job_id: JOB_ID, status: 'completed', verification: { upc: '00012345678901', price: '1.25' } }))
   assertEquals(pendingCompleted.status, 400, 'pending to completed rejected')
 })
 

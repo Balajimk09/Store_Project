@@ -1,0 +1,6 @@
+{
+  "version": 1,
+  "allowed_https_origins": [
+    "https://kurnxpzcgcvsjmxsqjok.supabase.co"
+  ]
+}

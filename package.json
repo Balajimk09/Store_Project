@@ -13,7 +13,8 @@
     "test:pos-publish-jobs:rpc-sql": "node scripts/test-pos-publish-job-rpcs-sql.mjs",
     "test:connector-publish-api": "npx --yes deno@2.9.2 test --node-modules-dir=none --allow-env supabase/functions/_shared/connector-auth.test.ts supabase/functions/claim-pos-publish-job/index.test.ts supabase/functions/report-pos-publish-job-status/index.test.ts",
     "test:pos-publish-worker": "node --test connector/tests/pos-publish-worker.test.mjs connector/tests/commander-price-adapter.test.mjs",
-    "test:pos-publish-api-client": "node --test connector/tests/pos-publish-api-client.test.mjs"
+    "test:pos-publish-api-client": "node --test connector/tests/pos-publish-api-client.test.mjs",
+    "test:pos-publish-runtime": "node --test connector/tests/pos-publish-runtime.test.mjs"
   },
   "dependencies": {
     "@hookform/resolvers": "^3.9.0",

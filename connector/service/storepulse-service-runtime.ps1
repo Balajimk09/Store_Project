@@ -3,6 +3,8 @@ param()
 
 Set-StrictMode -Version Latest
 
+$script:StorePulsePosPublishChildActive = $false
+
 if (-not (Get-Command Get-StorePulseProgramDataRoot -ErrorAction SilentlyContinue)) {
     . (Join-Path $PSScriptRoot "storepulse-machine-config.ps1")
 }
@@ -16,7 +18,7 @@ if (-not (Get-Command Invoke-StorePulseConnectorHeartbeat -ErrorAction SilentlyC
     . (Join-Path $PSScriptRoot "storepulse-connector-heartbeat.ps1")
 }
 
-$script:StorePulseRuntimeVersion = "3.1.2-heartbeat3"
+$script:StorePulseRuntimeVersion = "3.1.3-pos-publish-runtime"
 
 function Get-StorePulseStateRoot {
     param([string]$ProgramDataRoot = "")
@@ -45,6 +47,14 @@ function Test-StorePulseServiceScripts {
         "storepulse-finalize-closed-day.ps1",
         "storepulse-normalize-transactions.ps1",
         "storepulse-upload-finalized-business-day.ps1",
+        "lib\pos-publish-runtime-entry.mjs",
+        "lib\pos-publish-runtime.mjs",
+        "lib\pos-publish-worker.mjs",
+        "lib\pos-publish-api-client.mjs",
+        "lib\commander-price-adapter.mjs",
+        "lib\pos-publish-errors.mjs",
+        "lib\pos-publish-result-contract.json",
+        "lib\storepulse-origin-policy.json",
         "service\storepulse-machine-identity.ps1",
         "service\storepulse-connector-heartbeat.ps1"
     )
@@ -54,6 +64,7 @@ function Test-StorePulseServiceScripts {
     }
     $nodeManifest = Join-Path (Join-Path $Root "service") "node-runtime-manifest.json"
     if (-not (Test-Path -LiteralPath $nodeManifest -PathType Leaf)) { throw "Required Node runtime manifest missing." }
+    Get-StorePulsePosPublishResultContract -Path (Join-Path $Root "lib\pos-publish-result-contract.json") | Out-Null
     return $true
 }
 
@@ -87,6 +98,342 @@ function New-StorePulseHeartbeatReporterStatus {
         last_error = $null
         last_request_id = $null
     }
+}
+
+function New-StorePulsePosPublishStatus {
+    param([bool]$Enabled)
+    [ordered]@{
+        enabled = $Enabled
+        state = if ($Enabled) { "idle" } else { "disabled" }
+        last_poll_at = $null
+        last_outcome = $null
+        last_job_id = $null
+        last_error_code = $null
+    }
+}
+
+function Get-StorePulsePosPublishPollSeconds {
+    param([Parameter(Mandatory)]$Config)
+    $value = if ($Config.PSObject.Properties["pos_publish_poll_seconds"]) { $Config.pos_publish_poll_seconds } else { 60 }
+    $text = [string]$value
+    if ($text -notmatch '^[0-9]+$') { throw "pos_publish_poll_seconds must be a whole number." }
+    $seconds = [int]$text
+    if ($seconds -lt 30 -or $seconds -gt 3600) { throw "pos_publish_poll_seconds must be between 30 and 3600." }
+    return $seconds
+}
+
+function Get-StorePulsePosPublishChildTimeoutSeconds {
+    param([Parameter(Mandatory)]$Config)
+    $value = if ($Config.PSObject.Properties["pos_publish_child_timeout_seconds"]) { $Config.pos_publish_child_timeout_seconds } else { 60 }
+    $text = [string]$value
+    if ($text -notmatch '^[0-9]+$') { throw "pos_publish_child_timeout_seconds must be a whole number." }
+    $seconds = [int]$text
+    if ($seconds -lt 5 -or $seconds -gt 300) { throw "pos_publish_child_timeout_seconds must be between 5 and 300." }
+    return $seconds
+}
+
+function Get-StorePulsePosPublishResultContract {
+    param([string]$Path = "")
+    $contractPath = if ([string]::IsNullOrWhiteSpace($Path)) { Join-Path (Split-Path -Parent $PSScriptRoot) "lib\pos-publish-result-contract.json" } else { $Path }
+    try { $contract = Get-Content -LiteralPath $contractPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop } catch { throw "pos_publish_result_contract_invalid" }
+    $required = @("properties", "outcomes", "states", "error_codes", "parent_error_codes")
+    if ($null -eq $contract -or @($contract.PSObject.Properties.Name).Count -ne $required.Count -or @($required | Where-Object { $null -eq $contract.PSObject.Properties[$_] }).Count -gt 0) {
+        throw "pos_publish_result_contract_invalid"
+    }
+    foreach ($name in $required) {
+        $values = @($contract.$name)
+        if ($values.Count -eq 0 -or @($values | Where-Object { $_ -isnot [string] -or $_ -notmatch '^[a-z][a-z0-9_]{0,79}$' }).Count -gt 0 -or (@($values | Select-Object -Unique).Count -ne $values.Count)) {
+            throw "pos_publish_result_contract_invalid"
+        }
+    }
+    if ((@($contract.properties) -join "|") -ne "outcome|state|last_job_id|last_error_code") { throw "pos_publish_result_contract_invalid" }
+    return [PSCustomObject]@{
+        properties = @($contract.properties)
+        outcomes = @($contract.outcomes)
+        states = @($contract.states)
+        error_codes = @($contract.error_codes)
+        parent_error_codes = @($contract.parent_error_codes)
+    }
+}
+
+function New-StorePulseBoundedStreamReader {
+    param([Parameter(Mandatory)]$Stream)
+    $state = [PSCustomObject]@{
+        stream = $Stream
+        buffer = New-Object byte[] 1024
+        pending = $null
+        output = New-Object IO.MemoryStream
+        complete = $false
+        failed = $false
+        overflow = $false
+    }
+    $state.pending = $state.stream.BeginRead($state.buffer, 0, $state.buffer.Length, $null, $null)
+    return $state
+}
+
+function Receive-StorePulseBoundedStreamReader {
+    param([Parameter(Mandatory)]$State, [int]$MaximumBytes = 4096)
+    if ($State.complete -or $State.failed -or $State.overflow -or -not $State.pending.IsCompleted) { return }
+    try {
+        $count = $State.stream.EndRead($State.pending)
+    }
+    catch {
+        $State.failed = $true
+        return
+    }
+    if ($count -le 0) {
+        $State.complete = $true
+        return
+    }
+    if (($State.output.Length + $count) -gt $MaximumBytes) {
+        $State.overflow = $true
+        return
+    }
+    $State.output.Write($State.buffer, 0, $count)
+    try {
+        $State.pending = $State.stream.BeginRead($State.buffer, 0, $State.buffer.Length, $null, $null)
+    }
+    catch {
+        $State.failed = $true
+    }
+}
+
+function Complete-StorePulseBoundedStreamReaders {
+    param([Parameter(Mandatory)]$StdoutReader, [Parameter(Mandatory)]$StderrReader, [int]$Milliseconds = 5000)
+    $watch = [Diagnostics.Stopwatch]::StartNew()
+    while ($watch.ElapsedMilliseconds -lt $Milliseconds -and (-not $StdoutReader.complete -or -not $StderrReader.complete)) {
+        Receive-StorePulseBoundedStreamReader -State $StdoutReader
+        Receive-StorePulseBoundedStreamReader -State $StderrReader
+        if ($StdoutReader.overflow -or $StderrReader.overflow -or $StdoutReader.failed -or $StderrReader.failed) { break }
+        [Threading.Thread]::Sleep(20)
+    }
+}
+
+function ConvertFrom-StorePulsePosPublishChildResult {
+    param([Parameter(Mandatory)][string]$Json, [string]$ContractPath = "")
+    $contract = Get-StorePulsePosPublishResultContract -Path $ContractPath
+    $allowedProperties = $contract.properties
+    $allowedOutcomes = $contract.outcomes
+    $allowedStates = $contract.states
+    $allowedErrorCodes = $contract.error_codes
+    if ([string]::IsNullOrWhiteSpace($Json) -or $Json.Length -gt 4096 -or $Json -notmatch '^\s*\{[\s\S]*\}\s*$') { throw "pos_publish_child_invalid_output" }
+    try { $result = $Json | ConvertFrom-Json -ErrorAction Stop } catch { throw "pos_publish_child_invalid_output" }
+    if ($null -eq $result -or $result -is [System.Array]) { throw "pos_publish_child_invalid_output" }
+    $properties = @($result.PSObject.Properties.Name)
+    if ($properties.Count -ne $allowedProperties.Count -or @($properties | Where-Object { $_ -notin $allowedProperties }).Count -gt 0 -or @($allowedProperties | Where-Object { $_ -notin $properties }).Count -gt 0) {
+        throw "pos_publish_child_invalid_output"
+    }
+    $outcome = $result.outcome
+    $state = $result.state
+    if ($outcome -isnot [string] -or $outcome.Length -gt 80 -or $outcome -notin $allowedOutcomes -or $state -isnot [string] -or $state.Length -gt 80 -or $state -notin $allowedStates) {
+        throw "pos_publish_child_invalid_output"
+    }
+    $jobId = $result.last_job_id
+    if ($null -ne $jobId -and ($jobId -isnot [string] -or $jobId -notmatch '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$')) {
+        throw "pos_publish_child_invalid_output"
+    }
+    $errorCode = $result.last_error_code
+    if ($null -ne $errorCode -and ($errorCode -isnot [string] -or $errorCode.Length -gt 80 -or $errorCode -notin $allowedErrorCodes)) {
+        throw "pos_publish_child_invalid_output"
+    }
+    return [PSCustomObject]@{ outcome = $outcome; state = $state; last_job_id = $jobId; last_error_code = $errorCode }
+}
+
+function Invoke-StorePulsePosPublishChild {
+    param(
+        [Parameter(Mandatory)][string]$NodePath,
+        [Parameter(Mandatory)][string]$EntryScript,
+        [Parameter(Mandatory)][Alias("Input")][string]$PayloadJson,
+        [Parameter(Mandatory)][int]$TimeoutSeconds,
+        [scriptblock]$StopRequested = { $false },
+        [scriptblock]$EncodingFactory = $null,
+        [scriptblock]$StartInfoFactory = $null,
+        [scriptblock]$ProcessFactory = $null
+    )
+    $process = $null
+    $started = $false
+    $stdoutReader = $null
+    $stderrReader = $null
+    $inputTask = $null
+    $stdinClosed = $false
+    $inputWriter = $null
+    $previousConsoleInputEncoding = $null
+    $previousConsoleOutputEncoding = $null
+    $consoleEncodingChanged = $false
+    if ($script:StorePulsePosPublishChildActive) {
+        return [PSCustomObject]@{ outcome = "busy"; state = "busy"; last_job_id = $null; last_error_code = $null }
+    }
+    $script:StorePulsePosPublishChildActive = $true
+    try {
+        $PayloadJson = $PayloadJson.TrimStart([char]0xfeff)
+        if ($null -eq $EncodingFactory) { $EncodingFactory = { New-Object Text.UTF8Encoding($false, $true) } }
+        if ($null -eq $StartInfoFactory) { $StartInfoFactory = { New-Object System.Diagnostics.ProcessStartInfo } }
+        if ($null -eq $ProcessFactory) { $ProcessFactory = { New-Object System.Diagnostics.Process } }
+        $utf8 = & $EncodingFactory
+        if ($null -eq $utf8) { throw "pos_publish_child_start_failed" }
+        $startInfo = & $StartInfoFactory
+        if ($null -eq $startInfo) { throw "pos_publish_child_start_failed" }
+        $startInfo.FileName = $NodePath
+        $startInfo.Arguments = ('"{0}"' -f $EntryScript)
+        $startInfo.UseShellExecute = $false
+        $startInfo.CreateNoWindow = $true
+        $startInfo.RedirectStandardInput = $true
+        $startInfo.RedirectStandardOutput = $true
+        $startInfo.RedirectStandardError = $true
+        foreach ($name in @("STOREPULSE_CONNECTOR_TOKEN", "STOREPULSE_COMMANDER_USERNAME", "STOREPULSE_COMMANDER_PASSWORD")) {
+            [void]$startInfo.EnvironmentVariables.Remove($name)
+        }
+        $process = & $ProcessFactory
+        if ($null -eq $process) { throw "pos_publish_child_start_failed" }
+        $process.StartInfo = $startInfo
+        $previousConsoleInputEncoding = [Console]::InputEncoding
+        $previousConsoleOutputEncoding = [Console]::OutputEncoding
+        [Console]::InputEncoding = $utf8
+        [Console]::OutputEncoding = $utf8
+        $consoleEncodingChanged = $true
+        if (-not $process.Start()) { throw "pos_publish_child_start_failed" }
+        $started = $true
+        $stdoutReader = New-StorePulseBoundedStreamReader -Stream $process.StandardOutput.BaseStream
+        $stderrReader = New-StorePulseBoundedStreamReader -Stream $process.StandardError.BaseStream
+        try {
+            # Windows PowerShell 5.1 creates Process.StandardInput with Console.InputEncoding.
+            # Temporarily select no-BOM UTF-8 before materializing that redirected stream.
+            $stdinStream = $process.StandardInput.BaseStream
+        }
+        finally {
+            [Console]::InputEncoding = $previousConsoleInputEncoding
+            [Console]::OutputEncoding = $previousConsoleOutputEncoding
+            $consoleEncodingChanged = $false
+        }
+        $inputWriter = New-Object IO.StreamWriter($stdinStream, $utf8, 1024, $false)
+        $inputTask = $inputWriter.WriteAsync($PayloadJson)
+        $watch = [Diagnostics.Stopwatch]::StartNew()
+        $reason = $null
+        while ($true) {
+            [void](Receive-StorePulseBoundedStreamReader -State $stdoutReader)
+            [void](Receive-StorePulseBoundedStreamReader -State $stderrReader)
+            if ($stdoutReader.overflow -or $stderrReader.overflow) { $reason = "pos_publish_child_output_too_large"; break }
+            if ($stdoutReader.failed -or $stderrReader.failed) { $reason = "pos_publish_child_invalid_output"; break }
+            if (-not $stdinClosed -and $inputTask.IsCompleted) {
+                try { [void]$inputTask.GetAwaiter().GetResult(); $inputWriter.Flush(); $inputWriter.Dispose(); $inputWriter = $null; $stdinClosed = $true; $PayloadJson = $null } catch { $reason = "pos_publish_child_input_failed"; break }
+            }
+            $stop = $false
+            try { $stop = [bool](& $StopRequested) } catch { $stop = $true }
+            if ($stop) { $reason = "pos_publish_shutdown_requested"; break }
+            if ($watch.Elapsed.TotalSeconds -ge $TimeoutSeconds) { $reason = "pos_publish_child_timeout"; break }
+            if ($process.WaitForExit(50)) { break }
+        }
+        if ($null -ne $reason -and -not $process.HasExited) {
+            try { $process.Kill() } catch { }
+        }
+        if ($process.HasExited -or $null -ne $reason) {
+            [void](Complete-StorePulseBoundedStreamReaders -StdoutReader $stdoutReader -StderrReader $stderrReader -Milliseconds 5000)
+        }
+        if ($null -ne $reason) { throw $reason }
+        if (-not $process.HasExited) { throw "pos_publish_child_timeout" }
+        if ($stdoutReader.overflow -or $stderrReader.overflow) { throw "pos_publish_child_output_too_large" }
+        if ($stdoutReader.failed -or $stderrReader.failed -or -not $stdoutReader.complete -or -not $stderrReader.complete) { throw "pos_publish_child_invalid_output" }
+        if ($process.ExitCode -ne 0 -or $stderrReader.output.Length -gt 0) { throw "pos_publish_child_invalid_output" }
+        try { $stdout = $utf8.GetString($stdoutReader.output.ToArray()) } catch { throw "pos_publish_child_invalid_output" }
+        return ConvertFrom-StorePulsePosPublishChildResult -Json $stdout
+    }
+    catch {
+        $isSafeParentCode = $false
+        try { $isSafeParentCode = $_.Exception.Message -in (Get-StorePulsePosPublishResultContract).parent_error_codes } catch { }
+        if ($isSafeParentCode) { throw }
+        throw "pos_publish_child_start_failed"
+    }
+    finally {
+        if ($consoleEncodingChanged) {
+            try { [Console]::InputEncoding = $previousConsoleInputEncoding } catch { }
+            try { [Console]::OutputEncoding = $previousConsoleOutputEncoding } catch { }
+        }
+        $PayloadJson = $null
+        if ($null -ne $inputWriter) { try { $inputWriter.Dispose() } catch { } }
+        if ($started) {
+            try { if (-not $stdinClosed) { $process.StandardInput.Close() } } catch { }
+            try { if (-not $process.HasExited) { $process.Kill() } } catch { }
+            try {
+                $killWait = [Diagnostics.Stopwatch]::StartNew()
+                while (-not $process.HasExited -and $killWait.ElapsedMilliseconds -lt 5000) { [void]$process.WaitForExit(50) }
+            } catch { }
+        }
+        if ($null -ne $stdoutReader) { $stdoutReader.output.Dispose() }
+        if ($null -ne $stderrReader) { $stderrReader.output.Dispose() }
+        if ($null -ne $process) { $process.Dispose() }
+        $script:StorePulsePosPublishChildActive = $false
+    }
+}
+
+function New-StorePulseDefaultPosPublishWorker {
+    return {
+        param($Config, $Secrets, $InstallRoot)
+        $nodeManifestPath = Join-Path (Join-Path $InstallRoot "service") "node-runtime-manifest.json"
+        $nodeValidation = Test-StorePulseNodeRuntime -InstallRoot $InstallRoot -ManifestPath $nodeManifestPath -PassThru
+        if (-not $nodeValidation.ok) { throw "POS publishing Node runtime is unavailable." }
+        $entryScript = Join-Path $InstallRoot "lib\pos-publish-runtime-entry.mjs"
+        if (-not (Test-Path -LiteralPath $entryScript -PathType Leaf)) { throw "POS publishing runtime entry script is missing." }
+
+        $input = [ordered]@{
+            connector_token = [string]$Secrets.connector_token
+            trusted_source_endpoint_url = [string]$Config.live_endpoint_url
+            poll_seconds = Get-StorePulsePosPublishPollSeconds -Config $Config
+            worker_version = $script:StorePulseRuntimeVersion
+        } | ConvertTo-Json -Compress
+
+        $programDataRoot = Split-Path -Parent ([string]$Config.logs_root)
+        $stopPath = Get-StorePulseRuntimeStopPath -ProgramDataRoot $programDataRoot
+        try {
+            # The only cross-process secret transport is this bounded in-memory stdin pipe.
+            $stopRequested = { Test-Path -LiteralPath $stopPath -PathType Leaf }.GetNewClosure()
+            return Invoke-StorePulsePosPublishChild -NodePath ([string]$nodeValidation.node_path) -EntryScript $entryScript -Input $input -TimeoutSeconds (Get-StorePulsePosPublishChildTimeoutSeconds -Config $Config) -StopRequested $stopRequested
+        }
+        finally {
+            $input = $null
+        }
+    }.GetNewClosure()
+}
+
+function Invoke-StorePulsePosPublishOnce {
+    param(
+        [Parameter(Mandatory)]$PublishStatus,
+        [Parameter(Mandatory)]$Config,
+        [Parameter(Mandatory)]$Secrets,
+        [Parameter(Mandatory)][string]$InstallRoot,
+        [Parameter(Mandatory)][scriptblock]$Worker,
+        [Parameter(Mandatory)][string]$LogsRoot
+    )
+    $PublishStatus.last_poll_at = (Get-Date).ToString("o")
+    try {
+        $workerResult = & $Worker $Config $Secrets $InstallRoot
+        $result = ConvertFrom-StorePulsePosPublishChildResult -Json ($workerResult | ConvertTo-Json -Depth 5 -Compress)
+        $PublishStatus.state = [string]$result.state
+        $PublishStatus.last_outcome = [string]$result.outcome
+        $PublishStatus.last_job_id = $result.last_job_id
+        $PublishStatus.last_error_code = $result.last_error_code
+        Write-StorePulseSafePublishLog -LogsRoot $LogsRoot -Level "info" -Event "pos publish poll completed" -Data @{ outcome = $PublishStatus.last_outcome; error_code = $PublishStatus.last_error_code } -Secrets $Secrets
+    }
+    catch {
+        # Do not preserve child-process errors: they could contain remote or secret-bearing text.
+        $contract = Get-StorePulsePosPublishResultContract
+        $code = if ($_.Exception.Message -in $contract.parent_error_codes) { $_.Exception.Message } else { "pos_publish_runtime_failed" }
+        $PublishStatus.state = "error"
+        $PublishStatus.last_outcome = "internal_error"
+        $PublishStatus.last_job_id = $null
+        $PublishStatus.last_error_code = $code
+        Write-StorePulseSafePublishLog -LogsRoot $LogsRoot -Level "error" -Event "pos publish poll failed" -Data @{ error_code = $code } -Secrets $Secrets
+    }
+}
+
+function Write-StorePulseSafePublishLog {
+    param(
+        [Parameter(Mandatory)][string]$LogsRoot,
+        [Parameter(Mandatory)][string]$Level,
+        [Parameter(Mandatory)][string]$Event,
+        [AllowNull()][hashtable]$Data = $null,
+        [AllowNull()]$Secrets = $null
+    )
+    try { Write-StorePulseJsonLog -LogsRoot $LogsRoot -Level $Level -Event $Event -Data $Data -Secrets $Secrets } catch { }
 }
 
 function Update-StorePulseHeartbeatReporterStatus {
@@ -202,7 +549,10 @@ function Write-StorePulseRuntimeStatus {
     param(
         [Parameter(Mandatory)][string]$Path,
         [Parameter(Mandatory)]$Status,
-        [AllowNull()]$Secrets = $null
+        [AllowNull()]$Secrets = $null,
+        [scriptblock]$FileReplace = $null,
+        [scriptblock]$FileMove = $null,
+        [scriptblock]$Sleep = $null
     )
     $parent = Split-Path -Parent $Path
     if (-not (Test-Path -LiteralPath $parent -PathType Container)) {
@@ -212,7 +562,56 @@ function Write-StorePulseRuntimeStatus {
     if ($null -ne $Secrets) {
         $json = Redact-StorePulseSecretsFromString -Value $json -Secrets $Secrets
     }
-    Set-Content -LiteralPath $Path -Encoding UTF8 -Value $json
+    $tempPath = Join-Path $parent ("." + [IO.Path]::GetFileName($Path) + "." + $PID + "." + [guid]::NewGuid().ToString("N") + ".tmp")
+    $backupPath = Join-Path $parent ("." + [IO.Path]::GetFileName($Path) + "." + $PID + "." + [guid]::NewGuid().ToString("N") + ".bak")
+    if ($null -eq $FileReplace) { $FileReplace = { param($Source, $Destination, $Backup) [IO.File]::Replace($Source, $Destination, $Backup) } }
+    if ($null -eq $FileMove) { $FileMove = { param($Source, $Destination) [IO.File]::Move($Source, $Destination) } }
+    if ($null -eq $Sleep) { $Sleep = { param([int]$Milliseconds) [Threading.Thread]::Sleep($Milliseconds) } }
+    $stream = $null
+    try {
+        $bytes = (New-Object Text.UTF8Encoding($false)).GetBytes($json)
+        $stream = New-Object IO.FileStream($tempPath, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+        $stream.Write($bytes, 0, $bytes.Length)
+        $stream.Flush($true)
+        $stream.Dispose()
+        $stream = $null
+        if (Test-Path -LiteralPath $Path -PathType Leaf) {
+            $replaced = $false
+            $replaceError = $null
+            foreach ($attempt in 1..20) {
+                try {
+                    & $FileReplace $tempPath $Path $backupPath
+                    $replaced = $true
+                    break
+                }
+                catch {
+                    $replaceError = $_
+                    if (-not (Test-StorePulseStatusReplaceRetryableException -Exception $_.Exception)) { throw }
+                    & $Sleep 10
+                }
+            }
+            if (-not $replaced) { throw $replaceError }
+        }
+        else {
+            & $FileMove $tempPath $Path
+        }
+    }
+    finally {
+        if ($null -ne $stream) { $stream.Dispose() }
+        if (Test-Path -LiteralPath $tempPath -PathType Leaf) { Remove-Item -LiteralPath $tempPath -Force -ErrorAction SilentlyContinue }
+        if (Test-Path -LiteralPath $backupPath -PathType Leaf) { Remove-Item -LiteralPath $backupPath -Force -ErrorAction SilentlyContinue }
+    }
+}
+
+function Test-StorePulseStatusReplaceRetryableException {
+    param([Parameter(Mandatory)][Exception]$Exception)
+    # Win32 ERROR_SHARING_VIOLATION (0x80070020) and ERROR_LOCK_VIOLATION (0x80070021).
+    $current = $Exception
+    while ($null -ne $current) {
+        if ([int]$current.HResult -in @(-2147024864, -2147024863)) { return $true }
+        $current = $current.InnerException
+    }
+    return $false
 }
 
 function Get-StorePulseConfigBool {
@@ -375,6 +774,7 @@ function Invoke-StorePulseServiceRuntime {
         [string]$InstallRoot = "",
         [scriptblock]$LiveWorker = $null,
         [scriptblock]$ClosedDayWorker = $null,
+        [scriptblock]$PosPublishWorker = $null,
         [scriptblock]$HeartbeatReporter = $null,
         [scriptblock]$Sleep = $null,
         [int]$MaxIterations = 0
@@ -398,8 +798,11 @@ function Invoke-StorePulseServiceRuntime {
     $liveEnabled = Get-StorePulseConfigBool -Config $config -Name "live_worker_enabled" -Default $true
     $closedEnabled = Get-StorePulseConfigBool -Config $config -Name "closed_day_worker_enabled" -Default $true
     $heartbeatEnabled = Get-StorePulseConfigBool -Config $config -Name "heartbeat_enabled" -Default $false
+    $posPublishEnabled = Get-StorePulseConfigBool -Config $config -Name "pos_publish_enabled" -Default $false
+    $posPublishPollSeconds = Get-StorePulsePosPublishPollSeconds -Config $config
     if ($null -eq $LiveWorker) { $LiveWorker = New-StorePulseDefaultLiveWorker }
     if ($null -eq $ClosedDayWorker) { $ClosedDayWorker = New-StorePulseDefaultClosedDayWorker }
+    if ($null -eq $PosPublishWorker) { $PosPublishWorker = New-StorePulseDefaultPosPublishWorker }
     if ($null -eq $Sleep) { $Sleep = { param([int]$Seconds) Start-Sleep -Seconds $Seconds } }
 
     $status = [ordered]@{
@@ -411,6 +814,7 @@ function Invoke-StorePulseServiceRuntime {
         live_worker = New-StorePulseWorkerStatus -Name "live" -Enabled $liveEnabled
         closed_day_worker = New-StorePulseWorkerStatus -Name "closed_day" -Enabled $closedEnabled
         heartbeat_reporter = New-StorePulseHeartbeatReporterStatus -Enabled $heartbeatEnabled
+        pos_publish = New-StorePulsePosPublishStatus -Enabled $posPublishEnabled
         stop_file = $stopPath
     }
     Write-StorePulseRuntimeStatus -Path $statusPath -Status $status -Secrets $secrets
@@ -436,6 +840,7 @@ function Invoke-StorePulseServiceRuntime {
         Invoke-StorePulseRuntimeHeartbeat -Config $config -Secrets $secrets -Status $status -ReportedState "starting" -HeartbeatReporter $HeartbeatReporter | Out-Null
         Write-StorePulseRuntimeStatus -Path $statusPath -Status $status -Secrets $secrets
         $iteration = 0
+        $nextPosPublishAt = Get-Date
         do {
             $iteration += 1
             $status.last_heartbeat_at = (Get-Date).ToString("o")
@@ -457,11 +862,16 @@ function Invoke-StorePulseServiceRuntime {
             if ($closedEnabled) {
                 Invoke-StorePulseWorkerOnce -Name "closed_day" -WorkerStatus $status.closed_day_worker -Config $config -Secrets $secrets -InstallRoot $resolvedInstallRoot -Worker $ClosedDayWorker -LogsRoot ([string]$config.logs_root)
             }
+            if ($posPublishEnabled -and ($Mode -eq "Once" -or (Get-Date) -ge $nextPosPublishAt)) {
+                Invoke-StorePulsePosPublishOnce -PublishStatus $status.pos_publish -Config $config -Secrets $secrets -InstallRoot $resolvedInstallRoot -Worker $PosPublishWorker -LogsRoot ([string]$config.logs_root)
+                $nextPosPublishAt = (Get-Date).AddSeconds($posPublishPollSeconds)
+            }
             Write-StorePulseRuntimeStatus -Path $statusPath -Status $status -Secrets $secrets
             if ($Mode -eq "Once") { break }
             $liveDelay = if ($liveEnabled -and [int]$status.live_worker.consecutive_failures -gt 0) { [int]$status.live_worker.next_delay_seconds } else { [int]$config.live_poll_interval_seconds }
             $closedDelay = if ($closedEnabled -and [int]$status.closed_day_worker.consecutive_failures -gt 0) { [int]$status.closed_day_worker.next_delay_seconds } else { [int]$config.closed_day_poll_interval_seconds }
-            $delay = [math]::Min($liveDelay, $closedDelay)
+            $publishDelay = if ($posPublishEnabled) { [math]::Max(1, [int][math]::Ceiling(($nextPosPublishAt - (Get-Date)).TotalSeconds)) } else { [int]::MaxValue }
+            $delay = [math]::Min([math]::Min($liveDelay, $closedDelay), $publishDelay)
             if ($delay -lt 1) { $delay = 1 }
             & $Sleep ([int]$delay)
         } while ($Mode -eq "Run" -and ($MaxIterations -le 0 -or $iteration -lt $MaxIterations))

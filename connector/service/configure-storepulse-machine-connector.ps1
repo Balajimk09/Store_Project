@@ -73,6 +73,11 @@ function Get-StorePulseExistingOrDefaultConfig {
         live_worker_enabled = $true
         closed_day_worker_enabled = $true
         closed_day_once_enabled = $false
+        pos_publish_enabled = $false
+        pos_publish_poll_seconds = 60
+        pos_publish_child_timeout_seconds = 60
+        pos_publish_claim_endpoint_url = ""
+        pos_publish_report_endpoint_url = ""
     }
 }
 
@@ -143,6 +148,15 @@ if ($Interactive) {
     if ($null -eq $ConnectorToken) { $ConnectorToken = Read-Host "StorePulse connector token" -AsSecureString }
 }
 
+# Publishing is deliberately opt-in through a separately reviewed activation path.
+# Reconfiguration must never preserve an earlier enabled value.
+if ($null -eq $config.PSObject.Properties["pos_publish_enabled"]) {
+    Add-Member -InputObject $config -NotePropertyName "pos_publish_enabled" -NotePropertyValue $false
+}
+else {
+    $config.pos_publish_enabled = $false
+}
+
 Test-StorePulseMachineConfig -Config $config | Out-Null
 $secretInput = New-StorePulseSecretInput -CommanderUsername $CommanderUsername -CommanderPassword $CommanderPassword -ConnectorToken $ConnectorToken
 if (-not $ValidateOnly) {
@@ -166,6 +180,9 @@ $summary = [ordered]@{
     heartbeat_endpoint_url = [string]$config.heartbeat_endpoint_url
     live_poll_interval_seconds = [int]$config.live_poll_interval_seconds
     closed_day_poll_interval_seconds = [int]$config.closed_day_poll_interval_seconds
+    pos_publish_enabled = [bool]$config.pos_publish_enabled
+    pos_publish_poll_seconds = [int]$config.pos_publish_poll_seconds
+    pos_publish_child_timeout_seconds = [int]$config.pos_publish_child_timeout_seconds
     logs_root = [string]$config.logs_root
     working_root = [string]$config.working_root
     archive_root = [string]$config.archive_root

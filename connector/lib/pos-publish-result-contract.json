@@ -1,0 +1,55 @@
+{
+  "properties": [
+    "outcome",
+    "state",
+    "last_job_id",
+    "last_error_code"
+  ],
+  "outcomes": [
+    "disabled",
+    "idle",
+    "completed",
+    "busy",
+    "configuration_error",
+    "invalid_claim",
+    "duplicate_ignored",
+    "status_report_failed",
+    "commander_failed",
+    "internal_error"
+  ],
+  "states": [
+    "disabled",
+    "idle",
+    "completed",
+    "busy",
+    "configuration_error",
+    "invalid_claim",
+    "duplicate_ignored",
+    "status_report_failed",
+    "commander_failed",
+    "internal_error",
+    "error"
+  ],
+  "error_codes": [
+    "pos_publish_configuration_invalid",
+    "commander_adapter_unavailable",
+    "internal_connector_error",
+    "commander_auth_failed",
+    "commander_unreachable",
+    "commander_tls_failed",
+    "plu_not_found",
+    "plu_identity_mismatch",
+    "update_rejected",
+    "verification_failed",
+    "job_expired"
+  ],
+  "parent_error_codes": [
+    "pos_publish_child_timeout",
+    "pos_publish_shutdown_requested",
+    "pos_publish_child_output_too_large",
+    "pos_publish_child_invalid_output",
+    "pos_publish_child_input_failed",
+    "pos_publish_child_start_failed",
+    "pos_publish_runtime_failed"
+  ]
+}

@@ -8,7 +8,10 @@ $allowedExceptionTypes = @('COMException', 'CryptographicException', 'FileNotFou
 $approvedCodes = @('runner_initialization', 'machine_config_load', 'machine_secrets_load', 'commander_connection_create', 'commander_authentication', 'product_payload_build', 'product_transport_start', 'product_transport', 'product_response_parse', 'product_identity_verify', 'session_dispose_failed')
 
 function New-ReadTestProductResult {
-    param([bool]$AuthenticationSucceeded = $false, [bool]$ProductRequestAttempted = $false, [bool]$ProductFound = $false, [bool]$IdentityMatched = $false, [bool]$SessionDisposed = $false, [AllowNull()][string]$ErrorCode = $null, [AllowNull()][string]$FailureStage = $null, [AllowNull()][string]$ExceptionType = $null)
+    param([bool]$AuthenticationSucceeded = $false, [bool]$ProductRequestAttempted = $false, [bool]$ProductFound = $false, [bool]$IdentityMatched = $false, [bool]$SessionDisposed = $false, [AllowNull()]$ErrorCode = $null, [AllowNull()]$FailureStage = $null, [AllowNull()]$ExceptionType = $null)
+    if ([string]::IsNullOrEmpty([string]$ErrorCode)) { $ErrorCode = $null }
+    if ([string]::IsNullOrEmpty([string]$FailureStage)) { $FailureStage = $null }
+    if ([string]::IsNullOrEmpty([string]$ExceptionType)) { $ExceptionType = $null }
     [ordered]@{ operation = 'read_test_product'; authentication_succeeded = $AuthenticationSucceeded; product_request_attempted = $ProductRequestAttempted; product_found = $ProductFound; identity_matched = $IdentityMatched; write_attempted = $false; session_disposed = $SessionDisposed; error_code = $ErrorCode; failure_stage = $FailureStage; exception_type = $ExceptionType }
 }
 function Resolve-OneConnectorMachineFile {

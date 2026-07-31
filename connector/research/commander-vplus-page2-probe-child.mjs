@@ -1,0 +1,22 @@
+import { lstat, readFile } from 'node:fs/promises'
+import { fileURLToPath } from 'node:url'
+import { resolve } from 'node:path'
+import { sendCommanderNaxml } from '../lib/commander/commander-naxml-client.mjs'
+import { resolveCommanderTlsTrust } from '../lib/commander/session/commander-tls-trust.mjs'
+import { COMMAND, PAGE2_XML, analyzePage2Probe, serializePage2ProbeResult } from './commander-vplus-page2-probe-client.mjs'
+
+const CONFIG_PATH = 'C:\\ProgramData\\StorePulse\\config.json'
+const PROGRAM_DATA = 'C:\\ProgramData'
+const MAX_STDIN_BYTES = 8192
+const errors = new Set(['invalid_input','invalid_origin','ca_file_invalid','transport_failed','timeout','response_too_large','http_rejected','invalid_utf8','xml_invalid','xml_unsafe','structure_limit_exceeded','response_root_invalid','representation_analysis_failed','result_too_large','unexpected_failure'])
+const HOST = /^[A-Za-z0-9][A-Za-z0-9.-]{0,252}$/
+const result = code => ({ request_succeeded:false,bounded_response_received:false,utf8_valid:false,xml_parse_succeeded:false,response_root_valid:false,representation_analysis_completed:false,page_two_records_detected:false,plu_count_bucket:'over_limit',page_target_detected:false,of_pages_target_detected:false,page_representation:'structure_unavailable',of_pages_representation:'structure_unavailable',raw_response_retained:false,product_values_retained:false,safe_error_code:errors.has(code)?code:'unexpected_failure' })
+const fail = code => { const error = new Error(code); error.code = code; throw error }
+export function validateChildInput(value) { if (!value || Array.isArray(value) || Object.keys(value).join('|') !== 'session_cookie' || typeof value.session_cookie !== 'string' || value.session_cookie.length < 1 || value.session_cookie.length > 4096 || /[\u0000-\u001f\u007f-\u009f&=]/u.test(value.session_cookie)) fail('invalid_input'); return value.session_cookie }
+async function ordinary(filesystem, file) { try { const info = await filesystem.lstat(file); return Boolean(info?.isFile?.() && !info?.isSymbolicLink?.() && !info?.isReparsePoint?.()) } catch { return false } }
+async function config(filesystem) { if (!(await ordinary(filesystem, CONFIG_PATH))) fail('transport_failed'); let value; try { value = JSON.parse((await filesystem.readFile(CONFIG_PATH, 'utf8')).toString()) } catch { fail('transport_failed') }; if (!value || Array.isArray(value) || !HOST.test(value.commander_ip)) fail('transport_failed'); return value }
+const normalize = error => ['timeout','response_too_large','http_rejected'].includes(error?.code || error?.message) ? (error.code || error.message) : (error?.code || error?.message) === 'response_invalid' ? 'invalid_utf8' : 'transport_failed'
+export async function runPinnedPage2Probe(input, dependencies = {}) { let cookie; try { cookie = validateChildInput(input) } catch (error) { return result(error.code) }; const filesystem = dependencies.filesystem ?? { lstat, readFile }; const trustLoader = dependencies.trustLoader ?? resolveCommanderTlsTrust; const sender = dependencies.sender ?? sendCommanderNaxml; try { const value = await config(filesystem); const trust = await trustLoader({ config: value, programData: PROGRAM_DATA, filesystem }); const response = await sender({ origin:`https://${value.commander_ip}`, trust, timeoutMs:15000, request:{ command:COMMAND, sessionCookie:cookie, xml:PAGE2_XML } }); if (!response || !Number.isInteger(response.status) || typeof response.body !== 'string') return result('transport_failed'); if (response.status < 200 || response.status >= 300) return result('http_rejected'); return analyzePage2Probe(Buffer.from(response.body, 'utf8')) } catch (error) { return result(normalize(error)) } finally { cookie = null } }
+async function input(stream = process.stdin) { const chunks=[];let total=0;for await(const chunk of stream){total+=chunk.length;if(total>MAX_STDIN_BYTES)fail('invalid_input');chunks.push(chunk)};try{return JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(Buffer.concat(chunks)))}catch{fail('invalid_input')} }
+async function main(){let output;try{output=await runPinnedPage2Probe(await input())}catch(error){output=result(error?.code)};process.stdout.write(serializePage2ProbeResult(output));process.exitCode=output.safe_error_code===null?0:1}
+if(process.argv[1]&&fileURLToPath(import.meta.url)===resolve(process.argv[1]))main().catch(()=>{process.stdout.write(serializePage2ProbeResult(result('unexpected_failure')));process.exitCode=1})

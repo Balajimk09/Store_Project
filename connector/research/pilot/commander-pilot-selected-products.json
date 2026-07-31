@@ -1,0 +1,60 @@
+{
+  "schema_version": "1",
+  "mode": "selected_products",
+  "store": {
+    "store_id": "ec192877-0156-42ab-8fbf-31105f3e2ea3",
+    "owner_id": "c702332a-9299-4b1a-9583-a01302bd7b4a",
+    "store_name": "Balaji Stores",
+    "source_system": "verifone_commander",
+    "source_store_number": "AB123"
+  },
+  "safety": {
+    "read_only": true,
+    "automatic_publishing_enabled": false,
+    "retain_raw_xml": false,
+    "retain_credentials_or_cookies": false,
+    "max_selected_products": 10
+  },
+  "products": [
+    {
+      "upc": "00999999999993",
+      "modifier": "000",
+      "reason": "Dedicated controlled STOREPULSE TEST product; not found in transaction history."
+    },
+    {
+      "upc": "00000000000406",
+      "modifier": "000",
+      "reason": "High-volume fountain item found in transaction history."
+    },
+    {
+      "upc": "00000000000014",
+      "modifier": "145",
+      "reason": "Confirms a non-zero Commander modifier identity."
+    },
+    {
+      "upc": "00685141910038",
+      "modifier": "000",
+      "reason": "Age-restricted cigarette department example."
+    },
+    {
+      "upc": "00000000111126",
+      "modifier": "000",
+      "reason": "Age-restricted beer department example."
+    },
+    {
+      "upc": "00024300834714",
+      "modifier": "000",
+      "reason": "Grocery item with observed transaction price variation."
+    },
+    {
+      "upc": "00000000001007",
+      "modifier": "000",
+      "reason": "PLU-like bag-of-ice item known at the register."
+    },
+    {
+      "upc": "00855553008221",
+      "modifier": "000",
+      "reason": "Normal retail UPC in the lighters department."
+    }
+  ]
+}

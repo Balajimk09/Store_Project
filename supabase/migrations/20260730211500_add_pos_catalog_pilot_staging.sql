@@ -298,17 +298,35 @@ create index product_history_product_created_idx
   on public.product_history (product_id, created_at desc)
   where product_id is not null;
 
+create or replace function public.set_pos_catalog_updated_at()
+returns trigger
+language plpgsql
+security invoker
+set search_path = ''
+as $function$
+begin
+  new.updated_at = statement_timestamp();
+  return new;
+end;
+$function$;
+
+revoke all on function public.set_pos_catalog_updated_at()
+  from public, anon, authenticated;
+
+grant execute on function public.set_pos_catalog_updated_at()
+  to service_role;
+
 create trigger pos_catalog_sync_runs_set_updated_at
 before update on public.pos_catalog_sync_runs
-for each row execute function public.set_updated_at();
+for each row execute function public.set_pos_catalog_updated_at();
 
 create trigger pos_catalog_sync_items_set_updated_at
 before update on public.pos_catalog_sync_items
-for each row execute function public.set_updated_at();
+for each row execute function public.set_pos_catalog_updated_at();
 
 create trigger product_source_identities_set_updated_at
 before update on public.product_source_identities
-for each row execute function public.set_updated_at();
+for each row execute function public.set_pos_catalog_updated_at();
 
 alter table public.pos_catalog_sync_runs enable row level security;
 alter table public.pos_catalog_sync_items enable row level security;

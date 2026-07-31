@@ -1,0 +1,4 @@
+import { readFileSync } from 'node:fs'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
+const here=path.dirname(fileURLToPath(import.meta.url));let input='';process.stdin.on('data',x=>input+=x);process.stdin.on('end',()=>{const mode=readFileSync(path.join(here,'mode.txt'),'utf8').trim();if(mode==='invalid'){process.stdout.write('{bad');return};const ambiguous=mode==='ambiguous';const zero=mode==='zero';process.stdout.write(JSON.stringify({request_succeeded:true,bounded_response_received:true,utf8_valid:true,xml_parse_succeeded:true,response_root_valid:true,representation_analysis_completed:true,page_two_records_detected:!zero,plu_count_bucket:zero?'0':'1-10',page_target_detected:true,of_pages_target_detected:true,page_representation:ambiguous?'ambiguous':'direct_text_element',of_pages_representation:ambiguous?'ambiguous':'direct_text_element',raw_response_retained:false,product_values_retained:false,safe_error_code:null}))})

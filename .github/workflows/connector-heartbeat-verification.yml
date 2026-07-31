@@ -192,7 +192,7 @@ jobs:
           )
           supabase migration repair --local --status reverted "${pending_versions[@]}" \
             2>&1 | tee ci-artifacts/database/migration-history-simulation-revert.log
-          supabase db push --db-url "$LOCAL_DB_URL" --dry-run \
+          supabase db push --db-url "$LOCAL_DB_URL" --dry-run --include-all \
             2>&1 | tee ci-artifacts/database/migration-history-simulation-dry-run.log
           for version in "${pending_versions[@]}"; do
             grep -Fq "$version" ci-artifacts/database/migration-history-simulation-dry-run.log

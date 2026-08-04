@@ -39,7 +39,7 @@ export function assertCanonicalUpc(value, code = 'api_response_invalid') {
 }
 
 export function assertDecimalPrice(value, code = 'api_response_invalid') {
-  if (typeof value !== 'string' || !PRICE_PATTERN.test(value) || !Number.isFinite(Number(value)) || Number(value) <= 0) {
+  if (typeof value !== 'string' || !PRICE_PATTERN.test(value) || !Number.isFinite(Number(value)) || Number(value) <= 0 || Number(value) > 999999.99) {
     throw new PosPublishError(code)
   }
   return value
@@ -121,14 +121,20 @@ async function readBoundedJson(response, maxBytes) {
 }
 
 export function validateClaimResponse(value) {
-  assertSafeRecord(value, ['job_id', 'operation', 'product_id', 'upc', 'price', 'attempt', 'claimed_at'], 'api_response_invalid')
+  assertSafeRecord(value, ['job_id', 'operation', 'product_id', 'upc', 'modifier', 'expected_price', 'price', 'attempt', 'claimed_at'], 'api_response_invalid')
   if (value.operation !== 'update_price' || !Number.isSafeInteger(value.attempt) || value.attempt < 1) throw new PosPublishError('api_response_invalid')
+  const expectedPrice = assertDecimalPrice(value.expected_price)
+  const requestedPrice = assertDecimalPrice(value.price)
+  if (expectedPrice === requestedPrice) throw new PosPublishError('api_response_invalid')
+  if (typeof value.modifier !== 'string' || !/^\d{3}$/.test(value.modifier)) throw new PosPublishError('api_response_invalid')
   return {
     job_id: assertUuid(value.job_id, 'api_response_invalid'),
     operation: 'update_price',
     product_id: assertUuid(value.product_id, 'api_response_invalid'),
     upc: assertCanonicalUpc(value.upc),
-    price: assertDecimalPrice(value.price),
+    modifier: value.modifier,
+    expected_price: expectedPrice,
+    price: requestedPrice,
     attempt: value.attempt,
     claimed_at: assertRfc3339Timestamp(value.claimed_at),
   }
@@ -144,8 +150,9 @@ export function validateReportPayload(payload) {
     }
     if (payload.status === 'completed') {
       assertSafeRecord(payload, ['job_id', 'status', 'verification'], 'report_payload_invalid')
-      assertSafeRecord(payload.verification, ['upc', 'price'], 'report_payload_invalid')
-      return { job_id, status: 'completed', verification: { upc: assertCanonicalUpc(payload.verification.upc, 'report_payload_invalid'), price: assertDecimalPrice(payload.verification.price, 'report_payload_invalid') } }
+      assertSafeRecord(payload.verification, ['upc', 'modifier', 'price'], 'report_payload_invalid')
+      if (typeof payload.verification.modifier !== 'string' || !/^\d{3}$/.test(payload.verification.modifier)) throw new PosPublishError('report_payload_invalid')
+      return { job_id, status: 'completed', verification: { upc: assertCanonicalUpc(payload.verification.upc, 'report_payload_invalid'), modifier: payload.verification.modifier, price: assertDecimalPrice(payload.verification.price, 'report_payload_invalid') } }
     }
     if (payload.status === 'failed') {
       assertSafeRecord(payload, ['job_id', 'status', 'error_code', 'error_message'], 'report_payload_invalid')

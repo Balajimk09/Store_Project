@@ -10,7 +10,6 @@ const IPV4 = /^(?:25[0-5]|2[0-4]\d|1?\d?\d)(?:\.(?:25[0-5]|2[0-4]\d|1?\d?\d)){3}
 const fail = (code) => { const error = new Error(code); error.code = code; throw error; };
 const fixedPaths = (programData) => ({
   caBundlePath: path.win32.join(programData, 'StorePulse', 'certificates', 'commander-ca.pem'),
-  serverCertificatePath: path.win32.join(programData, 'StorePulse', 'certificates', 'commander-server.pem'),
 });
 
 export function validateCommanderTlsConfig(value) {
@@ -34,15 +33,6 @@ function isPem(buffer) {
   return !value.includes('\uFFFD') && /^-----BEGIN CERTIFICATE-----[\s\S]+-----END CERTIFICATE-----\s*$/m.test(value);
 }
 
-function certificateDer(buffer) {
-  const text = buffer.toString('utf8');
-  const matches = [...text.matchAll(/-----BEGIN CERTIFICATE-----\s*([A-Za-z0-9+/=\s]+?)\s*-----END CERTIFICATE-----/g)];
-  if (matches.length !== 1) fail('commander_certificate_invalid');
-  const der = Buffer.from(matches[0][1].replace(/\s/g, ''), 'base64');
-  if (der.length < 32) fail('commander_certificate_invalid');
-  return der;
-}
-
 /** Resolves only fixed ProgramData trust files and returns in-memory TLS material. */
 export async function resolveCommanderTlsTrust({
   config,
@@ -53,15 +43,12 @@ export async function resolveCommanderTlsTrust({
   if (typeof programData !== 'string' || !/^[A-Za-z]:\\/.test(programData) || programData.includes('..')) fail('commander_trust_not_configured');
   const paths = fixedPaths(programData);
   await regularFile(filesystem, paths.caBundlePath, 'commander_ca_missing');
-  await regularFile(filesystem, paths.serverCertificatePath, 'commander_server_certificate_missing');
-  let caBundle; let serverCertificate;
-  try { [caBundle, serverCertificate] = await Promise.all([filesystem.readFile(paths.caBundlePath), filesystem.readFile(paths.serverCertificatePath)]); } catch { fail('commander_certificate_invalid'); }
-  if (!Buffer.isBuffer(caBundle) || !Buffer.isBuffer(serverCertificate) || !isPem(caBundle) || !isPem(serverCertificate)) fail('commander_certificate_invalid');
+  let caBundle;
+  try { caBundle = await filesystem.readFile(paths.caBundlePath); } catch { fail('commander_certificate_invalid'); }
+  if (!Buffer.isBuffer(caBundle) || !isPem(caBundle)) fail('commander_certificate_invalid');
   const caBundleSha256 = createHash('sha256').update(caBundle).digest('hex').toUpperCase();
-  const peerSha256 = createHash('sha256').update(certificateDer(serverCertificate)).digest('hex').toUpperCase();
   if (caBundleSha256 !== validated.caBundleSha256) fail('commander_ca_hash_mismatch');
-  if (peerSha256 !== validated.peerSha256) fail('commander_certificate_hash_mismatch');
-  return Object.freeze({ caBundle, serverName: validated.serverName, peerSha256 });
+  return Object.freeze({ caBundle, serverName: validated.serverName, peerSha256: validated.peerSha256 });
 }
 
 export const COMMANDER_TLS_FIXED_PATHS = fixedPaths;

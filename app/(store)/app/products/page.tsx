@@ -164,6 +164,52 @@ type NewProductsResponse =
   | { ok: true; candidates: NewProductCandidate[]; counts: NewProductCounts }
   | { ok: false; error: string };
 
+type CommanderObservation = {
+  id: string;
+  source_product_key: string;
+  upc: string;
+  modifier: string;
+  description: string;
+  price: string;
+  department: string;
+  status: 'observed' | 'reviewed' | 'imported' | 'rejected';
+  observed_at: string;
+  updated_at: string;
+};
+
+type CommanderObservationsResponse =
+  | {
+      ok: true;
+      source_system: 'commander';
+      count: number;
+      observations: CommanderObservation[];
+    }
+  | { ok: false; error_code: string };
+
+type CommanderPriceJob = {
+  id: string;
+  status: 'pending' | 'claimed' | 'sending' | 'verifying' | 'completed' | 'failed' | 'cancelled';
+  expected_price: string;
+  requested_price: string;
+  created_at: string;
+  completed_at: string | null;
+  failed_at: string | null;
+  failure_code: string | null;
+};
+
+type CommanderPriceResponse =
+  | { ok: true; job: CommanderPriceJob }
+  | { ok: false; error_code: string };
+
+type CommanderPriceIdentity = {
+  product_id: string;
+  source_product_key: string;
+};
+
+type CommanderPriceIdentityResponse =
+  | { ok: true; identities: CommanderPriceIdentity[] }
+  | { ok: false; error_code: string };
+
 type SaveNewProductResponse =
   | {
       ok: true;
@@ -291,6 +337,7 @@ const PRODUCTS_MANAGE_STORE_MESSAGE = 'Select a specific store to manage product
 const PRODUCTS_ALL_STORES_READONLY_MESSAGE =
   'All Stores product aggregation is not available yet. Select a specific store to view and manage products.';
 const PRESET_AGE_TYPES = ['Tobacco', 'Alcohol', 'Lottery', 'Vape'];
+const COMMANDER_PRICE_ACTIVE_JOB_STATUSES = new Set(['pending', 'claimed', 'sending', 'verifying']);
 const EMPTY_NEW_PRODUCT_COUNTS: NewProductCounts = {
   total: 0,
   readyToAdd: 0,
@@ -421,6 +468,13 @@ function formatCandidateDate(value: string | null) {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return '-';
   return date.toLocaleDateString();
+}
+
+function formatObservationDate(value: string | null) {
+  if (!value) return '-';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '-';
+  return date.toLocaleString();
 }
 
 function formatPercentDifference(value: number) {
@@ -939,6 +993,17 @@ export default function ProductsPage() {
   const [newProductsLoading, setNewProductsLoading] = useState(false);
   const [newProductsError, setNewProductsError] = useState<string | null>(null);
   const [newProductsMessage, setNewProductsMessage] = useState<string | null>(null);
+  const [commanderObservations, setCommanderObservations] = useState<CommanderObservation[]>([]);
+  const [commanderObservationsLoading, setCommanderObservationsLoading] = useState(false);
+  const [commanderObservationsError, setCommanderObservationsError] = useState<string | null>(null);
+  const [commanderPriceIdentities, setCommanderPriceIdentities] = useState<CommanderPriceIdentity[]>([]);
+  const [commanderPriceObservation, setCommanderPriceObservation] = useState<CommanderObservation | null>(null);
+  const [commanderPriceProductId, setCommanderPriceProductId] = useState<string | null>(null);
+  const [commanderRequestedPrice, setCommanderRequestedPrice] = useState('');
+  const [commanderPriceConfirmed, setCommanderPriceConfirmed] = useState(false);
+  const [commanderPriceJob, setCommanderPriceJob] = useState<CommanderPriceJob | null>(null);
+  const [commanderPriceSubmitting, setCommanderPriceSubmitting] = useState(false);
+  const [commanderPriceError, setCommanderPriceError] = useState<string | null>(null);
   const [reviewingNewProduct, setReviewingNewProduct] = useState<NewProductCandidate | null>(null);
   const [newProductReviewForm, setNewProductReviewForm] = useState<ProductFormState>(EMPTY_NEW_PRODUCT_REVIEW_FORM);
   const [newProductReviewFieldErrors, setNewProductReviewFieldErrors] = useState<NewProductReviewFieldErrors>({});
@@ -1043,6 +1108,156 @@ export default function ProductsPage() {
       setNewProductsLoading(false);
     }
   }, [activeStoreId]);
+
+  const loadCommanderObservations = useCallback(async () => {
+    if (!activeStoreId) {
+      setCommanderObservations([]);
+      setCommanderPriceIdentities([]);
+      setCommanderObservationsError(null);
+      setCommanderObservationsLoading(false);
+      return;
+    }
+
+    setCommanderObservationsLoading(true);
+    setCommanderObservationsError(null);
+
+    try {
+      const [response, identitiesResponse] = await Promise.all([
+        fetch(`/api/products/commander-observations?storeId=${encodeURIComponent(activeStoreId)}`),
+        fetch(`/api/products/commander-price?storeId=${encodeURIComponent(activeStoreId)}&identities=1`),
+      ]);
+      const json = (await response.json()) as CommanderObservationsResponse;
+      const identitiesJson = (await identitiesResponse.json()) as CommanderPriceIdentityResponse;
+
+      if (!response.ok || !json.ok || !identitiesResponse.ok || !identitiesJson.ok) {
+        throw new Error('Unable to load Commander staged products.');
+      }
+
+      setCommanderObservations(json.observations);
+      setCommanderPriceIdentities(identitiesJson.identities);
+    } catch {
+      setCommanderObservations([]);
+      setCommanderPriceIdentities([]);
+      setCommanderObservationsError('Unable to load Commander staged products.');
+    } finally {
+      setCommanderObservationsLoading(false);
+    }
+  }, [activeStoreId]);
+
+  const commanderPriceIdentityByKey = useMemo(
+    () => new Map(commanderPriceIdentities.map((identity) => [identity.source_product_key, identity.product_id])),
+    [commanderPriceIdentities]
+  );
+
+  const closeCommanderPrice = useCallback(() => {
+    if (commanderPriceSubmitting) return;
+    setCommanderPriceObservation(null);
+    setCommanderPriceProductId(null);
+    setCommanderRequestedPrice('');
+    setCommanderPriceConfirmed(false);
+    setCommanderPriceJob(null);
+    setCommanderPriceError(null);
+  }, [commanderPriceSubmitting]);
+
+  const openCommanderPrice = useCallback((observation: CommanderObservation) => {
+    const productId = commanderPriceIdentityByKey.get(observation.source_product_key);
+    if (!productId || !items.some((product) => product.id === productId)) {
+      setCommanderPriceError('This staged Commander product does not have an exact StorePulse source identity.');
+      return;
+    }
+    setCommanderPriceObservation(observation);
+    setCommanderPriceProductId(productId);
+    setCommanderRequestedPrice('');
+    setCommanderPriceConfirmed(false);
+    setCommanderPriceJob(null);
+    setCommanderPriceError(null);
+  }, [commanderPriceIdentityByKey, items]);
+
+  const refreshCommanderPriceJob = useCallback(async (jobId: string) => {
+    if (!activeStoreId) return;
+    try {
+      const response = await fetch(
+        `/api/products/commander-price?storeId=${encodeURIComponent(activeStoreId)}&jobId=${encodeURIComponent(jobId)}`
+      );
+      const json = (await response.json()) as CommanderPriceResponse;
+      if (!response.ok || !json.ok) throw new Error('Unable to check the Commander price update.');
+      setCommanderPriceJob(json.job);
+      if (json.job.status === 'completed') {
+        setCommanderPriceError(null);
+        await Promise.resolve(refreshStoreData());
+        await loadCommanderObservations();
+      } else if (json.job.status === 'failed' || json.job.status === 'cancelled') {
+        setCommanderPriceError(
+          json.job.failure_code
+            ? `Commander price update failed: ${json.job.failure_code}.`
+            : 'Commander price update did not complete.'
+        );
+      }
+    } catch {
+      setCommanderPriceError('Unable to check the Commander price update.');
+    }
+  }, [activeStoreId, loadCommanderObservations, refreshStoreData]);
+
+  useEffect(() => {
+    if (!commanderPriceJob || !COMMANDER_PRICE_ACTIVE_JOB_STATUSES.has(commanderPriceJob.status)) return;
+    const timer = window.setTimeout(() => {
+      void refreshCommanderPriceJob(commanderPriceJob.id);
+    }, 2000);
+    return () => window.clearTimeout(timer);
+  }, [commanderPriceJob, refreshCommanderPriceJob]);
+
+  const submitCommanderPrice = useCallback(async () => {
+    if (!activeStoreId || !commanderPriceObservation || !commanderPriceProductId) {
+      setCommanderPriceError('The mapped StorePulse product is unavailable.');
+      return;
+    }
+    if (!commanderPriceConfirmed) {
+      setCommanderPriceError('Confirm that this action will change the price in Commander.');
+      return;
+    }
+    if (!/^(?:0|[1-9]\d*)\.\d{2}$/.test(commanderRequestedPrice)) {
+      setCommanderPriceError('Enter the new price with exactly two decimal places.');
+      return;
+    }
+    if (commanderRequestedPrice === commanderPriceObservation.price) {
+      setCommanderPriceError('The requested price must differ from the current Commander price.');
+      return;
+    }
+
+    setCommanderPriceSubmitting(true);
+    setCommanderPriceError(null);
+    try {
+      const response = await fetch('/api/products/commander-price', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          store_id: activeStoreId,
+          product_id: commanderPriceProductId,
+          expected_price: commanderPriceObservation.price,
+          requested_price: commanderRequestedPrice,
+          idempotency_key: `commander-price:${crypto.randomUUID()}`,
+        }),
+      });
+      const json = (await response.json()) as CommanderPriceResponse;
+      if (!response.ok || !json.ok) {
+        const code = json.ok ? 'publish_unavailable' : json.error_code;
+        throw new Error(code);
+      }
+      setCommanderPriceJob(json.job);
+    } catch (error) {
+      const code = error instanceof Error ? error.message : 'publish_unavailable';
+      const message = code === 'publish_already_active'
+        ? 'A price update is already active for this product.'
+        : code === 'publish_conflict'
+          ? 'StorePulse or the staged Commander price changed. Refresh before trying again.'
+          : code === 'forbidden'
+            ? 'You are not authorized to publish for this store.'
+            : 'Unable to queue the Commander price update.';
+      setCommanderPriceError(message);
+    } finally {
+      setCommanderPriceSubmitting(false);
+    }
+  }, [activeStoreId, commanderPriceConfirmed, commanderPriceObservation, commanderPriceProductId, commanderRequestedPrice]);
 
   const resetNewProductReviewModal = useCallback(() => {
     setReviewingNewProduct(null);
@@ -1163,7 +1378,8 @@ export default function ProductsPage() {
   useEffect(() => {
     if (activeTab !== 'newProducts') return;
     void loadNewProductCandidates();
-  }, [activeTab, loadNewProductCandidates]);
+    void loadCommanderObservations();
+  }, [activeTab, loadCommanderObservations, loadNewProductCandidates]);
 
   useEffect(() => {
     if (!reviewingNewProduct) return;
@@ -2268,6 +2484,16 @@ export default function ProductsPage() {
 
     if (validationError) {
       setFormError(validationError);
+      return;
+    }
+
+    if (
+      modalMode === 'edit'
+      && editingProduct?.id
+      && commanderPriceIdentities.some((identity) => identity.product_id === editingProduct.id)
+      && safeNumber(form.sellPrice).toFixed(2) !== editingProduct.sellPrice.toFixed(2)
+    ) {
+      setFormError('Use Commander POS Sync to change a mapped Commander price. StorePulse updates only after Commander readback succeeds.');
       return;
     }
 
@@ -3509,7 +3735,7 @@ const nextBreakdown = getCaseBreakdown(nextStock, unitsPerCase);
 
           <Card className="overflow-hidden">
             <div className="overflow-x-auto">
-              <table className="w-full min-w-[980px] text-sm">
+              <table className="w-full min-w-[1120px] text-sm">
                 <thead className="bg-secondary/50 text-xs uppercase tracking-wide text-muted-foreground">
                   <tr>
                     {bulkEditMode && (
@@ -3657,6 +3883,123 @@ const nextBreakdown = getCaseBreakdown(nextStock, unitsPerCase);
                   </Button>
                 </div>
               </Card>
+
+              <Card className="p-5">
+                <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+                  <div>
+                    <h2 className="text-lg font-semibold text-foreground">Commander POS Sync</h2>
+                    <p className="mt-1 text-sm text-muted-foreground">
+                      Commander products are staged for review. A mapped product can queue one manual price update only after Commander verifies the current price.
+                    </p>
+                  </div>
+                  <Button variant="outline" size="sm" onClick={() => void loadCommanderObservations()} disabled={commanderObservationsLoading}>
+                    {commanderObservationsLoading ? 'Loading...' : 'Refresh'}
+                  </Button>
+                </div>
+
+                <div className="mt-5 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+                  <div>
+                    <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Source</p>
+                    <p className="mt-1 font-semibold text-foreground">Verifone Commander</p>
+                  </div>
+                  <div>
+                    <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Staged Products</p>
+                    <p className="mt-1 font-semibold text-foreground">{formatNumber(commanderObservations.length)}</p>
+                  </div>
+                  <div>
+                    <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Last Observed</p>
+                    <p className="mt-1 text-sm font-semibold text-foreground">{formatObservationDate(commanderObservations[0]?.observed_at || null)}</p>
+                  </div>
+                  <div>
+                    <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Status</p>
+                    <p className="mt-1 font-semibold text-foreground">Awaiting review</p>
+                  </div>
+                </div>
+              </Card>
+
+              {commanderObservationsLoading ? (
+                <Card className="p-8 text-center text-sm text-muted-foreground">
+                  Loading Commander staged products...
+                </Card>
+              ) : commanderObservationsError ? (
+                <Card className="border-destructive/30 bg-destructive/10 p-5 text-destructive">
+                  <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                    <div className="flex items-start gap-3">
+                      <CircleAlert className="mt-0.5 h-5 w-5 shrink-0" />
+                      <div>
+                        <h3 className="font-semibold">Could not load Commander staged products</h3>
+                        <p className="mt-1 text-sm">{commanderObservationsError}</p>
+                      </div>
+                    </div>
+                    <Button variant="outline" size="sm" onClick={() => void loadCommanderObservations()}>
+                      Retry
+                    </Button>
+                  </div>
+                </Card>
+              ) : commanderObservations.length === 0 ? (
+                <Card className="p-8 text-center">
+                  <Package className="mx-auto h-8 w-8 text-muted-foreground" />
+                  <h3 className="mt-3 font-semibold text-foreground">No Commander products are staged for this store.</h3>
+                  <p className="mx-auto mt-1 max-w-xl text-sm text-muted-foreground">
+                    Commander observations will appear here for review after a supervised local import.
+                  </p>
+                </Card>
+              ) : (
+                <Card className="overflow-hidden">
+                  <div className="border-b border-border p-5">
+                    <h3 className="font-semibold text-foreground">Staged Commander Products</h3>
+                    <p className="mt-1 text-sm text-muted-foreground">Only observations with an exact StorePulse Commander identity can request a manual price update.</p>
+                  </div>
+                  <div className="overflow-x-auto">
+                    <table className="w-full min-w-[1120px] text-sm">
+                      <thead className="bg-secondary/50 text-xs uppercase tracking-wide text-muted-foreground">
+                        <tr>
+                          <th className="px-4 py-3 text-left">UPC</th>
+                          <th className="px-4 py-3 text-left">Modifier</th>
+                          <th className="px-4 py-3 text-left">Description</th>
+                          <th className="px-4 py-3 text-left">Price</th>
+                          <th className="px-4 py-3 text-left">Department</th>
+                          <th className="px-4 py-3 text-left">Observation Status</th>
+                          <th className="px-4 py-3 text-left">Last Observed</th>
+                          <th className="px-4 py-3 text-left">Action</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {commanderObservations.map((observation) => {
+                          const mappedProductId = commanderPriceIdentityByKey.get(observation.source_product_key);
+                          return (
+                            <tr key={observation.id} className="border-t border-border/70 hover:bg-secondary/30">
+                              <td className="px-4 py-4 font-mono text-xs text-foreground">{observation.upc}</td>
+                              <td className="px-4 py-4 font-mono text-xs text-foreground">{observation.modifier}</td>
+                              <td className="px-4 py-4 text-foreground">{observation.description}</td>
+                              <td className="px-4 py-4 text-foreground">{formatCurrency(Number(observation.price))}</td>
+                              <td className="px-4 py-4 text-foreground">{observation.department}</td>
+                              <td className="px-4 py-4">
+                                <span className="inline-flex rounded-full bg-secondary px-2 py-0.5 text-xs font-semibold text-muted-foreground">
+                                  {observation.status}
+                                </span>
+                              </td>
+                              <td className="px-4 py-4 text-xs text-muted-foreground">{formatObservationDate(observation.observed_at)}</td>
+                              <td className="px-4 py-4">
+                                {mappedProductId ? (
+                                  <Button
+                                    size="sm"
+                                    onClick={() => openCommanderPrice(observation)}
+                                  >
+                                    Request Price Update
+                                  </Button>
+                                ) : (
+                                  <span className="text-xs text-muted-foreground">Read only</span>
+                                )}
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                </Card>
+              )}
 
               {newProductsMessage && (
                 <Card className="border-success/20 bg-success/5 p-4 text-sm font-medium text-success">
@@ -5007,6 +5350,105 @@ const nextBreakdown = getCaseBreakdown(nextStock, unitsPerCase);
                   />
                 </section>
               </div>
+            </div>
+          </Card>
+        </div>
+      )}
+
+      {commanderPriceObservation && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+          <Card className="w-full max-w-lg p-6 shadow-xl">
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <p className="text-xs font-semibold uppercase tracking-wide text-primary">Manual Commander price update</p>
+                <h2 className="mt-1 text-xl font-semibold text-foreground">Request Commander price update</h2>
+                <p className="mt-2 font-mono text-xs text-muted-foreground">
+                  {commanderPriceObservation.upc}/{commanderPriceObservation.modifier}
+                </p>
+              </div>
+              <Button variant="ghost" size="icon" onClick={closeCommanderPrice} disabled={commanderPriceSubmitting} aria-label="Close Commander price dialog">
+                <X className="h-4 w-4" />
+              </Button>
+            </div>
+
+            <div className="mt-5 rounded-lg border border-border bg-secondary/30 p-4 text-sm">
+              <div className="flex items-center justify-between gap-4">
+                <span className="text-muted-foreground">Current staged Commander price</span>
+                <span className="font-semibold text-foreground">{formatCurrency(Number(commanderPriceObservation.price))}</span>
+              </div>
+              <p className="mt-3 text-xs text-muted-foreground">
+                StorePulse will not change its catalog price until the HUB writes Commander and a mandatory vPLUs readback confirms the requested value.
+              </p>
+            </div>
+
+            {!commanderPriceJob && (
+              <label className="mt-5 block">
+                <span className="text-sm font-medium text-foreground">New price</span>
+                <Input
+                  className="mt-2"
+                  inputMode="decimal"
+                  placeholder="0.04"
+                  value={commanderRequestedPrice}
+                  onChange={(event) => setCommanderRequestedPrice(event.target.value)}
+                  disabled={commanderPriceSubmitting}
+                />
+              </label>
+            )}
+
+            {!commanderPriceJob && (
+              <label className="mt-4 flex items-start gap-3 rounded-lg border border-border p-3 text-sm">
+                <input
+                  type="checkbox"
+                  className="mt-0.5 h-4 w-4"
+                  checked={commanderPriceConfirmed}
+                  onChange={(event) => setCommanderPriceConfirmed(event.target.checked)}
+                  disabled={commanderPriceSubmitting}
+                />
+                <span className="text-muted-foreground">
+                  I understand this action will change the live Commander price only after the HUB connector verifies the current price and identity.
+                </span>
+              </label>
+            )}
+
+            {commanderPriceJob && (
+              <div className="mt-5 rounded-lg border border-border p-4 text-sm">
+                <div className="flex items-center justify-between gap-3">
+                  <span className="text-muted-foreground">Job status</span>
+                  <span className="font-semibold text-foreground">{commanderPriceJob.status}</span>
+                </div>
+                <div className="mt-2 flex items-center justify-between gap-3">
+                  <span className="text-muted-foreground">Requested price</span>
+                  <span className="font-semibold text-foreground">{formatCurrency(Number(commanderPriceJob.requested_price))}</span>
+                </div>
+                {COMMANDER_PRICE_ACTIVE_JOB_STATUSES.has(commanderPriceJob.status) && (
+                  <p className="mt-3 text-xs text-muted-foreground">Waiting for the HUB connector. Status refreshes automatically.</p>
+                )}
+                {commanderPriceJob.status === 'completed' && (
+                  <p className="mt-3 text-sm font-medium text-success">Commander readback matched. StorePulse now reflects the confirmed price.</p>
+                )}
+              </div>
+            )}
+
+            {commanderPriceError && (
+              <div className="mt-4 rounded-lg border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">
+                {commanderPriceError}
+              </div>
+            )}
+
+            <div className="mt-6 flex justify-end gap-3">
+              <Button variant="outline" onClick={closeCommanderPrice} disabled={commanderPriceSubmitting}>
+                {commanderPriceJob?.status === 'completed' ? 'Close' : 'Cancel'}
+              </Button>
+              {!commanderPriceJob && (
+                <Button onClick={() => void submitCommanderPrice()} disabled={commanderPriceSubmitting || !commanderPriceConfirmed}>
+                  {commanderPriceSubmitting ? 'Queueing...' : 'Queue Price Update'}
+                </Button>
+              )}
+              {commanderPriceJob && COMMANDER_PRICE_ACTIVE_JOB_STATUSES.has(commanderPriceJob.status) && (
+                <Button variant="outline" onClick={() => void refreshCommanderPriceJob(commanderPriceJob.id)}>
+                  Check Status
+                </Button>
+              )}
             </div>
           </Card>
         </div>

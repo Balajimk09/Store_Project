@@ -17,11 +17,12 @@ function validateReadProduct(value) {
     throw new PosPublishError('commander_response_invalid')
   }
   const keys = Object.keys(value)
-  if (keys.length !== 2 || !keys.includes('upc') || !keys.includes('price') || keys.some((key) => key === '__proto__' || key === 'constructor' || key === 'prototype')) {
+  if (keys.length !== 3 || !keys.includes('upc') || !keys.includes('modifier') || !keys.includes('price') || keys.some((key) => key === '__proto__' || key === 'constructor' || key === 'prototype')) {
     throw new PosPublishError('commander_response_invalid')
   }
   try {
-    return { upc: assertCanonicalUpc(value.upc, 'commander_response_invalid'), price: assertDecimalPrice(value.price, 'commander_response_invalid') }
+    if (typeof value.modifier !== 'string' || !/^\d{3}$/.test(value.modifier)) throw new Error('modifier_invalid')
+    return { upc: assertCanonicalUpc(value.upc, 'commander_response_invalid'), modifier: value.modifier, price: assertDecimalPrice(value.price, 'commander_response_invalid') }
   } catch {
     throw new PosPublishError('commander_response_invalid')
   }
@@ -107,7 +108,7 @@ export function createPosPublishWorker({ apiClient, commanderAdapter, logger = (
         executionGuard.add(job.job_id)
         safeLog(logger, { event: 'pos_publish_sending', job_id: job.job_id, operation: job.operation, attempt: job.attempt, status: 'sending' })
         try {
-          await adapter.updatePrice({ upc: job.upc, price: job.price })
+          await adapter.updatePrice({ upc: job.upc, modifier: job.modifier, expectedPrice: job.expected_price, price: job.price })
         } catch (error) {
           const failure = failureFor(error)
           const failureReported = await reportFailure(job, failure)
@@ -125,8 +126,8 @@ export function createPosPublishWorker({ apiClient, commanderAdapter, logger = (
 
         let product
         try {
-          product = validateReadProduct(await adapter.readProduct({ upc: job.upc }))
-          if (product.upc !== job.upc) throw new PosPublishError('verification_upc_mismatch')
+          product = validateReadProduct(await adapter.readProduct({ upc: job.upc, modifier: job.modifier }))
+          if (product.upc !== job.upc || product.modifier !== job.modifier) throw new PosPublishError('verification_upc_mismatch')
           if (product.price !== job.price) throw new PosPublishError('verification_price_mismatch')
         } catch (error) {
           const failure = failureFor(error)
@@ -136,7 +137,7 @@ export function createPosPublishWorker({ apiClient, commanderAdapter, logger = (
         }
 
         try {
-          await apiClient.report({ job_id: job.job_id, status: 'completed', verification: { upc: job.upc, price: job.price } })
+          await apiClient.report({ job_id: job.job_id, status: 'completed', verification: { upc: job.upc, modifier: job.modifier, price: job.price } })
         } catch {
           safeLog(logger, { event: 'pos_publish_status_report_failed', job_id: job.job_id, operation: job.operation, attempt: job.attempt, status: 'completed', error_code: 'internal_connector_error', duration_ms: elapsed() })
           return { outcome: 'status_report_failed', job_id: job.job_id, stage: 'completed', failure_reported: false }

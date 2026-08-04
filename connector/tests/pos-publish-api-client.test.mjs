@@ -18,6 +18,8 @@ function claimJob(overrides = {}) {
     operation: 'update_price',
     product_id: PRODUCT_ID,
     upc: '00012345678901',
+    modifier: '000',
+    expected_price: '0.99',
     price: '1.00',
     attempt: 1,
     claimed_at: '2026-07-16T12:00:00.000Z',
@@ -135,18 +137,21 @@ test('malformed, empty, primitive, array, and secret-bearing error responses sta
 })
 
 test('claim validation requires exactly fourteen-digit UPCs and strict RFC3339 timestamps', () => {
-  const polluted = JSON.parse('{"job_id":"11111111-1111-4111-8111-111111111111","operation":"update_price","product_id":"22222222-2222-4222-8222-222222222222","upc":"00012345678901","price":"1.00","attempt":1,"claimed_at":"2026-07-16T12:00:00Z","__proto__":{}}')
+  const polluted = JSON.parse('{"job_id":"11111111-1111-4111-8111-111111111111","operation":"update_price","product_id":"22222222-2222-4222-8222-222222222222","upc":"00012345678901","modifier":"000","expected_price":"0.99","price":"1.00","attempt":1,"claimed_at":"2026-07-16T12:00:00Z","__proto__":{}}')
   assert.equal(validateClaimResponse(claimJob()).upc, '00012345678901')
+  assert.equal(validateClaimResponse(claimJob()).expected_price, '0.99')
   assert.equal(validateClaimResponse(claimJob({ upc: '00000000000001' })).upc, '00000000000001')
   assert.equal(validateClaimResponse(claimJob({ claimed_at: '2026-07-16T12:00:00+05:30' })).claimed_at, '2026-07-16T12:00:00+05:30')
   const invalids = [
     claimJob({ job_id: 'not-a-uuid' }), claimJob({ operation: 'delete_product' }), claimJob({ upc: 'ABC' }),
     claimJob({ upc: '1'.repeat(CANONICAL_UPC_LENGTH - 1) }), claimJob({ upc: '1'.repeat(CANONICAL_UPC_LENGTH + 1) }),
-    claimJob({ upc: '1'.repeat(64) }), claimJob({ upc: '1'.repeat(65) }), claimJob({ upc: 12345678901234 }), claimJob({ upc: '00012345-678901' }),
-    claimJob({ upc: ' 00012345678901' }), claimJob({ price: '1.2' }), claimJob({ price: 1 }),
+    claimJob({ upc: '1'.repeat(64) }), claimJob({ upc: '1'.repeat(65) }), claimJob({ upc: 12345678901234 }), claimJob({ upc: '00012345-678901' }), claimJob({ modifier: '00' }), claimJob({ modifier: 0 }),
+    claimJob({ upc: ' 00012345678901' }), claimJob({ expected_price: '1.2' }), claimJob({ expected_price: 1 }),
+    claimJob({ expected_price: '1.00' }), claimJob({ expected_price: '1000000.00' }), claimJob({ price: '1000000.00' }), claimJob({ price: '1.2' }), claimJob({ price: 1 }),
     claimJob({ attempt: 0 }), claimJob({ attempt: Number.MAX_SAFE_INTEGER + 1 }), claimJob({ claimed_at: '2026-07-16' }),
     claimJob({ claimed_at: 'July 16, 2026' }), claimJob({ claimed_at: '2026-02-30T12:00:00Z' }), claimJob({ claimed_at: '2026-07-16T12:00:00' }),
-    (() => { const value = claimJob(); delete value.upc; return value })(), claimJob({ extra: 'not-allowed' }), polluted,
+    (() => { const value = claimJob(); delete value.upc; return value })(), (() => { const value = claimJob(); delete value.modifier; return value })(),
+    (() => { const value = claimJob(); delete value.expected_price; return value })(), claimJob({ extra: 'not-allowed' }), polluted,
     { ...claimJob(), constructor: {} }, { ...claimJob(), prototype: {} }, null, [], 'claim', 1,
   ]
   for (const value of invalids) assert.throws(() => validateClaimResponse(value), /api_response_invalid/)
@@ -154,12 +159,12 @@ test('claim validation requires exactly fourteen-digit UPCs and strict RFC3339 t
 
 test('report validation permits only strict safe payloads', () => {
   assert.deepEqual(validateReportPayload({ job_id: JOB_ID, status: 'sending' }), { job_id: JOB_ID, status: 'sending' })
-  assert.deepEqual(validateReportPayload({ job_id: JOB_ID, status: 'completed', verification: { upc: '00012345678901', price: '1.00' } }), {
-    job_id: JOB_ID, status: 'completed', verification: { upc: '00012345678901', price: '1.00' },
+  assert.deepEqual(validateReportPayload({ job_id: JOB_ID, status: 'completed', verification: { upc: '00012345678901', modifier: '000', price: '1.00' } }), {
+    job_id: JOB_ID, status: 'completed', verification: { upc: '00012345678901', modifier: '000', price: '1.00' },
   })
   const invalids = [
-    { job_id: JOB_ID, status: 'cancelled' }, { job_id: JOB_ID, status: 'completed', verification: { upc: '00012345678901', price: 1 } },
-    { job_id: JOB_ID, status: 'completed', verification: { upc: '00012345678901', price: '1.2', metadata: {} } },
+    { job_id: JOB_ID, status: 'cancelled' }, { job_id: JOB_ID, status: 'completed', verification: { upc: '00012345678901', modifier: '000', price: 1 } },
+    { job_id: JOB_ID, status: 'completed', verification: { upc: '00012345678901', modifier: '000', price: '1.2', metadata: {} } },
     { job_id: JOB_ID, status: 'failed', error_code: 'arbitrary', error_message: 'safe message' },
     { job_id: JOB_ID, status: 'failed', error_code: 'update_rejected', error_message: 'Bearer secret' },
   ]

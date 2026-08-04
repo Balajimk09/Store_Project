@@ -10,6 +10,8 @@ export type ClaimedPublishJob = {
   operation: 'update_price'
   product_id: string
   upc: string
+  modifier: string
+  expected_price: string
   price: string
   attempt: number
   claimed_at: string
@@ -17,7 +19,7 @@ export type ClaimedPublishJob = {
 
 export type ReportRequest =
   | { jobId: string; status: 'sending' | 'verifying' }
-  | { jobId: string; status: 'completed'; verification: { upc: string; price: string } }
+  | { jobId: string; status: 'completed'; verification: { upc: string; modifier: string; price: string } }
   | { jobId: string; status: 'failed'; errorCode: string; errorMessage: string | null }
 
 export const PUBLISH_FAILURE_CODES = new Set([
@@ -27,6 +29,7 @@ export const PUBLISH_FAILURE_CODES = new Set([
   'plu_not_found',
   'plu_identity_mismatch',
   'update_rejected',
+  'price_conflict',
   'verification_failed',
   'job_expired',
   'internal_connector_error',
@@ -65,6 +68,11 @@ export function canonicalUpc(value: unknown, code: string): string {
   return value
 }
 
+export function commanderModifier(value: unknown, code: string): string {
+  if (typeof value !== 'string' || !/^\d{3}$/.test(value)) throw new PublishValidationError(code)
+  return value
+}
+
 export function strictRfc3339Timestamp(value: unknown, code: string): string {
   if (typeof value !== 'string') throw new PublishValidationError(code)
   const match = RFC3339_PATTERN.exec(value)
@@ -88,7 +96,7 @@ export function strictRfc3339Timestamp(value: unknown, code: string): string {
 export function decimalPrice(value: unknown, code: string): string {
   if (typeof value !== 'string' || !PRICE_PATTERN.test(value.trim())) throw new PublishValidationError(code)
   const parsed = Number(value.trim())
-  if (!Number.isFinite(parsed) || parsed <= 0) throw new PublishValidationError(code)
+  if (!Number.isFinite(parsed) || parsed <= 0 || parsed > 999999.99) throw new PublishValidationError(code)
   return parsed.toFixed(2)
 }
 
@@ -189,12 +197,13 @@ export function validateReportRequest(value: unknown): ReportRequest {
   if (value.status === 'completed') {
     requireExactKeys(value, ['job_id', 'status', 'verification'])
     if (!isRecord(value.verification)) throw new PublishValidationError('verification_invalid')
-    requireExactKeys(value.verification, ['upc', 'price'])
+    requireExactKeys(value.verification, ['upc', 'modifier', 'price'])
     return {
       jobId,
       status: 'completed',
       verification: {
         upc: canonicalUpc(value.verification.upc, 'verification_upc_invalid'),
+        modifier: commanderModifier(value.verification.modifier, 'verification_modifier_invalid'),
         price: decimalPrice(value.verification.price, 'verification_price_invalid'),
       },
     }
@@ -216,12 +225,18 @@ export function validateReportRequest(value: unknown): ReportRequest {
 
 export function isSafeClaimedPublishJob(value: unknown): value is ClaimedPublishJob {
   if (!isRecord(value)) return false
+  const requiredKeys = ['job_id', 'operation', 'product_id', 'upc', 'modifier', 'expected_price', 'price', 'attempt', 'claimed_at']
+  const keys = Object.keys(value)
+  if (keys.length !== requiredKeys.length || keys.some((key) => !requiredKeys.includes(key))) return false
   try {
     return requiredUuid(value.job_id, 'job_id_invalid') === value.job_id
       && value.operation === 'update_price'
       && requiredUuid(value.product_id, 'product_id_invalid') === value.product_id
       && canonicalUpc(value.upc, 'upc_invalid') === value.upc
+      && commanderModifier(value.modifier, 'modifier_invalid') === value.modifier
+      && decimalPrice(value.expected_price, 'expected_price_invalid') === value.expected_price
       && decimalPrice(value.price, 'price_invalid') === value.price
+      && value.expected_price !== value.price
       && typeof value.attempt === 'number'
       && Number.isInteger(value.attempt)
       && value.attempt >= 1

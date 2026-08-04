@@ -4,6 +4,27 @@ param()
 Set-StrictMode -Version Latest
 
 $script:StorePulsePosPublishChildActive = $false
+$script:StorePulseInstalledServiceRoot = 'C:\Program Files\StorePulse\Connector\service'
+$script:StorePulseInstalledMachineConfigPath = Join-Path $script:StorePulseInstalledServiceRoot 'storepulse-machine-config.ps1'
+$script:StorePulseInstalledMachineSecretsPath = Join-Path $script:StorePulseInstalledServiceRoot 'storepulse-machine-secrets.ps1'
+$script:StorePulseInstalledCommanderWorkerPath = Join-Path $script:StorePulseInstalledServiceRoot 'storepulse-current-shift-worker.ps1'
+
+function Import-StorePulseInstalledCommanderAuthentication {
+    foreach ($path in @(
+        $script:StorePulseInstalledMachineConfigPath,
+        $script:StorePulseInstalledMachineSecretsPath,
+        $script:StorePulseInstalledCommanderWorkerPath
+    )) {
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw 'commander_adapter_unavailable' }
+    }
+    . $script:StorePulseInstalledMachineConfigPath
+    . $script:StorePulseInstalledMachineSecretsPath
+    . $script:StorePulseInstalledCommanderWorkerPath
+    if (-not (Get-Command New-StorePulseCommanderConnection -ErrorAction SilentlyContinue) -or -not (Get-Command Get-StorePulseCommanderSessionCookie -ErrorAction SilentlyContinue)) {
+        throw 'commander_adapter_unavailable'
+    }
+}
+
 
 if (-not (Get-Command Get-StorePulseProgramDataRoot -ErrorAction SilentlyContinue)) {
     . (Join-Path $PSScriptRoot "storepulse-machine-config.ps1")
@@ -18,7 +39,7 @@ if (-not (Get-Command Invoke-StorePulseConnectorHeartbeat -ErrorAction SilentlyC
     . (Join-Path $PSScriptRoot "storepulse-connector-heartbeat.ps1")
 }
 
-$script:StorePulseRuntimeVersion = "3.1.3-pos-publish-runtime"
+$script:StorePulseRuntimeVersion = "3.2.0-manual-price-publish"
 
 function Get-StorePulseStateRoot {
     param([string]$ProgramDataRoot = "")
@@ -52,11 +73,15 @@ function Test-StorePulseServiceScripts {
         "lib\pos-publish-worker.mjs",
         "lib\pos-publish-api-client.mjs",
         "lib\commander-price-adapter.mjs",
+        "lib\commander\commander-naxml-client.mjs",
+        "lib\commander\commander-product-integration.mjs",
+        "lib\commander\session\commander-tls-trust.mjs",
         "lib\pos-publish-errors.mjs",
         "lib\pos-publish-result-contract.json",
         "lib\storepulse-origin-policy.json",
         "service\storepulse-machine-identity.ps1",
-        "service\storepulse-connector-heartbeat.ps1"
+        "service\storepulse-connector-heartbeat.ps1",
+        "service\storepulse-current-shift-worker.ps1"
     )
     foreach ($name in $required) {
         $path = Join-Path $Root $name
@@ -366,31 +391,77 @@ function Invoke-StorePulsePosPublishChild {
 }
 
 function New-StorePulseDefaultPosPublishWorker {
+    $workerVersion = [string]$script:StorePulseRuntimeVersion
+    if ([string]::IsNullOrWhiteSpace($workerVersion)) {
+        throw "POS publishing worker version is unavailable."
+    }
     return {
         param($Config, $Secrets, $InstallRoot)
-        $nodeManifestPath = Join-Path (Join-Path $InstallRoot "service") "node-runtime-manifest.json"
-        $nodeValidation = Test-StorePulseNodeRuntime -InstallRoot $InstallRoot -ManifestPath $nodeManifestPath -PassThru
-        if (-not $nodeValidation.ok) { throw "POS publishing Node runtime is unavailable." }
-        $entryScript = Join-Path $InstallRoot "lib\pos-publish-runtime-entry.mjs"
-        if (-not (Test-Path -LiteralPath $entryScript -PathType Leaf)) { throw "POS publishing runtime entry script is missing." }
-
-        $input = [ordered]@{
-            connector_token = [string]$Secrets.connector_token
-            trusted_source_endpoint_url = [string]$Config.live_endpoint_url
-            poll_seconds = Get-StorePulsePosPublishPollSeconds -Config $Config
-            worker_version = $script:StorePulseRuntimeVersion
-        } | ConvertTo-Json -Compress
-
-        $programDataRoot = Split-Path -Parent ([string]$Config.logs_root)
-        $stopPath = Get-StorePulseRuntimeStopPath -ProgramDataRoot $programDataRoot
+        $connection = $null
+        $cookie = $null
+        $input = $null
+        $workerResult = $null
+        $safeFailure = $null
+        $cleanupFailed = $false
         try {
-            # The only cross-process secret transport is this bounded in-memory stdin pipe.
-            $stopRequested = { Test-Path -LiteralPath $stopPath -PathType Leaf }.GetNewClosure()
-            return Invoke-StorePulsePosPublishChild -NodePath ([string]$nodeValidation.node_path) -EntryScript $entryScript -Input $input -TimeoutSeconds (Get-StorePulsePosPublishChildTimeoutSeconds -Config $Config) -StopRequested $stopRequested
+            try { Import-StorePulseInstalledCommanderAuthentication } catch {
+                $safeFailure = [PSCustomObject]@{ outcome = "configuration_error"; state = "configuration_error"; last_job_id = $null; last_error_code = "commander_adapter_unavailable" }
+            }
+            if ($null -eq $safeFailure) {
+                if (-not $Config.commander_install_path -or -not $Config.commander_ip -or -not $Secrets.commander_username -or -not $Secrets.commander_password) {
+                    $safeFailure = [PSCustomObject]@{ outcome = "configuration_error"; state = "configuration_error"; last_job_id = $null; last_error_code = "commander_adapter_unavailable" }
+                }
+            }
+            if ($null -eq $safeFailure) {
+                try {
+                    $connection = New-StorePulseCommanderConnection -CommanderInstallPath ([string]$Config.commander_install_path) -CommanderIp ([string]$Config.commander_ip) -Username ([string]$Secrets.commander_username) -Password ([string]$Secrets.commander_password)
+                    $cookie = Get-StorePulseCommanderSessionCookie -Connection $connection
+                    if ($cookie -isnot [string] -or [string]::IsNullOrWhiteSpace($cookie) -or $cookie.Length -gt 4096 -or $cookie -match '[\x00-\x1f\x7f-\x9f&=]') { throw 'commander_authentication' }
+                }
+                catch {
+                    $safeFailure = [PSCustomObject]@{ outcome = "commander_failed"; state = "commander_failed"; last_job_id = $null; last_error_code = "commander_auth_failed" }
+                }
+            }
+            if ($null -eq $safeFailure) {
+                $nodeManifestPath = Join-Path (Join-Path $InstallRoot "service") "node-runtime-manifest.json"
+                $nodeValidation = Test-StorePulseNodeRuntime -InstallRoot $InstallRoot -ManifestPath $nodeManifestPath -PassThru
+                if (-not $nodeValidation.ok) { throw "POS publishing Node runtime is unavailable." }
+                $entryScript = Join-Path $InstallRoot "lib\pos-publish-runtime-entry.mjs"
+                if (-not (Test-Path -LiteralPath $entryScript -PathType Leaf)) { throw "POS publishing runtime entry script is missing." }
+
+                $input = [ordered]@{
+                    connector_token = [string]$Secrets.connector_token
+                    trusted_source_endpoint_url = [string]$Config.live_endpoint_url
+                    poll_seconds = Get-StorePulsePosPublishPollSeconds -Config $Config
+                    worker_version = $workerVersion
+                    session_cookie = [string]$cookie
+                } | ConvertTo-Json -Compress
+
+                $programDataRoot = Split-Path -Parent ([string]$Config.logs_root)
+                $stopPath = Get-StorePulseRuntimeStopPath -ProgramDataRoot $programDataRoot
+                # The primary PowerShell service process owns the COM connection and session.
+                # The cookie crosses only this bounded in-memory stdin pipe to the HTTPS child.
+                $stopRequested = { Test-Path -LiteralPath $stopPath -PathType Leaf }.GetNewClosure()
+                $workerResult = Invoke-StorePulsePosPublishChild -NodePath ([string]$nodeValidation.node_path) -EntryScript $entryScript -Input $input -TimeoutSeconds (Get-StorePulsePosPublishChildTimeoutSeconds -Config $Config) -StopRequested $stopRequested
+            }
         }
         finally {
             $input = $null
+            $cookie = $null
+            if ($null -ne $connection) {
+                try {
+                    if ($connection.PSObject.Methods['Dispose']) { $connection.Dispose() }
+                    elseif ([Runtime.InteropServices.Marshal]::IsComObject($connection)) { [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($connection) }
+                }
+                catch { $cleanupFailed = $true }
+            }
+            $connection = $null
         }
+        if ($cleanupFailed) {
+            return [PSCustomObject]@{ outcome = "internal_error"; state = "error"; last_job_id = $null; last_error_code = "internal_connector_error" }
+        }
+        if ($null -ne $safeFailure) { return $safeFailure }
+        return $workerResult
     }.GetNewClosure()
 }
 
@@ -798,7 +869,9 @@ function Invoke-StorePulseServiceRuntime {
     $liveEnabled = Get-StorePulseConfigBool -Config $config -Name "live_worker_enabled" -Default $true
     $closedEnabled = Get-StorePulseConfigBool -Config $config -Name "closed_day_worker_enabled" -Default $true
     $heartbeatEnabled = Get-StorePulseConfigBool -Config $config -Name "heartbeat_enabled" -Default $false
-    $posPublishEnabled = Get-StorePulseConfigBool -Config $config -Name "pos_publish_enabled" -Default $false
+    $posPublishRequested = Get-StorePulseConfigBool -Config $config -Name "pos_publish_enabled" -Default $false
+    $posPublishMode = if ($config.PSObject.Properties["pos_publish_mode"]) { [string]$config.pos_publish_mode } else { "disabled" }
+    $posPublishEnabled = $posPublishRequested -and $posPublishMode -eq "manual_price_publish"
     $posPublishPollSeconds = Get-StorePulsePosPublishPollSeconds -Config $config
     if ($null -eq $LiveWorker) { $LiveWorker = New-StorePulseDefaultLiveWorker }
     if ($null -eq $ClosedDayWorker) { $ClosedDayWorker = New-StorePulseDefaultClosedDayWorker }

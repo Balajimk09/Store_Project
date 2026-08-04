@@ -242,6 +242,7 @@ test('stdin-only child configuration never reflects the connector token and fail
     trusted_source_endpoint_url: INGEST_URL,
     poll_seconds: 60,
     worker_version: 'offline-test.1',
+    session_cookie: 'fixture-cookie',
   }))
   const exitCode = await new Promise((resolve) => child.once('exit', resolve))
   assert.equal(exitCode, 0)

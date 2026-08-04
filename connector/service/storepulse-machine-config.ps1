@@ -140,10 +140,9 @@ function Add-StorePulsePosPublishConfigDefaults {
     if (-not $Config.PSObject.Properties["pos_publish_enabled"]) {
         Add-Member -InputObject $Config -NotePropertyName "pos_publish_enabled" -NotePropertyValue $false
     }
-    else {
-        # Publishing has no production adapter on this branch. Every writer, repair,
-        # and upgrade path must reset a previously enabled value before validation.
-        $Config.pos_publish_enabled = $false
+    if (-not $Config.PSObject.Properties["pos_publish_mode"]) {
+        # Missing mode always fails closed.
+        Add-Member -InputObject $Config -NotePropertyName "pos_publish_mode" -NotePropertyValue "disabled"
     }
     if (-not $Config.PSObject.Properties["pos_publish_poll_seconds"]) {
         Add-Member -InputObject $Config -NotePropertyName "pos_publish_poll_seconds" -NotePropertyValue 60
@@ -158,6 +157,23 @@ function Add-StorePulsePosPublishConfigDefaults {
             $value = if ($null -eq $derived) { "" } elseif ($field -eq "pos_publish_claim_endpoint_url") { [string]$derived.claim_endpoint_url } else { [string]$derived.report_endpoint_url }
             Add-Member -InputObject $Config -NotePropertyName $field -NotePropertyValue $value -Force
         }
+    }
+    return $Config
+}
+
+function Set-StorePulsePosPublishDisabled {
+    param([Parameter(Mandatory)]$Config)
+    if (-not $Config.PSObject.Properties["pos_publish_enabled"]) {
+        Add-Member -InputObject $Config -NotePropertyName "pos_publish_enabled" -NotePropertyValue $false
+    }
+    else {
+        $Config.pos_publish_enabled = $false
+    }
+    if (-not $Config.PSObject.Properties["pos_publish_mode"]) {
+        Add-Member -InputObject $Config -NotePropertyName "pos_publish_mode" -NotePropertyValue "disabled"
+    }
+    else {
+        $Config.pos_publish_mode = "disabled"
     }
     return $Config
 }
@@ -222,6 +238,9 @@ function Test-StorePulseMachineConfig {
     }
     if ($Config.PSObject.Properties["pos_publish_enabled"] -and $Config.pos_publish_enabled -isnot [bool]) { throw "pos_publish_enabled must be a boolean." }
     $posPublishEnabled = if ($Config.PSObject.Properties["pos_publish_enabled"]) { [bool]$Config.pos_publish_enabled } else { $false }
+    $posPublishMode = if ($Config.PSObject.Properties["pos_publish_mode"]) { [string]$Config.pos_publish_mode } else { "disabled" }
+    if ($posPublishMode -notin @("disabled", "manual_price_publish")) { throw "pos_publish_mode is invalid." }
+    if ($posPublishEnabled -and $posPublishMode -ne "manual_price_publish") { throw "pos_publish_enabled requires manual_price_publish mode." }
     if ($Config.PSObject.Properties["pos_publish_poll_seconds"]) {
         $pollText = [string]$Config.pos_publish_poll_seconds
         if ($pollText -notmatch '^[0-9]+$') { throw "pos_publish_poll_seconds must be a whole number." }
@@ -259,6 +278,7 @@ function Write-StorePulseMachineConfig {
         [switch]$CreateDirectories
     )
     Add-StorePulseHeartbeatConfigDefaults -Config $Config | Out-Null
+    Set-StorePulsePosPublishDisabled -Config $Config | Out-Null
     Test-StorePulseMachineConfig -Config $Config | Out-Null
     $configPath = if ([string]::IsNullOrWhiteSpace($Path)) { Get-StorePulseConfigPath } else { $Path }
     $parent = Split-Path -Parent $configPath
@@ -280,6 +300,7 @@ function Get-StorePulseMachineConfigForHeartbeatUpdate {
     $beforeText = Get-Content -LiteralPath $configPath -Raw
     $config = $beforeText | ConvertFrom-Json
     Add-StorePulseHeartbeatConfigDefaults -Config $config | Out-Null
+    Set-StorePulsePosPublishDisabled -Config $config | Out-Null
     Test-StorePulseMachineConfig -Config $config | Out-Null
     $afterText = ($config | ConvertTo-Json -Depth 20)
     return [PSCustomObject]@{

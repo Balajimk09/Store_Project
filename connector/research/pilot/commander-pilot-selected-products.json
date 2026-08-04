@@ -19,42 +19,22 @@
     {
       "upc": "00999999999993",
       "modifier": "000",
-      "reason": "Dedicated controlled STOREPULSE TEST product; not found in transaction history."
+      "reason": "Dedicated StorePulse-controlled test product for the supervised pilot."
     },
     {
-      "upc": "00000000000406",
+      "upc": "00000000000017",
       "modifier": "000",
-      "reason": "High-volume fountain item found in transaction history."
+      "reason": "Dedicated StorePulse-controlled test product 2 for the supervised pilot."
     },
     {
-      "upc": "00000000000014",
-      "modifier": "145",
-      "reason": "Confirms a non-zero Commander modifier identity."
-    },
-    {
-      "upc": "00685141910038",
+      "upc": "00000000000024",
       "modifier": "000",
-      "reason": "Age-restricted cigarette department example."
+      "reason": "Dedicated StorePulse-controlled test product 3 for the supervised pilot."
     },
     {
-      "upc": "00000000111126",
+      "upc": "00000000034524",
       "modifier": "000",
-      "reason": "Age-restricted beer department example."
-    },
-    {
-      "upc": "00024300834714",
-      "modifier": "000",
-      "reason": "Grocery item with observed transaction price variation."
-    },
-    {
-      "upc": "00000000001007",
-      "modifier": "000",
-      "reason": "PLU-like bag-of-ice item known at the register."
-    },
-    {
-      "upc": "00855553008221",
-      "modifier": "000",
-      "reason": "Normal retail UPC in the lighters department."
+      "reason": "Dedicated StorePulse-controlled test product 4 for the supervised pilot."
     }
   ]
 }

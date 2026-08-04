@@ -9,6 +9,8 @@ const JOB = {
   operation: 'update_price',
   product_id: '22222222-2222-4222-8222-222222222222',
   upc: '00012345678901',
+  modifier: '000',
+  expected_price: '0.99',
   price: '1.00',
   attempt: 1,
   claimed_at: '2026-07-16T12:00:00.000Z',
@@ -18,6 +20,7 @@ function makeWorker({ claim = async () => JOB, reportFailure, adapter = {}, logg
   const events = []
   const reports = []
   const calls = { update: 0, read: 0 }
+  const updateInputs = []
   const apiClient = {
     claim: async () => { events.push('claim'); return claim() },
     report: async (payload) => {
@@ -28,10 +31,10 @@ function makeWorker({ claim = async () => JOB, reportFailure, adapter = {}, logg
     },
   }
   const commanderAdapter = {
-    updatePrice: async (value) => { calls.update += 1; events.push('update'); return adapter.updatePrice?.(value) },
-    readProduct: async (value) => { calls.read += 1; events.push('read'); return adapter.readProduct?.(value) ?? { upc: value.upc, price: '1.00' } },
+    updatePrice: async (value) => { calls.update += 1; updateInputs.push(value); events.push('update'); return adapter.updatePrice?.(value) },
+    readProduct: async (value) => { calls.read += 1; events.push('read'); return adapter.readProduct?.(value) ?? { upc: value.upc, modifier: value.modifier, price: '1.00' } },
   }
-  return { worker: createPosPublishWorker({ apiClient, commanderAdapter, logger, now, executionGuard: guard }), events, reports, calls, guard }
+  return { worker: createPosPublishWorker({ apiClient, commanderAdapter, logger, now, executionGuard: guard }), events, reports, calls, updateInputs, guard }
 }
 
 test('idle claim performs no Commander work', async () => {
@@ -55,10 +58,11 @@ test('a throwing clock returns safely, releases the active guard, and permits th
 })
 
 test('valid job follows the exact safe sequence once', async () => {
-  const { worker, events, calls } = makeWorker()
+  const { worker, events, calls, updateInputs } = makeWorker()
   assert.deepEqual(await worker.processOne(), { outcome: 'completed', job_id: JOB.job_id })
   assert.deepEqual(events, ['claim', 'report:sending', 'update', 'report:verifying', 'read', 'report:completed'])
   assert.deepEqual(calls, { update: 1, read: 1 })
+  assert.deepEqual(updateInputs, [{ upc: JOB.upc, modifier: JOB.modifier, expectedPrice: JOB.expected_price, price: JOB.price }])
 })
 
 test('logger errors are isolated across progress, completion, and failure logging', async () => {
@@ -127,7 +131,7 @@ test('verifying report failure blocks readback and preserves duplicate protectio
 test('Commander failures map safely and remain guarded after update starts', async (t) => {
   const cases = [
     ['product_not_found', 'plu_not_found'], ['auth_failed', 'commander_auth_failed'], ['unreachable', 'commander_unreachable'],
-    ['tls_failed', 'commander_tls_failed'], ['update_rejected', 'update_rejected'], ['timeout', 'job_expired'], ['malformed_response', 'internal_connector_error'],
+    ['tls_failed', 'commander_tls_failed'], ['update_rejected', 'update_rejected'], ['price_conflict', 'price_conflict'], ['timeout', 'job_expired'], ['malformed_response', 'internal_connector_error'],
   ]
   for (const [kind, code] of cases) {
     await t.test(kind, async () => {
@@ -142,12 +146,12 @@ test('Commander failures map safely and remain guarded after update starts', asy
 })
 
 test('malformed and mismatched readback never completes', async (t) => {
-  const dangerous = JSON.parse('{"upc":"00012345678901","price":"1.00","__proto__":{}}')
+  const dangerous = JSON.parse('{"upc":"00012345678901","modifier":"000","price":"1.00","__proto__":{}}')
   const cases = [
     [null, 'internal_connector_error'], [[], 'internal_connector_error'], [{ upc: JOB.upc }, 'internal_connector_error'],
-    [{ price: JOB.price }, 'internal_connector_error'], [{ upc: 'bad', price: JOB.price }, 'internal_connector_error'],
-    [{ upc: JOB.upc, price: 1 }, 'internal_connector_error'], [{ upc: JOB.upc, price: JOB.price, extra: true }, 'internal_connector_error'], [dangerous, 'internal_connector_error'],
-    [{ upc: '99999999999999', price: JOB.price }, 'plu_identity_mismatch'], [{ upc: JOB.upc, price: '0.99' }, 'verification_failed'],
+    [{ price: JOB.price }, 'internal_connector_error'], [{ upc: 'bad', modifier: JOB.modifier, price: JOB.price }, 'internal_connector_error'],
+    [{ upc: JOB.upc, modifier: JOB.modifier, price: 1 }, 'internal_connector_error'], [{ upc: JOB.upc, modifier: JOB.modifier, price: JOB.price, extra: true }, 'internal_connector_error'], [dangerous, 'internal_connector_error'],
+    [{ upc: '99999999999999', modifier: JOB.modifier, price: JOB.price }, 'plu_identity_mismatch'], [{ upc: JOB.upc, modifier: '001', price: JOB.price }, 'plu_identity_mismatch'], [{ upc: JOB.upc, modifier: JOB.modifier, price: '0.99' }, 'verification_failed'],
   ]
   for (const [response, code] of cases) {
     await t.test(JSON.stringify(response), async () => {
@@ -165,11 +169,13 @@ test('readback not-found error maps to plu_not_found', async () => {
 })
 
 test('invalid injected claims are rejected before reports, guards, or Commander calls', async (t) => {
-  const polluted = JSON.parse('{"job_id":"11111111-1111-4111-8111-111111111111","operation":"update_price","product_id":"22222222-2222-4222-8222-222222222222","upc":"00012345678901","price":"1.00","attempt":1,"claimed_at":"2026-07-16T12:00:00Z","__proto__":{}}')
+  const polluted = JSON.parse('{"job_id":"11111111-1111-4111-8111-111111111111","operation":"update_price","product_id":"22222222-2222-4222-8222-222222222222","upc":"00012345678901","modifier":"000","expected_price":"0.99","price":"1.00","attempt":1,"claimed_at":"2026-07-16T12:00:00Z","__proto__":{}}')
   const cases = [
-    { ...JOB, job_id: 'bad' }, { ...JOB, operation: 'other' }, { ...JOB, upc: 'ABC' }, { ...JOB, upc: '1'.repeat(13) }, { ...JOB, upc: '1'.repeat(15) }, { ...JOB, upc: '1'.repeat(65) },
+    { ...JOB, job_id: 'bad' }, { ...JOB, operation: 'other' }, { ...JOB, upc: 'ABC' }, { ...JOB, upc: '1'.repeat(13) }, { ...JOB, upc: '1'.repeat(15) }, { ...JOB, upc: '1'.repeat(65) }, { ...JOB, modifier: '00' }, { ...JOB, modifier: 0 },
+    { ...JOB, expected_price: '1.2' }, { ...JOB, expected_price: 1 }, { ...JOB, expected_price: JOB.price },
     { ...JOB, price: '1.2' }, { ...JOB, price: 1 }, { ...JOB, attempt: 0 }, { ...JOB, claimed_at: '2026-07-16' },
-    { ...JOB, claimed_at: 'July 16, 2026' }, (() => { const value = { ...JOB }; delete value.upc; return value })(), { ...JOB, extra: true },
+    { ...JOB, claimed_at: 'July 16, 2026' }, (() => { const value = { ...JOB }; delete value.upc; return value })(), (() => { const value = { ...JOB }; delete value.modifier; return value })(),
+    (() => { const value = { ...JOB }; delete value.expected_price; return value })(), { ...JOB, extra: true },
     polluted, { ...JOB, constructor: {} }, { ...JOB, prototype: {} }, null, [], 'job', 1,
   ]
   for (const value of cases) {

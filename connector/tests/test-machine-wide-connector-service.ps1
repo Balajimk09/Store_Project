@@ -79,6 +79,7 @@ function New-TestConfig {
         live_worker_enabled = $true
         closed_day_worker_enabled = $true
         pos_publish_enabled = $false
+        pos_publish_mode = "disabled"
         pos_publish_poll_seconds = 60
         pos_publish_child_timeout_seconds = 60
         pos_publish_claim_endpoint_url = "https://kurnxpzcgcvsjmxsqjok.supabase.co/functions/v1/claim-pos-publish-job"
@@ -125,6 +126,7 @@ function Invoke-ConnectorOnceTest {
         [string]$UploadResult = "success",
         [scriptblock]$Prepare = $null,
         [int]$StabilityWaitMs = 25,
+        [string]$StabilityMutationFile = "",
         [string]$ExistingWatch = "",
         [string]$ExistingState = ""
     )
@@ -142,6 +144,10 @@ function Invoke-ConnectorOnceTest {
     foreach ($nameKey in @("STOREPULSE_API_URL", "STOREPULSE_CONNECTOR_TOKEN", "STOREPULSE_WATCH_FOLDER", "STOREPULSE_ARCHIVE_FOLDER", "STOREPULSE_POLL_SECONDS", "STOREPULSE_DRY_RUN", "STOREPULSE_ONCE", "STOREPULSE_SUMMARY_PATH", "STOREPULSE_STATE_PATH", "STOREPULSE_STABILITY_WAIT_MS", "STOREPULSE_CONNECTOR_TEST_UPLOAD_RESULT")) {
         $previous[$nameKey] = [Environment]::GetEnvironmentVariable($nameKey, "Process")
     }
+    $stabilityWriterJob = $null
+    $stabilityReady = $null
+    $stabilityStop = $null
+    $stabilityMutationWrites = 0
     try {
         [Environment]::SetEnvironmentVariable("STOREPULSE_API_URL", "https://example.invalid", "Process")
         [Environment]::SetEnvironmentVariable("STOREPULSE_CONNECTOR_TOKEN", "synthetic-token", "Process")
@@ -153,6 +159,36 @@ function Invoke-ConnectorOnceTest {
         [Environment]::SetEnvironmentVariable("STOREPULSE_STATE_PATH", $state, "Process")
         [Environment]::SetEnvironmentVariable("STOREPULSE_STABILITY_WAIT_MS", [string]$StabilityWaitMs, "Process")
         [Environment]::SetEnvironmentVariable("STOREPULSE_CONNECTOR_TEST_UPLOAD_RESULT", $UploadResult, "Process")
+        if (-not [string]::IsNullOrWhiteSpace($StabilityMutationFile)) {
+            $stabilityPath = Join-Path $watch $StabilityMutationFile
+            if (-not (Test-Path -LiteralPath $stabilityPath -PathType Leaf)) { throw "Stability mutation fixture is missing." }
+            $readyName = "StorePulse-Stability-Ready-" + [guid]::NewGuid().ToString("N")
+            $stopName = "StorePulse-Stability-Stop-" + [guid]::NewGuid().ToString("N")
+            $stabilityReady = [System.Threading.EventWaitHandle]::new($false, [System.Threading.EventResetMode]::ManualReset, $readyName)
+            $stabilityStop = [System.Threading.EventWaitHandle]::new($false, [System.Threading.EventResetMode]::ManualReset, $stopName)
+            $stabilityWriterJob = Start-Job -ScriptBlock {
+                param($Path, $ReadyName, $StopName)
+                $ready = [System.Threading.EventWaitHandle]::OpenExisting($ReadyName)
+                $stop = [System.Threading.EventWaitHandle]::OpenExisting($StopName)
+                $writes = 0
+                try {
+                    while (-not $stop.WaitOne(15)) {
+                        try {
+                            [System.IO.File]::AppendAllText($Path, "x`n", [System.Text.UTF8Encoding]::new($false))
+                            $writes += 1
+                        }
+                        catch { }
+                        if ($writes -eq 1) { [void]$ready.Set() }
+                    }
+                    return $writes
+                }
+                finally {
+                    $ready.Dispose()
+                    $stop.Dispose()
+                }
+            } -ArgumentList $stabilityPath, $readyName, $stopName
+            if (-not $stabilityReady.WaitOne(5000)) { throw "Stability mutation fixture did not start." }
+        }
         $previousErrorActionPreference = $ErrorActionPreference
         try {
             $ErrorActionPreference = "Continue"
@@ -162,6 +198,13 @@ function Invoke-ConnectorOnceTest {
         finally {
             $ErrorActionPreference = $previousErrorActionPreference
         }
+        if ($null -ne $stabilityWriterJob) {
+            [void]$stabilityStop.Set()
+            if (-not (Wait-Job -Job $stabilityWriterJob -Timeout 5)) { throw "Stability mutation fixture did not stop." }
+            $stabilityMutationWrites = @($stabilityWriterJob | Receive-Job | Where-Object { $_ -is [int] -or $_ -is [long] } | Select-Object -Last 1)[0]
+            Remove-Job -Job $stabilityWriterJob -Force
+            $stabilityWriterJob = $null
+        }
         [PSCustomObject]@{
             ExitCode = $exitCode
             OutputText = (($output | ForEach-Object { [string]$_ }) -join "`n")
@@ -170,9 +213,14 @@ function Invoke-ConnectorOnceTest {
             Directory = $dir
             Watch = $watch
             State = $state
+            StabilityMutationWrites = $stabilityMutationWrites
         }
     }
     finally {
+        if ($null -ne $stabilityStop) { try { [void]$stabilityStop.Set() } catch { } }
+        if ($null -ne $stabilityWriterJob) { try { Wait-Job -Job $stabilityWriterJob -Timeout 5 | Out-Null; Remove-Job -Job $stabilityWriterJob -Force -ErrorAction SilentlyContinue } catch { } }
+        if ($null -ne $stabilityReady) { $stabilityReady.Dispose() }
+        if ($null -ne $stabilityStop) { $stabilityStop.Dispose() }
         foreach ($nameKey in $previous.Keys) {
             [Environment]::SetEnvironmentVariable($nameKey, $previous[$nameKey], "Process")
         }
@@ -214,6 +262,7 @@ try {
     Assert-True -Condition ($manifest.required_files -contains "service\node-runtime-manifest.json") -Message "manifest includes Node runtime manifest"
     Assert-True -Condition ($manifest.required_files -contains "service\storepulse-machine-identity.ps1" -and $manifest.required_files -contains "service\storepulse-connector-heartbeat.ps1") -Message "manifest includes heartbeat scripts"
     Assert-True -Condition (($manifest.required_files -contains "lib\pos-publish-runtime.mjs") -and ($manifest.required_files -contains "lib\pos-publish-runtime-entry.mjs") -and ($manifest.required_files -contains "lib\pos-publish-result-contract.json")) -Message "manifest includes POS publishing runtime contract files"
+    Assert-True -Condition (($manifest.required_files -contains "lib\commander\commander-naxml-client.mjs") -and ($manifest.required_files -contains "lib\commander\commander-product-integration.mjs") -and ($manifest.required_files -contains "lib\commander\session\commander-tls-trust.mjs")) -Message "manifest includes Commander price publishing transport dependencies"
 
     $programDataRoot = Get-StorePulseProgramDataRoot
     $installRoot = Get-StorePulseInstallRoot
@@ -235,6 +284,14 @@ try {
     foreach ($name in @("commander-price-adapter.mjs", "pos-publish-api-client.mjs", "pos-publish-errors.mjs", "pos-publish-worker.mjs", "pos-publish-runtime.mjs", "pos-publish-runtime-entry.mjs")) {
         Set-Content -LiteralPath (Join-Path $libSubdir $name) -Value "placeholder" -Encoding UTF8
     }
+    $commanderLibSubdir = Join-Path $libSubdir "commander"
+    New-Item -ItemType Directory -Path $commanderLibSubdir -Force | Out-Null
+    foreach ($name in @("commander-naxml-client.mjs", "commander-product-integration.mjs")) {
+        Set-Content -LiteralPath (Join-Path $commanderLibSubdir $name) -Value "placeholder" -Encoding UTF8
+    }
+    $commanderSessionLibSubdir = Join-Path $commanderLibSubdir "session"
+    New-Item -ItemType Directory -Path $commanderSessionLibSubdir -Force | Out-Null
+    Set-Content -LiteralPath (Join-Path $commanderSessionLibSubdir "commander-tls-trust.mjs") -Value "placeholder" -Encoding UTF8
     Copy-Item -LiteralPath (Join-Path $repoRoot "connector\lib\pos-publish-result-contract.json") -Destination (Join-Path $libSubdir "pos-publish-result-contract.json")
     $testNode = Install-TestNodeRuntime -InstallRoot $installRoot
     Assert-True -Condition (Test-StorePulseServiceScripts -Root $installRoot) -Message "complete installation including result contract passes service validation"
@@ -475,26 +532,30 @@ try {
     Assert-True -Condition ($configText -notmatch "commander_password|connector_token|commander_username") -Message "config excludes secret names"
     $writtenConfig = $configText | ConvertFrom-Json
     Assert-Equal -Actual ([bool]$writtenConfig.pos_publish_enabled) -Expected $false -Message "POS publishing defaults to disabled"
+    Assert-Equal -Actual ([string]$writtenConfig.pos_publish_mode) -Expected "disabled" -Message "POS publishing defaults to disabled mode"
     Assert-Equal -Actual ([int]$writtenConfig.pos_publish_poll_seconds) -Expected 60 -Message "POS publishing default poll interval is conservative"
     Assert-Equal -Actual ([int]$writtenConfig.pos_publish_child_timeout_seconds) -Expected 60 -Message "POS publishing child timeout defaults conservatively"
     $freshEnabledConfig = New-TestConfig -Root $programDataRoot -InstallRoot $installRoot
     $freshEnabledConfig.pos_publish_enabled = $true
+    $freshEnabledConfig.pos_publish_mode = "manual_price_publish"
     $freshEnabledConfigPath = Join-Path $programDataRoot "fresh-enabled-config.json"
     Write-StorePulseMachineConfig -Config $freshEnabledConfig -Path $freshEnabledConfigPath | Out-Null
     $freshEnabledWritten = Get-Content -LiteralPath $freshEnabledConfigPath -Raw | ConvertFrom-Json
     Assert-Equal -Actual ([bool]$freshEnabledWritten.pos_publish_enabled) -Expected $false -Message "fresh configuration writer forcibly disables a pre-existing enabled publishing value"
+    Assert-Equal -Actual ([string]$freshEnabledWritten.pos_publish_mode) -Expected "disabled" -Message "fresh configuration writer resets publishing mode to disabled"
     Assert-Throws -ScriptBlock { $bad = New-TestConfig -Root $programDataRoot -InstallRoot $installRoot; $bad.pos_publish_poll_seconds = 0; Test-StorePulseMachineConfig -Config $bad | Out-Null } -Message "POS publishing rejects zero poll interval"
     Assert-Throws -ScriptBlock { $bad = New-TestConfig -Root $programDataRoot -InstallRoot $installRoot; $bad.pos_publish_child_timeout_seconds = 4; Test-StorePulseMachineConfig -Config $bad | Out-Null } -Message "POS publishing rejects short child timeout"
-    Assert-Throws -ScriptBlock { $bad = New-TestConfig -Root $programDataRoot -InstallRoot $installRoot; $bad.pos_publish_enabled = $true; $bad.pos_publish_claim_endpoint_url = "https://example.invalid/functions/v1/arbitrary"; Test-StorePulseMachineConfig -Config $bad | Out-Null } -Message "POS publishing rejects arbitrary endpoint paths"
-    Assert-Throws -ScriptBlock { $bad = New-TestConfig -Root $programDataRoot -InstallRoot $installRoot; $bad.pos_publish_enabled = $true; $bad.pos_publish_claim_endpoint_url = "https://other.invalid/functions/v1/claim-pos-publish-job"; Test-StorePulseMachineConfig -Config $bad | Out-Null } -Message "POS publishing rejects different endpoint origin"
-    Assert-Throws -ScriptBlock { $bad = New-TestConfig -Root $programDataRoot -InstallRoot $installRoot; $bad.pos_publish_enabled = $true; $bad.live_endpoint_url = "https://example.invalid:443/functions/v1/ingest-pos-transactions"; $bad.pos_publish_claim_endpoint_url = "https://example.invalid/functions/v1/claim-pos-publish-job"; $bad.pos_publish_report_endpoint_url = "https://example.invalid/functions/v1/report-pos-publish-job-status"; Test-StorePulseMachineConfig -Config $bad | Out-Null } -Message "POS publishing rejects a configured endpoint that removes an explicit default port"
-    Assert-Throws -ScriptBlock { $bad = New-TestConfig -Root $programDataRoot -InstallRoot $installRoot; $bad.pos_publish_enabled = $true; $bad.pos_publish_claim_endpoint_url = "https://example.invalid:443/functions/v1/claim-pos-publish-job"; $bad.pos_publish_report_endpoint_url = "https://example.invalid:443/functions/v1/report-pos-publish-job-status"; Test-StorePulseMachineConfig -Config $bad | Out-Null } -Message "POS publishing rejects a configured endpoint that adds an absent default port"
-    Assert-Throws -ScriptBlock { $bad = New-TestConfig -Root $programDataRoot -InstallRoot $installRoot; $bad.pos_publish_enabled = $true; $bad.live_endpoint_url = "https://example.invalid:8443/functions/v1/ingest-pos-transactions"; $bad.pos_publish_claim_endpoint_url = "https://example.invalid:9443/functions/v1/claim-pos-publish-job"; $bad.pos_publish_report_endpoint_url = "https://example.invalid:9443/functions/v1/report-pos-publish-job-status"; Test-StorePulseMachineConfig -Config $bad | Out-Null } -Message "POS publishing rejects an altered configured endpoint port"
+    Assert-Throws -ScriptBlock { $bad = New-TestConfig -Root $programDataRoot -InstallRoot $installRoot; $bad.pos_publish_enabled = $true; $bad.pos_publish_mode = "manual_price_publish"; $bad.pos_publish_claim_endpoint_url = "https://example.invalid/functions/v1/arbitrary"; Test-StorePulseMachineConfig -Config $bad | Out-Null } -Message "POS publishing rejects arbitrary endpoint paths"
+    Assert-Throws -ScriptBlock { $bad = New-TestConfig -Root $programDataRoot -InstallRoot $installRoot; $bad.pos_publish_enabled = $true; $bad.pos_publish_mode = "manual_price_publish"; $bad.pos_publish_claim_endpoint_url = "https://other.invalid/functions/v1/claim-pos-publish-job"; Test-StorePulseMachineConfig -Config $bad | Out-Null } -Message "POS publishing rejects different endpoint origin"
+    Assert-Throws -ScriptBlock { $bad = New-TestConfig -Root $programDataRoot -InstallRoot $installRoot; $bad.pos_publish_enabled = $true; $bad.pos_publish_mode = "manual_price_publish"; $bad.live_endpoint_url = "https://example.invalid:443/functions/v1/ingest-pos-transactions"; $bad.pos_publish_claim_endpoint_url = "https://example.invalid/functions/v1/claim-pos-publish-job"; $bad.pos_publish_report_endpoint_url = "https://example.invalid/functions/v1/report-pos-publish-job-status"; Test-StorePulseMachineConfig -Config $bad | Out-Null } -Message "POS publishing rejects a configured endpoint that removes an explicit default port"
+    Assert-Throws -ScriptBlock { $bad = New-TestConfig -Root $programDataRoot -InstallRoot $installRoot; $bad.pos_publish_enabled = $true; $bad.pos_publish_mode = "manual_price_publish"; $bad.pos_publish_claim_endpoint_url = "https://example.invalid:443/functions/v1/claim-pos-publish-job"; $bad.pos_publish_report_endpoint_url = "https://example.invalid:443/functions/v1/report-pos-publish-job-status"; Test-StorePulseMachineConfig -Config $bad | Out-Null } -Message "POS publishing rejects a configured endpoint that adds an absent default port"
+    Assert-Throws -ScriptBlock { $bad = New-TestConfig -Root $programDataRoot -InstallRoot $installRoot; $bad.pos_publish_enabled = $true; $bad.pos_publish_mode = "manual_price_publish"; $bad.live_endpoint_url = "https://example.invalid:8443/functions/v1/ingest-pos-transactions"; $bad.pos_publish_claim_endpoint_url = "https://example.invalid:9443/functions/v1/claim-pos-publish-job"; $bad.pos_publish_report_endpoint_url = "https://example.invalid:9443/functions/v1/report-pos-publish-job-status"; Test-StorePulseMachineConfig -Config $bad | Out-Null } -Message "POS publishing rejects an altered configured endpoint port"
     $invalidPathRuntimeRoot = Join-Path $tempRoot ("invalid-publish-path-" + [guid]::NewGuid().ToString("N"))
     $invalidPathProgramDataRoot = Join-Path $invalidPathRuntimeRoot "programdata"
     New-Item -ItemType Directory -Path $invalidPathProgramDataRoot -Force | Out-Null
     $invalidPathConfig = New-TestConfig -Root $invalidPathProgramDataRoot -InstallRoot (Join-Path $invalidPathRuntimeRoot "install")
     $invalidPathConfig.pos_publish_enabled = $true
+    $invalidPathConfig.pos_publish_mode = "manual_price_publish"
     $invalidPathRejectedUrl = "$approvedOrigin/FUNCTIONS/v1/ingest-pos-transactions"
     $invalidPathConfig.live_endpoint_url = $invalidPathRejectedUrl
     $invalidPathConfigPath = Join-Path $invalidPathProgramDataRoot "config.json"
@@ -525,6 +586,7 @@ try {
     Assert-Equal -Actual (Test-Path -LiteralPath $invalidPathConfig.logs_root -PathType Container) -Expected $false -Message "invalid publish path writes no runtime logs"
     $explicitPortConfig = New-TestConfig -Root $programDataRoot -InstallRoot $installRoot
     $explicitPortConfig.pos_publish_enabled = $true
+    $explicitPortConfig.pos_publish_mode = "manual_price_publish"
     $explicitPortConfig.live_endpoint_url = "https://kurnxpzcgcvsjmxsqjok.supabase.co:443/functions/v1/ingest-pos-transactions"
     $explicitPortConfig.pos_publish_claim_endpoint_url = "https://kurnxpzcgcvsjmxsqjok.supabase.co:443/functions/v1/claim-pos-publish-job"
     $explicitPortConfig.pos_publish_report_endpoint_url = "https://kurnxpzcgcvsjmxsqjok.supabase.co:443/functions/v1/report-pos-publish-job-status"
@@ -832,6 +894,7 @@ try {
     $oldConfig.closed_day_worker_enabled = $false
     $oldConfig.closed_day_once_enabled = $false
     $oldConfig.pos_publish_enabled = $true
+    $oldConfig.pos_publish_mode = "manual_price_publish"
     $oldConfig.pos_publish_poll_seconds = 75
     $oldConfig.pos_publish_child_timeout_seconds = 90
     foreach ($propertyName in @("heartbeat_enabled", "heartbeat_endpoint_url", "heartbeat_payload_version", "heartbeat_timeout_seconds")) {
@@ -852,6 +915,7 @@ try {
     Assert-Equal -Actual ([bool]$upgradedConfig.closed_day_worker_enabled) -Expected $false -Message "upgrade preserves closed-day disabled worker setting"
     Assert-Equal -Actual ([bool]$upgradedConfig.closed_day_once_enabled) -Expected $false -Message "upgrade preserves closed-day one-shot disabled setting"
     Assert-Equal -Actual ([bool]$upgradedConfig.pos_publish_enabled) -Expected $false -Message "installer upgrade helper resets an existing enabled publishing configuration"
+    Assert-Equal -Actual ([string]$upgradedConfig.pos_publish_mode) -Expected "disabled" -Message "installer upgrade helper resets publishing mode to disabled"
     Assert-Equal -Actual ([int]$upgradedConfig.pos_publish_poll_seconds) -Expected 75 -Message "installer upgrade helper preserves publishing poll configuration while disabling publishing"
     Assert-Equal -Actual ([int]$upgradedConfig.pos_publish_child_timeout_seconds) -Expected 90 -Message "installer upgrade helper preserves publishing child timeout while disabling publishing"
     Assert-Equal -Actual $secretsHashAfter -Expected $secretsHashBefore -Message "config upgrade preserves encrypted secrets file hash"
@@ -870,6 +934,7 @@ try {
     $approvedConfigPath = Join-Path $approvedProgramData "config.json"
     $approvedConfig = New-TestConfig -Root $approvedProgramData -InstallRoot $approvedInstallRoot
     $approvedConfig.pos_publish_enabled = $true
+    $approvedConfig.pos_publish_mode = "manual_price_publish"
     $approvedConfig.live_poll_interval_seconds = 123
     $approvedConfig.closed_day_poll_interval_seconds = 4567
     $approvedConfig.closed_day_worker_enabled = $false
@@ -893,6 +958,7 @@ try {
     $approvedResult = Invoke-StorePulseApprovedInstallerWorkflow -Operations $approvedOperations
     $approvedWrittenConfig = Get-Content -LiteralPath $approvedConfigPath -Raw | ConvertFrom-Json
     Assert-Equal -Actual ([bool]$approvedWrittenConfig.pos_publish_enabled) -Expected $false -Message "approved installer orchestration forces publishing disabled"
+    Assert-Equal -Actual ([string]$approvedWrittenConfig.pos_publish_mode) -Expected "disabled" -Message "approved installer orchestration resets publishing mode to disabled"
     Assert-Equal -Actual ([int]$approvedWrittenConfig.live_poll_interval_seconds) -Expected 123 -Message "approved installer orchestration preserves live polling"
     Assert-Equal -Actual ([int]$approvedWrittenConfig.closed_day_poll_interval_seconds) -Expected 4567 -Message "approved installer orchestration preserves finalized-day polling"
     Assert-Equal -Actual ([bool]$approvedWrittenConfig.closed_day_worker_enabled) -Expected $false -Message "approved installer orchestration preserves current-shift settings"
@@ -1039,6 +1105,7 @@ try {
     Assert-Equal -Actual $partialConfig.source_store_number -Expected "SYNTH" -Message "partial configuration preserves existing source store"
     Assert-Equal -Actual $partialConfig.commander_ip -Expected "commander.changed.local" -Message "partial configuration updates supplied field"
     $partialConfig.pos_publish_enabled = $true
+    $partialConfig.pos_publish_mode = "manual_price_publish"
     $partialConfig | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $configurePath -Encoding UTF8
     $reconfigureOutput = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $serviceRoot "configure-storepulse-machine-connector.ps1") `
         -NonInteractive `
@@ -1092,15 +1159,10 @@ try {
     Assert-Equal -Actual $duplicate.ExitCode -Expected 0 -Message "--once duplicate exits 0"
     Assert-Equal -Actual $duplicate.Summary.skipped_duplicate -Expected 1 -Message "--once reports skipped duplicate"
 
-    $unstable = Invoke-ConnectorOnceTest -Name "unstable" -StabilityWaitMs 1000 -Prepare {
+    $unstable = Invoke-ConnectorOnceTest -Name "unstable" -StabilityWaitMs 1000 -StabilityMutationFile "unstable.xml" -Prepare {
         param($Watch, $State)
         $file = Join-Path $Watch "unstable.xml"
         Set-Content -LiteralPath $file -Value "first" -Encoding UTF8
-        Start-Job -ScriptBlock {
-            param($Path)
-            Start-Sleep -Milliseconds 200
-            Add-Content -LiteralPath $Path -Value "second"
-        } -ArgumentList $file | Out-Null
     }
     Assert-Equal -Actual $unstable.ExitCode -Expected 0 -Message "--once unstable exits 0"
     Assert-Equal -Actual $unstable.Summary.skipped_unstable -Expected 1 -Message "--once reports unstable file"
@@ -1161,6 +1223,7 @@ try {
 
     $publishRuntimeConfig = New-TestConfig -Root $programDataRoot -InstallRoot $installRoot
     $publishRuntimeConfig.pos_publish_enabled = $true
+    $publishRuntimeConfig.pos_publish_mode = "manual_price_publish"
     $publishRuntimeConfig.pos_publish_poll_seconds = 60
     $publishRuntimeConfigPath = Join-Path $programDataRoot "publish-runtime-config.json"
     Write-TestRuntimeConfig -Config $publishRuntimeConfig -Path $publishRuntimeConfigPath
@@ -1198,6 +1261,7 @@ try {
 
     $childTimeoutRuntimeConfig = New-TestConfig -Root $programDataRoot -InstallRoot $installRoot
     $childTimeoutRuntimeConfig.pos_publish_enabled = $true
+    $childTimeoutRuntimeConfig.pos_publish_mode = "manual_price_publish"
     $childTimeoutRuntimeConfig.heartbeat_enabled = $true
     $childTimeoutRuntimeConfig.closed_day_worker_enabled = $false
     $childTimeoutRuntimeConfigPath = Join-Path $programDataRoot "child-timeout-runtime-config.json"
@@ -1233,6 +1297,7 @@ try {
 
     $timeoutIsolationConfig = New-TestConfig -Root $programDataRoot -InstallRoot $installRoot
     $timeoutIsolationConfig.pos_publish_enabled = $true
+    $timeoutIsolationConfig.pos_publish_mode = "manual_price_publish"
     $timeoutIsolationConfig.heartbeat_enabled = $true
     $timeoutIsolationConfig.closed_day_worker_enabled = $true
     $timeoutIsolationConfig.pos_publish_poll_seconds = 60
@@ -1472,6 +1537,7 @@ writeFileSync(summaryPath, JSON.stringify({
     New-Item -ItemType Directory -Path $whatIfProgramDataRoot -Force | Out-Null
     $whatIfConfig = New-TestConfig -Root $whatIfProgramDataRoot -InstallRoot $whatIfInstallRoot
     $whatIfConfig.pos_publish_enabled = $true
+    $whatIfConfig.pos_publish_mode = "manual_price_publish"
     $whatIfConfig.live_poll_interval_seconds = 123
     $whatIfConfig.closed_day_poll_interval_seconds = 4567
     $whatIfConfig.closed_day_worker_enabled = $false
@@ -1500,6 +1566,7 @@ writeFileSync(summaryPath, JSON.stringify({
     $whatIfUpgrade = Update-StorePulseMachineConfigForHeartbeat -Path $whatIfConfigPath -CreateBackup
     $whatIfUpgradedConfig = Get-Content -LiteralPath $whatIfConfigPath -Raw | ConvertFrom-Json
     Assert-Equal -Actual ([bool]$whatIfUpgradedConfig.pos_publish_enabled) -Expected $false -Message "approved upgrade migration forces publishing disabled"
+    Assert-Equal -Actual ([string]$whatIfUpgradedConfig.pos_publish_mode) -Expected "disabled" -Message "approved upgrade migration resets publishing mode to disabled"
     Assert-Equal -Actual ([int]$whatIfUpgradedConfig.live_poll_interval_seconds) -Expected 123 -Message "approved upgrade migration preserves live polling"
     Assert-Equal -Actual ([int]$whatIfUpgradedConfig.closed_day_poll_interval_seconds) -Expected 4567 -Message "approved upgrade migration preserves finalized-day polling"
     Assert-Equal -Actual ([bool]$whatIfUpgradedConfig.closed_day_worker_enabled) -Expected $false -Message "approved upgrade migration preserves current-shift settings"

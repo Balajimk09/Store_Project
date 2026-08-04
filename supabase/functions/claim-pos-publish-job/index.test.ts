@@ -84,6 +84,36 @@ Deno.test('claim returns only the allowlisted job shape', async () => {
       operation: 'update_price',
       product_id: PRODUCT_ID,
       upc: '00012345678901',
+      modifier: '000',
+      expected_price: '1.00',
+      price: '1.25',
+      attempt: 1,
+      claimed_at: '2026-07-16T16:00:00.000Z',
+    }),
+  })
+  const response = await handler(request(validBody))
+  const text = await response.text()
+  const body = JSON.parse(text) as Record<string, unknown>
+  assertEquals(response.status, 200, 'claim status')
+  assertEquals(
+    Object.keys(body).sort().join(','),
+    'attempt,claimed_at,expected_price,job_id,modifier,operation,price,product_id,upc',
+    'safe response keys',
+  )
+  assertEquals(body.expected_price, '1.00', 'expected price is returned')
+  assertEquals(body.price, '1.25', 'requested price is returned')
+})
+
+Deno.test('claim rejects non-allowlisted claimed-job fields without reflection', async () => {
+  const handler = createClaimPosPublishJobHandler({
+    authenticateConnector: async () => fakeAuth(),
+    claimJob: async () => ({
+      job_id: JOB_ID,
+      operation: 'update_price',
+      product_id: PRODUCT_ID,
+      upc: '00012345678901',
+      modifier: '000',
+      expected_price: '1.00',
       price: '1.25',
       attempt: 1,
       claimed_at: '2026-07-16T16:00:00.000Z',
@@ -92,16 +122,16 @@ Deno.test('claim returns only the allowlisted job shape', async () => {
       owner_id: 'secret-owner-id',
     } as never),
   })
+
   const response = await handler(request(validBody))
   const text = await response.text()
-  const body = JSON.parse(text) as Record<string, unknown>
-  assertEquals(response.status, 200, 'claim status')
-  assertEquals(Object.keys(body).sort().join(','), 'attempt,claimed_at,job_id,operation,price,product_id,upc', 'safe response keys')
-  assert(!text.includes(RAW_TOKEN), 'raw token is omitted')
-  assert(!text.includes('payload'), 'payload is omitted')
-  assert(!text.includes('owner_id'), 'owner id is omitted')
-})
 
+  assertEquals(response.status, 503, 'unsafe claimed-job status')
+  assertEquals(text, JSON.stringify({ error: 'service_unavailable' }), 'safe opaque error')
+  assert(!text.includes(RAW_TOKEN), 'raw token is not reflected')
+  assert(!text.includes('payload'), 'payload is not reflected')
+  assert(!text.includes('owner_id'), 'owner id is not reflected')
+})
 Deno.test('claim rejects non-canonical UPCs and invalid timestamps without echoing the payload', async () => {
   const invalidValues: unknown[] = [
     '0001234567890',
@@ -121,6 +151,8 @@ Deno.test('claim rejects non-canonical UPCs and invalid timestamps without echoi
         operation: 'update_price',
         product_id: PRODUCT_ID,
         upc,
+        modifier: '000',
+        expected_price: '1.00',
         price: '1.25',
         attempt: 1,
         claimed_at: '2026-07-16T16:00:00.000Z',
@@ -138,14 +170,14 @@ Deno.test('shared claim contract accepts database timestamps and rejects non-RFC
   for (const claimed_at of validTimestamps) {
     const handler = createClaimPosPublishJobHandler({
       authenticateConnector: async () => fakeAuth(),
-      claimJob: async () => ({ job_id: JOB_ID, operation: 'update_price', product_id: PRODUCT_ID, upc: '00012345678901', price: '1.25', attempt: 1, claimed_at }),
+      claimJob: async () => ({ job_id: JOB_ID, operation: 'update_price', product_id: PRODUCT_ID, upc: '00012345678901', modifier: '000', expected_price: '1.00', price: '1.25', attempt: 1, claimed_at }),
     })
     assertEquals((await handler(request(validBody))).status, 200, 'valid timestamp status')
   }
   for (const claimed_at of ['2026-07-16', '2026-07-16T16:00:00', '2026-02-30T16:00:00Z', '2026-07-16T16:00:00Z trailing', 'July 16, 2026']) {
     const handler = createClaimPosPublishJobHandler({
       authenticateConnector: async () => fakeAuth(),
-      claimJob: async () => ({ job_id: JOB_ID, operation: 'update_price', product_id: PRODUCT_ID, upc: '00012345678901', price: '1.25', attempt: 1, claimed_at }),
+      claimJob: async () => ({ job_id: JOB_ID, operation: 'update_price', product_id: PRODUCT_ID, upc: '00012345678901', modifier: '000', expected_price: '1.00', price: '1.25', attempt: 1, claimed_at }),
     })
     assertEquals((await handler(request(validBody))).status, 503, 'invalid timestamp status')
   }

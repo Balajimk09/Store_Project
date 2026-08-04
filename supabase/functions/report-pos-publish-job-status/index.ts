@@ -30,6 +30,7 @@ async function defaultReportStatus(auth: ConnectorAuthResult, payload: ReportReq
     p_job_id: payload.jobId,
     p_status: payload.status,
     p_verification_upc: payload.status === 'completed' ? payload.verification.upc : null,
+    p_verification_modifier: payload.status === 'completed' ? payload.verification.modifier : null,
     p_verification_price: payload.status === 'completed' ? payload.verification.price : null,
     p_failure_code: payload.status === 'failed' ? payload.errorCode : null,
     p_failure_message: payload.status === 'failed' ? payload.errorMessage : null,

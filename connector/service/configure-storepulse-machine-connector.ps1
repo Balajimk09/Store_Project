@@ -74,6 +74,7 @@ function Get-StorePulseExistingOrDefaultConfig {
         closed_day_worker_enabled = $true
         closed_day_once_enabled = $false
         pos_publish_enabled = $false
+        pos_publish_mode = "disabled"
         pos_publish_poll_seconds = 60
         pos_publish_child_timeout_seconds = 60
         pos_publish_claim_endpoint_url = ""
@@ -156,6 +157,12 @@ if ($null -eq $config.PSObject.Properties["pos_publish_enabled"]) {
 else {
     $config.pos_publish_enabled = $false
 }
+if ($null -eq $config.PSObject.Properties["pos_publish_mode"]) {
+    Add-Member -InputObject $config -NotePropertyName "pos_publish_mode" -NotePropertyValue "disabled"
+}
+else {
+    $config.pos_publish_mode = "disabled"
+}
 
 Test-StorePulseMachineConfig -Config $config | Out-Null
 $secretInput = New-StorePulseSecretInput -CommanderUsername $CommanderUsername -CommanderPassword $CommanderPassword -ConnectorToken $ConnectorToken
@@ -181,6 +188,7 @@ $summary = [ordered]@{
     live_poll_interval_seconds = [int]$config.live_poll_interval_seconds
     closed_day_poll_interval_seconds = [int]$config.closed_day_poll_interval_seconds
     pos_publish_enabled = [bool]$config.pos_publish_enabled
+    pos_publish_mode = [string]$config.pos_publish_mode
     pos_publish_poll_seconds = [int]$config.pos_publish_poll_seconds
     pos_publish_child_timeout_seconds = [int]$config.pos_publish_child_timeout_seconds
     logs_root = [string]$config.logs_root

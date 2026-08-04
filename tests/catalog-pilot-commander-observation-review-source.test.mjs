@@ -19,7 +19,7 @@ test('Commander observation review route is session-authorized, bounded, and rea
   assert.doesNotMatch(helper, /\.insert\(|\.update\(|\.upsert\(|\.delete\(|\.rpc\(|commander-vplu|four-product-read-child|Supabase/i)
 })
 
-test('Products review surface shows Commander staging with only one controlled test-product price action', async () => {
+test('Products review surface shows Commander staging with source-identity-gated manual price actions', async () => {
   const page = await readFile(pagePath, 'utf8')
 
   assert.match(page, /api\/products\/commander-observations\?storeId=/)
@@ -28,10 +28,13 @@ test('Products review surface shows Commander staging with only one controlled t
   assert.match(page, /commanderObservations\.map\(/)
   assert.match(page, /Loading Commander staged products/)
   assert.match(page, /No Commander products are staged for this store/)
-  assert.match(page, /observation\.upc === CONTROLLED_COMMANDER_PRICE_PRODUCT\.upc/)
-  assert.match(page, /observation\.modifier === CONTROLLED_COMMANDER_PRICE_PRODUCT\.modifier/)
-  assert.match(page, /observation\.description === CONTROLLED_COMMANDER_PRICE_PRODUCT\.description/)
-  assert.match(page, /Change Test Price/)
+  assert.match(
+    page,
+    /commanderPriceIdentityByKey\.get\(observation\.source_product_key\)/,
+  )
+  assert.match(page, /openCommanderPrice\(observation\)/)
+  assert.match(page, /Request Price Update/)
+  assert.doesNotMatch(page, /CONTROLLED_COMMANDER_PRICE_PRODUCT|Change Test Price/)
   assert.match(page, />Read only</)
   assert.doesNotMatch(page, /Apply Commander|Approve Commander|Publish All|Promote Commander|Sync-to-POS/)
 })

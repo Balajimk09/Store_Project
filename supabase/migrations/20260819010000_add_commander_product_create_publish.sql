@@ -32,8 +32,19 @@ alter table public.pos_source_create_profiles enable row level security;
 revoke all on table public.pos_source_create_profiles from public, anon, authenticated;
 grant all on table public.pos_source_create_profiles to service_role;
 
-insert into public.pos_source_create_profiles (store_id, source_system, create_profile_version, default_flag_sysids)
-values ('ec192877-0156-42ab-8fbf-31105f3e2ea3', 'commander', 'native_simple_create_v1', '["1", "5"]'::jsonb)
+insert into public.pos_source_create_profiles (
+  store_id,
+  source_system,
+  create_profile_version,
+  default_flag_sysids
+)
+select
+  stores.id,
+  'commander',
+  'native_simple_create_v1',
+  '["1", "5"]'::jsonb
+from public.stores as stores
+where stores.id = 'ec192877-0156-42ab-8fbf-31105f3e2ea3'::uuid
 on conflict (store_id, source_system) do nothing;
 
 alter table public.pos_publish_jobs drop constraint if exists pos_publish_jobs_operation_check;

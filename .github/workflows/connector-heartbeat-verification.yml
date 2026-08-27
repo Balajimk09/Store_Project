@@ -166,9 +166,89 @@ jobs:
       - name: Run local database lint
         run: |
           set -euo pipefail
-          supabase db lint --local --schema public,auth --level warning --fail-on error \
+
+          supabase db lint \
+            --local \
+            --schema public,auth \
+            --level warning \
+            --fail-on none \
             2>&1 | tee ci-artifacts/database/db-lint.log
 
+          python3 - <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          log_path = pathlib.Path("ci-artifacts/database/db-lint.log")
+          text = log_path.read_text(encoding="utf-8")
+
+          start = text.find("[")
+          end = text.rfind("]")
+
+          if start < 0 or end < start:
+              print("Could not locate Supabase lint JSON output.", file=sys.stderr)
+              sys.exit(1)
+
+          try:
+              results = json.loads(text[start:end + 1])
+          except json.JSONDecodeError as exc:
+              print(f"Could not parse Supabase lint output: {exc}", file=sys.stderr)
+              sys.exit(1)
+
+          allowed_functions = {
+              "public.complete_pos_catalog_source_sync",
+              "public.complete_pos_catalog_source_sync_v2",
+          }
+
+          ignored_errors = []
+          unexpected_errors = []
+
+          for result in results:
+              function_name = result.get("function")
+
+              for issue in result.get("issues", []):
+                  if issue.get("level") != "error":
+                      continue
+
+                  query = issue.get("query")
+                  query_text = query.get("text", "") if isinstance(query, dict) else ""
+
+                  is_known_false_positive = (
+                      function_name in allowed_functions
+                      and issue.get("sqlState") == "42P01"
+                      and issue.get("message")
+                          == 'relation "pg_temp.live_catalog_sync_input" does not exist'
+                      and query_text.lstrip().startswith(
+                          "insert into pg_temp.live_catalog_sync_input"
+                      )
+                  )
+
+                  if is_known_false_positive:
+                      ignored_errors.append(function_name)
+                  else:
+                      unexpected_errors.append({
+                          "function": function_name,
+                          "issue": issue,
+                      })
+
+          if unexpected_errors:
+              print("Unexpected database lint errors detected:", file=sys.stderr)
+              print(json.dumps(unexpected_errors, indent=2), file=sys.stderr)
+              sys.exit(1)
+
+          if set(ignored_errors) != allowed_functions or len(ignored_errors) != 2:
+              print(
+                  "Expected exactly the two known pg_temp lint false positives.",
+                  file=sys.stderr,
+              )
+              print(json.dumps(ignored_errors, indent=2), file=sys.stderr)
+              sys.exit(1)
+
+          print(
+              "Database lint passed; ignored exactly two known "
+              "pg_temp static-analysis false positives."
+          )
+          PY
       - name: Verify reset and reapply path
         run: |
           set -euo pipefail

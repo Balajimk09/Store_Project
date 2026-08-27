@@ -41,4 +41,4 @@ drop trigger if exists product_source_identities_set_updated_at
 
 create trigger product_source_identities_set_updated_at
 before update on public.product_source_identities
-for each row execute function public.set_pos_catalog_updated_at();
+for each row execute function public.set_pos_catalog_updated_at();;

@@ -10,7 +10,7 @@ const repositoryRoot = resolve(testDirectory, '..')
 const migration = readFileSync(
   resolve(
     repositoryRoot,
-    'supabase/migrations/20260731190000_add_pos_catalog_pilot_promotion_rpc.sql',
+    'supabase/migrations/20260731190333_add_pos_catalog_pilot_promotion_rpc.sql',
   ),
   'utf8',
 )

@@ -17,14 +17,14 @@ const baseProductsMigration = readFileSync(
 const compatibilityMigration = readFileSync(
   resolve(
     repositoryRoot,
-    'supabase/migrations/20260804193000_add_products_promotion_compatibility.sql',
+    'supabase/migrations/20260804225856_add_products_promotion_compatibility.sql',
   ),
   'utf8',
 )
 const promotionMigration = readFileSync(
   resolve(
     repositoryRoot,
-    'supabase/migrations/20260731190000_add_pos_catalog_pilot_promotion_rpc.sql',
+    'supabase/migrations/20260731190333_add_pos_catalog_pilot_promotion_rpc.sql',
   ),
   'utf8',
 )

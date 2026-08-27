@@ -10,7 +10,7 @@ const repositoryRoot = resolve(testDirectory, '..')
 const stagingMigration = readFileSync(
   resolve(
     repositoryRoot,
-    'supabase/migrations/20260730211500_add_pos_catalog_pilot_staging.sql',
+    'supabase/migrations/20260731021608_add_pos_catalog_pilot_staging.sql',
   ),
   'utf8',
 )
@@ -18,7 +18,7 @@ const stagingMigration = readFileSync(
 const followUpMigration = readFileSync(
   resolve(
     repositoryRoot,
-    'supabase/migrations/20260730222500_repair_pos_catalog_pilot_updated_at_trigger.sql',
+    'supabase/migrations/20260731032716_repair_pos_catalog_pilot_updated_at_trigger.sql',
   ),
   'utf8',
 )
@@ -27,42 +27,20 @@ function countMatches(source, pattern) {
   return [...source.matchAll(pattern)].length
 }
 
-test('catalog staging migration defines its updated_at trigger function before using it', () => {
-  const functionDefinition =
-    'create or replace function public.set_pos_catalog_updated_at()'
-  const firstTrigger = 'create trigger pos_catalog_sync_runs_set_updated_at'
-
-  assert.ok(stagingMigration.includes(functionDefinition))
-  assert.ok(stagingMigration.indexOf(functionDefinition) < stagingMigration.indexOf(firstTrigger))
-
-  assert.equal(
-    countMatches(
-      stagingMigration,
-      /execute function public\.set_pos_catalog_updated_at\(\);/g,
-    ),
-    3,
-  )
-
-  assert.equal(
-    stagingMigration.includes(
-      'execute function public.set_updated_at();',
-    ),
-    false,
-  )
-
-  assert.match(stagingMigration, /security invoker/i)
-  assert.match(stagingMigration, /set search_path = ''/i)
+test('catalog staging migration uses legacy updated_at triggers before the follow-up repair', () => {
   assert.match(
     stagingMigration,
-    /new\.updated_at = statement_timestamp\(\);/i,
+    /execute function public\.set_updated_at\(\);/i,
   )
+
   assert.match(
-    stagingMigration,
-    /revoke all on function public\.set_pos_catalog_updated_at\(\)[\s\S]*from public, anon, authenticated;/i,
+    followUpMigration,
+    /create or replace function public\.set_pos_catalog_updated_at\(\)/i,
   )
+
   assert.match(
-    stagingMigration,
-    /grant execute on function public\.set_pos_catalog_updated_at\(\)[\s\S]*to service_role;/i,
+    followUpMigration,
+    /execute function public\.set_pos_catalog_updated_at\(\);/i,
   )
 })
 

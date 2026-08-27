@@ -413,6 +413,53 @@ type TaxCategoryOption = {
   is_active: boolean;
 };
 
+type CanonicalCatalogProduct = {
+  id: string;
+  upc: string;
+  item_name: string;
+  category: string;
+  department: string;
+  sku: string | null;
+  plu: string | null;
+  product_code: string | null;
+  brand: string | null;
+  cost_price: string | null;
+  selling_price: string | null;
+  stock: string | null;
+  reorder_level: string | null;
+  vendor: string | null;
+  tax_rate: string | null;
+  tax_category: string | null;
+  taxable: boolean;
+  ebt_eligible: boolean;
+  age_verification: boolean;
+  minimum_age: number | null;
+  age_restriction_type: string | null;
+  is_active: boolean | null;
+  notes: string | null;
+  units_per_case: string | null;
+  cases_on_hand: string | null;
+  loose_units: string | null;
+  commander_linked: boolean;
+};
+
+type CanonicalCatalogMetrics = {
+  total_products: number;
+  commander_linked: number;
+  active_products: number;
+  inactive_products: number;
+  unknown_products: number;
+  low_stock_products: number;
+};
+
+type CanonicalCatalogResponse = {
+  ok: true;
+  products: CanonicalCatalogProduct[];
+  metrics: CanonicalCatalogMetrics;
+  facets: { departments: string[]; vendors: string[] };
+  pagination: { page: number; page_size: number; total: number; total_pages: number };
+} | { ok: false; error_code: string };
+
 type AgeRestrictionPreset = {
   id: string;
   name: string;
@@ -1133,6 +1180,37 @@ function ProductModal({
     </div>
   );
 }
+function canonicalCatalogProductToProduct(product: CanonicalCatalogProduct): Product {
+  return {
+    id: product.id,
+    upc: product.upc,
+    name: product.item_name,
+    category: product.category || product.department || 'Uncategorized',
+    department: product.department || product.category || 'Uncategorized',
+    sku: product.sku || undefined,
+    plu: product.plu || undefined,
+    productCode: product.product_code || undefined,
+    brand: product.brand || 'Unknown',
+    costPrice: safeNumber(product.cost_price ?? undefined),
+    sellPrice: safeNumber(product.selling_price ?? undefined),
+    stock: safeNumber(product.stock ?? undefined),
+    reorderLevel: safeNumber(product.reorder_level ?? undefined),
+    vendor: product.vendor || undefined,
+    taxRate: safeNumber(product.tax_rate ?? undefined),
+    taxCategory: product.tax_category || 'standard',
+    taxable: product.taxable,
+    ebtEligible: product.ebt_eligible,
+    ageVerification: product.age_verification,
+    minimumAge: product.minimum_age ?? undefined,
+    ageRestrictionType: product.age_restriction_type || undefined,
+    isActive: product.is_active ?? undefined,
+    notes: product.notes || undefined,
+    unitsPerCase: Math.max(1, safeNumber(product.units_per_case ?? undefined, 1)),
+    casesOnHand: safeNumber(product.cases_on_hand ?? undefined),
+    looseUnits: safeNumber(product.loose_units ?? undefined),
+  };
+}
+
 export default function ProductsPage() {
   const { user, store, activeStoreId, storeScope } = useAuth();
 
@@ -1159,6 +1237,13 @@ export default function ProductsPage() {
   const [ageVerificationFilter, setAgeVerificationFilter] = useState(false);
   const [taxableFilter, setTaxableFilter] = useState(false);
   const [stockFilter, setStockFilter] = useState('All');
+  const [canonicalCatalog, setCanonicalCatalog] = useState<Extract<CanonicalCatalogResponse, { ok: true }> | null>(null);
+  const [canonicalCatalogLoading, setCanonicalCatalogLoading] = useState(false);
+  const [canonicalCatalogError, setCanonicalCatalogError] = useState<string | null>(null);
+  const [canonicalCatalogPage, setCanonicalCatalogPage] = useState(1);
+  const [canonicalCatalogPageSize, setCanonicalCatalogPageSize] = useState<25 | 50 | 100>(50);
+  const [canonicalCatalogRefresh, setCanonicalCatalogRefresh] = useState(0);
+  const canonicalCatalogRequestKeyRef = useRef<string | null>(null);
   const [modalMode, setModalMode] = useState<'add' | 'edit'>('add');
   const [modalOpen, setModalOpen] = useState(false);
   const [editingProduct, setEditingProduct] = useState<Product | null>(null);
@@ -1288,6 +1373,62 @@ export default function ProductsPage() {
     },
     [productsWriteBlocked]
   );
+
+  const loadCanonicalCatalog = useCallback(async () => {
+    if (!activeStoreId) {
+      canonicalCatalogRequestKeyRef.current = null;
+      setCanonicalCatalog(null);
+      setCanonicalCatalogError(null);
+      return;
+    }
+
+    try {
+      const params = new URLSearchParams({
+        storeId: activeStoreId,
+        page: String(canonicalCatalogPage),
+        pageSize: String(canonicalCatalogPageSize),
+        stock: stockFilter === 'Reorder' ? 'reorder' : stockFilter === 'In Stock' ? 'in_stock' : 'all',
+      });
+      if (query.trim()) params.set('search', query.trim());
+      if (departmentFilter !== 'All') params.set('department', departmentFilter);
+      if (vendorFilter !== 'All') params.set('vendor', vendorFilter);
+      if (minPrice.trim()) params.set('minPrice', minPrice.trim());
+      if (maxPrice.trim()) params.set('maxPrice', maxPrice.trim());
+      if (ebtFilter) params.set('ebtOnly', 'true');
+      if (ageVerificationFilter) params.set('ageRestrictedOnly', 'true');
+      if (taxableFilter) params.set('taxableOnly', 'true');
+
+      const requestKey = `${canonicalCatalogRefresh}:${params.toString()}`;
+      if (canonicalCatalogRequestKeyRef.current === requestKey) return;
+      canonicalCatalogRequestKeyRef.current = requestKey;
+
+      setCanonicalCatalogLoading(true);
+      setCanonicalCatalogError(null);
+      const response = await fetch(`/api/products/catalog?${params.toString()}`);
+      const payload = await response.json().catch(() => null) as CanonicalCatalogResponse | null;
+      if (!response.ok || !payload || !payload.ok) throw new Error('catalog_unavailable');
+      setCanonicalCatalog(payload);
+    } catch {
+      setCanonicalCatalog(null);
+      setCanonicalCatalogError('Canonical products could not be loaded.');
+    } finally {
+      setCanonicalCatalogLoading(false);
+    }
+  }, [
+    activeStoreId,
+    ageVerificationFilter,
+    canonicalCatalogRefresh,
+    canonicalCatalogPage,
+    canonicalCatalogPageSize,
+    departmentFilter,
+    ebtFilter,
+    maxPrice,
+    minPrice,
+    query,
+    stockFilter,
+    taxableFilter,
+    vendorFilter,
+  ]);
 
   const loadNewProductCandidates = useCallback(async () => {
     if (!activeStoreId) {
@@ -2038,6 +2179,11 @@ export default function ProductsPage() {
       setSavingNewProduct(false);
     }
   };
+
+  useEffect(() => {
+    if (activeTab !== 'products') return;
+    void loadCanonicalCatalog();
+  }, [activeTab, loadCanonicalCatalog]);
 
   useEffect(() => {
     setItems(storeProducts);
@@ -2843,7 +2989,12 @@ export default function ProductsPage() {
     );
   };
 
+  const canonicalCatalogProducts = useMemo(
+    () => canonicalCatalog?.products.map(canonicalCatalogProductToProduct) || [],
+    [canonicalCatalog],
+  );
   const filteredProducts = useMemo(() => {
+    if (activeStoreId) return canonicalCatalogProducts;
     return items.filter((product) => {
       const stockStatus = product.stock <= product.reorderLevel ? 'Reorder' : 'In Stock';
       const haystack = [
@@ -2875,6 +3026,8 @@ export default function ProductsPage() {
       return true;
     });
   }, [
+    activeStoreId,
+    canonicalCatalogProducts,
     items,
     query,
     departmentFilter,
@@ -3618,6 +3771,7 @@ export default function ProductsPage() {
         return;
       }
     }
+    setCanonicalCatalogRefresh((current) => current + 1);
     setSaving(false);
     closeProductModal();
   };
@@ -4525,7 +4679,7 @@ const nextBreakdown = getCaseBreakdown(nextStock, unitsPerCase);
                 <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
                 <Input
                   value={query}
-                  onChange={(event) => setQuery(event.target.value)}
+                  onChange={(event) => { setQuery(event.target.value); setCanonicalCatalogPage(1); }}
                   placeholder="Search name, UPC, PLU, code, SKU, brand, vendor, department..."
                   className="pl-9"
                 />
@@ -4533,7 +4687,7 @@ const nextBreakdown = getCaseBreakdown(nextStock, unitsPerCase);
 
               <select
                 value={departmentFilter}
-                onChange={(event) => setDepartmentFilter(event.target.value)}
+                onChange={(event) => { setDepartmentFilter(event.target.value); setCanonicalCatalogPage(1); }}
                 className="h-10 rounded-md border border-input bg-background px-3 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
               >
                 <option value="All">All departments</option>
@@ -4546,7 +4700,7 @@ const nextBreakdown = getCaseBreakdown(nextStock, unitsPerCase);
 
               <select
                 value={vendorFilter}
-                onChange={(event) => setVendorFilter(event.target.value)}
+                onChange={(event) => { setVendorFilter(event.target.value); setCanonicalCatalogPage(1); }}
                 className="h-10 rounded-md border border-input bg-background px-3 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
               >
                 <option value="All">All Vendors</option>
@@ -4559,7 +4713,7 @@ const nextBreakdown = getCaseBreakdown(nextStock, unitsPerCase);
 
               <select
                 value={stockFilter}
-                onChange={(event) => setStockFilter(event.target.value)}
+                onChange={(event) => { setStockFilter(event.target.value); setCanonicalCatalogPage(1); }}
                 className="h-10 rounded-md border border-input bg-background px-3 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
               >
                 <option value="All">All stock</option>
@@ -4571,7 +4725,7 @@ const nextBreakdown = getCaseBreakdown(nextStock, unitsPerCase);
                 type="number"
                 min="0"
                 value={minPrice}
-                onChange={(event) => setMinPrice(event.target.value)}
+                onChange={(event) => { setMinPrice(event.target.value); setCanonicalCatalogPage(1); }}
                 placeholder="Min $"
               />
 
@@ -4579,7 +4733,7 @@ const nextBreakdown = getCaseBreakdown(nextStock, unitsPerCase);
                 type="number"
                 min="0"
                 value={maxPrice}
-                onChange={(event) => setMaxPrice(event.target.value)}
+                onChange={(event) => { setMaxPrice(event.target.value); setCanonicalCatalogPage(1); }}
                 placeholder="Max $"
               />
 
@@ -4590,19 +4744,19 @@ const nextBreakdown = getCaseBreakdown(nextStock, unitsPerCase);
 
             <div className="mt-3 flex flex-wrap gap-4 text-sm text-muted-foreground">
               <label className="inline-flex items-center gap-2">
-                <input type="checkbox" checked={ebtFilter} onChange={(event) => setEbtFilter(event.target.checked)} />
+                <input type="checkbox" checked={ebtFilter} onChange={(event) => { setEbtFilter(event.target.checked); setCanonicalCatalogPage(1); }} />
                 EBT Only
               </label>
               <label className="inline-flex items-center gap-2">
                 <input
                   type="checkbox"
                   checked={ageVerificationFilter}
-                  onChange={(event) => setAgeVerificationFilter(event.target.checked)}
+                  onChange={(event) => { setAgeVerificationFilter(event.target.checked); setCanonicalCatalogPage(1); }}
                 />
                 Age Restricted Only
               </label>
               <label className="inline-flex items-center gap-2">
-                <input type="checkbox" checked={taxableFilter} onChange={(event) => setTaxableFilter(event.target.checked)} />
+                <input type="checkbox" checked={taxableFilter} onChange={(event) => { setTaxableFilter(event.target.checked); setCanonicalCatalogPage(1); }} />
                 Taxable Only
               </label>
             </div>
@@ -4815,6 +4969,10 @@ const nextBreakdown = getCaseBreakdown(nextStock, unitsPerCase);
             </Card>
           )}
 
+          {canonicalCatalogError && (
+            <Card className="border-destructive/30 bg-destructive/10 p-4 text-sm text-destructive">{canonicalCatalogError}</Card>
+          )}
+
           <Card className="overflow-hidden">
             <div className="overflow-x-auto">
               <table className="w-full min-w-[1120px] text-sm">
@@ -4932,6 +5090,10 @@ const nextBreakdown = getCaseBreakdown(nextStock, unitsPerCase);
                 </tbody>
               </table>
             </div>
+          </Card>
+          <Card className="flex flex-wrap items-center justify-between gap-3 p-4 text-sm">
+            <span className="text-muted-foreground">{canonicalCatalogLoading ? 'Loading products...' : canonicalCatalog ? `Showing ${canonicalCatalog.pagination.total === 0 ? 0 : (canonicalCatalog.pagination.page - 1) * canonicalCatalog.pagination.page_size + 1}-${Math.min(canonicalCatalog.pagination.page * canonicalCatalog.pagination.page_size, canonicalCatalog.pagination.total)} of ${formatNumber(canonicalCatalog.pagination.total)}` : 'Products are unavailable'}</span>
+            <div className="flex flex-wrap items-center gap-2"><select value={canonicalCatalogPageSize} onChange={(event) => { setCanonicalCatalogPageSize(Number(event.target.value) as 25 | 50 | 100); setCanonicalCatalogPage(1); }} className="h-9 rounded-md border border-input bg-background px-2 text-sm" aria-label="Products per page"><option value={25}>25 per page</option><option value={50}>50 per page</option><option value={100}>100 per page</option></select><Button variant="outline" size="sm" disabled={!canonicalCatalog || canonicalCatalog.pagination.page <= 1 || canonicalCatalogLoading} onClick={() => setCanonicalCatalogPage((page) => Math.max(1, page - 1))}>Previous</Button><span>Page {canonicalCatalog?.pagination.page || 1} of {canonicalCatalog?.pagination.total_pages || 1}</span><Button variant="outline" size="sm" disabled={!canonicalCatalog || canonicalCatalog.pagination.page >= canonicalCatalog.pagination.total_pages || canonicalCatalogLoading} onClick={() => setCanonicalCatalogPage((page) => page + 1)}>Next</Button></div>
           </Card>
         </div>
       )}

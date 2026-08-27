@@ -44,6 +44,30 @@ function responseXml({
   )
 }
 
+
+function extendedResponseXml({
+  includeFlags = false,
+  includeTaxRates = false,
+  includeIdChecks = false,
+  omitCore = null,
+} = {}) {
+  const core = {
+    pcode: '<pcode>400</pcode>',
+    SellUnit: '<SellUnit>1.000</SellUnit>',
+    maxQtyPerTrans: '<maxQtyPerTrans>2.00</maxQtyPerTrans>',
+    taxableRebate: '<taxableRebate><amount>0.00</amount></taxableRebate>',
+  }
+  if (omitCore) delete core[omitCore]
+  return responseXml().replace(
+    '<price>0.02</price>',
+    '<price>0.02</price>'
+      + Object.values(core).join('')
+      + (includeFlags ? '<flags><domain:flag sysid="7"/></flags>' : '')
+      + (includeTaxRates ? '<taxRates><domain:taxRate sysid="2"/></taxRates>' : '')
+      + (includeIdChecks ? '<idChecks><domain:idCheck sysid="3"/></idChecks>' : ''),
+  )
+}
+
 test('read client contains no Commander product-write capability', () => {
   assert.doesNotMatch(
     source,
@@ -205,4 +229,36 @@ test('XML parser rejects entities, duplicates, and oversized values', () => {
     ),
     /duplicate_product_identity/,
   )
+})
+
+
+test('V2 core fields accept missing optional Commander containers as empty arrays', () => {
+  const [product] = parseCommanderVpluResponse(extendedResponseXml())
+  assert.equal(product.payment_product_code, '400')
+  assert.equal(product.selling_unit, '1.000')
+  assert.equal(product.maximum_quantity_per_transaction, '2.00')
+  assert.equal(product.taxable_rebate, '0.00')
+  assert.deepEqual(product.flag_ids, [])
+  assert.deepEqual(product.tax_rate_ids, [])
+  assert.deepEqual(product.id_check_ids, [])
+})
+
+test('present optional Commander containers remain bounded and normalized', () => {
+  const [product] = parseCommanderVpluResponse(extendedResponseXml({
+    includeFlags: true,
+    includeTaxRates: true,
+    includeIdChecks: true,
+  }))
+  assert.deepEqual(product.flag_ids, ['7'])
+  assert.deepEqual(product.tax_rate_ids, ['2'])
+  assert.deepEqual(product.id_check_ids, ['3'])
+})
+
+test('partial V2 core fails closed rather than becoming an ambiguous legacy product', () => {
+  for (const field of ['pcode', 'SellUnit', 'maxQtyPerTrans', 'taxableRebate']) {
+    assert.throws(
+      () => parseCommanderVpluResponse(extendedResponseXml({ omitCore: field })),
+      /vplu_response_invalid/,
+    )
+  }
 })

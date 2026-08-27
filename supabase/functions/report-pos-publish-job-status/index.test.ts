@@ -57,6 +57,56 @@ Deno.test('report accepts sending and verifying transitions', async () => {
   assertEquals(calls.join(','), 'sending,verifying', 'transitions passed to RPC adapter')
 })
 
+Deno.test('create reports require flags and preserve the create operation through each status', async () => {
+  const received: Array<{ operation?: string; status: string }> = []
+  const tested = handler(async (_auth, payload) => {
+    received.push(payload as { operation?: string; status: string })
+    return { job_id: JOB_ID, status: (payload as { status: string }).status }
+  })
+  const verification = {
+    upc: '00012345678901', modifier: '000', description: 'New product', department: '1', price: '1.25',
+    payment_product_code: '0', selling_unit: '1.000', maximum_quantity_per_transaction: '0.00', taxable_rebate: '0.00',
+    tax_rate_ids: ['2'], id_check_ids: ['1'], flag_ids: ['1', '5'],
+  }
+  assertEquals((await tested(request({ job_id: JOB_ID, operation: 'create_product', status: 'sending' }))).status, 200, 'create sending accepted')
+  assertEquals((await tested(request({ job_id: JOB_ID, operation: 'create_product', status: 'verifying' }))).status, 200, 'create verifying accepted')
+  assertEquals((await tested(request({ job_id: JOB_ID, operation: 'create_product', status: 'completed', verification }))).status, 200, 'create completed accepted')
+  assertEquals((await tested(request({ job_id: JOB_ID, operation: 'create_product', status: 'failed', error_code: 'update_rejected', error_message: 'Commander rejected the create.' }))).status, 200, 'create failed accepted')
+  assertEquals((await tested(request({ job_id: JOB_ID, operation: 'create_product', status: 'completed', verification: { ...verification, flag_ids: undefined } }))).status, 400, 'create completed requires flag ids')
+  assertEquals(received.map(payload => `${payload.operation}:${payload.status}`).join(','), 'create_product:sending,create_product:verifying,create_product:completed,create_product:failed', 'create operation survives validation')
+})
+
+Deno.test('default report dispatch routes every create state to its create RPC and preserves legacy reports', async () => {
+  const calls: Array<{ name: string; parameters: Record<string, unknown> }> = []
+  const auth = {
+    ...fakeAuth(),
+    supabase: {
+      rpc: async (name: string, parameters: Record<string, unknown>) => {
+        calls.push({ name, parameters })
+        return { data: [{ job_id: JOB_ID, status: parameters.p_status }], error: null }
+      },
+    },
+  } as unknown as ConnectorAuthResult
+  const tested = createReportPosPublishJobStatusHandler({ authenticateConnector: async () => auth })
+  const verification = {
+    upc: '00012345678901', modifier: '000', description: 'New product', department: '1', price: '1.25',
+    payment_product_code: '0', selling_unit: '1.000', maximum_quantity_per_transaction: '0.00', taxable_rebate: '0.00',
+    tax_rate_ids: ['2'], id_check_ids: ['1'], flag_ids: ['1', '5'],
+  }
+  for (const body of [
+    { job_id: JOB_ID, operation: 'create_product', status: 'sending' },
+    { job_id: JOB_ID, operation: 'create_product', status: 'verifying' },
+    { job_id: JOB_ID, operation: 'create_product', status: 'completed', verification },
+    { job_id: JOB_ID, operation: 'create_product', status: 'failed', error_code: 'update_rejected', error_message: 'Commander rejected the create.' },
+  ]) {
+    assertEquals((await tested(request(body))).status, 200, `create ${body.status} dispatches`)
+  }
+  assertEquals((await tested(request({ job_id: JOB_ID, status: 'sending' }))).status, 200, 'legacy report dispatches')
+  assertEquals(calls.slice(0, 4).every(call => call.name === 'report_commander_product_create_status'), true, 'all create reports use the create RPC')
+  assertEquals(calls[2].parameters.p_verification_flag_ids instanceof Array, true, 'create verification forwards flag ids')
+  assertEquals(calls[4].name, 'report_pos_publish_job_status', 'legacy report uses the existing RPC')
+})
+
 Deno.test('completed reports require an exact verification object', async () => {
   const tested = handler(async (_auth, payload) => ({ job_id: JOB_ID, status: (payload as { status: string }).status }))
   const response = await tested(request({ job_id: JOB_ID, status: 'completed' }))

@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { readFile } from 'node:fs/promises'
 import test from 'node:test'
 
 import { assertCommanderPriceAdapter, createCommanderPriceAdapter, createMockCommanderPriceAdapter } from '../lib/commander-price-adapter.mjs'
@@ -66,6 +67,67 @@ test('production adapter accepts an exact Commander identity and forwards one gu
   assert.deepEqual(writes[0].command.expected_current, { retail_price: '0.03' })
   assert.deepEqual(writes[0].command.requested_changes, { retail_price: '0.04' })
   assert.equal(writes[0].product, product)
+})
+
+test('production price adapter defaults to the exact-product selector and does not import paged lookup', async () => {
+  const source = await readFile(new URL('../lib/commander-price-adapter.mjs', import.meta.url), 'utf8')
+  assert.doesNotMatch(source, /commander-vplu-paged-product-reader\.mjs/)
+  assert.doesNotMatch(source, /readCommanderProductFromPagedCatalog/)
+  assert.match(source, /readCommanderProduct,\s*\n?\s*sendSupportedProductWrite/u)
+  assert.match(source, /readCommanderProductImpl\s*=\s*readCommanderProduct/)
+  assert.doesNotMatch(source, /buildCommanderVpluSelectXml/)
+})
+
+test('production adapter resolves each claimed UPC and modifier dynamically', async () => {
+  const observed = []
+  const writes = []
+  const adapter = createCommanderPriceAdapter({
+    origin: 'https://commander.fixture',
+    sessionCookie: 'fixture-cookie',
+    trust: {},
+    readCommanderProductImpl: async ({ upc, modifier }) => ({
+      status: 'success',
+      product: { upc, modifier, description: 'FIXTURE PRODUCT', retail_price: '1.00' },
+    }),
+    sendSupportedProductWriteImpl: async (input) => { writes.push(input); return { status: 'success' } },
+  })
+
+  for (const identity of [
+    { upc: '00719499005136', modifier: '000', price: '1.01' },
+    { upc: '00619682994257', modifier: '000', price: '1.02' },
+  ]) {
+    observed.push(await adapter.updatePrice({
+      upc: identity.upc,
+      modifier: identity.modifier,
+      expectedPrice: '1.00',
+      price: identity.price,
+    }))
+  }
+
+  assert.deepEqual(observed, [{ idempotent: false }, { idempotent: false }])
+  assert.deepEqual(writes.map(({ product }) => ({ upc: product.upc, modifier: product.modifier })), [
+    { upc: '00719499005136', modifier: '000' },
+    { upc: '00619682994257', modifier: '000' },
+  ])
+})
+
+test('production adapter blocks stale expected prices before uPLUs', async () => {
+  let writes = 0
+  const adapter = createCommanderPriceAdapter({
+    origin: 'https://commander.fixture',
+    sessionCookie: 'fixture-cookie',
+    trust: {},
+    readCommanderProductImpl: async () => ({
+      status: 'success',
+      product: { upc: '00719499005136', modifier: '000', description: 'FIXTURE PRODUCT', retail_price: '0.05' },
+    }),
+    sendSupportedProductWriteImpl: async () => { writes += 1; return { status: 'success' } },
+  })
+  await assert.rejects(
+    adapter.updatePrice({ upc: '00719499005136', modifier: '000', expectedPrice: '0.03', price: '0.04' }),
+    (error) => error instanceof CommanderPriceAdapterError && error.code === 'price_conflict',
+  )
+  assert.equal(writes, 0)
 })
 
 test('production adapter blocks stale expected prices before uPLUs', async () => {

@@ -16,6 +16,21 @@ const REQUIRED_FIELDS = Object.freeze([
   'price',
 ])
 
+const EXTENDED_REQUIRED_FIELDS = Object.freeze([
+  'pcode',
+  'SellUnit',
+  'maxQtyPerTrans',
+  'taxableRebate',
+])
+
+const EXTENDED_OPTIONAL_CONTAINER_FIELDS = Object.freeze([
+  'flags',
+  'taxRates',
+  'idChecks',
+])
+
+const MAX_REFERENCE_IDS = 16
+
 export class CommanderVpluReadError extends Error {
   constructor(code) {
     super(code)
@@ -35,6 +50,15 @@ function text(value, maximum, code = 'vplu_response_invalid') {
     || value.length > maximum
     || /[\u0000-\u001f\u007f-\u009f]/u.test(value)
   ) fail(code)
+  return value.normalize('NFC')
+}
+
+function descriptionText(value) {
+  if (
+    typeof value !== 'string'
+    || value.length > 512
+    || /[\u0000-\u001f\u007f-\u009f]/u.test(value)
+  ) fail('vplu_response_invalid')
   return value.normalize('NFC')
 }
 
@@ -64,6 +88,24 @@ function normalizeMoney(value) {
   ) fail('vplu_response_invalid')
 
   return amount.toFixed(2)
+}
+
+function normalizeCommanderSysid(value) {
+  if (typeof value !== 'string' || !/^\d{1,16}$/u.test(value)) {
+    fail('vplu_response_invalid')
+  }
+  return value
+}
+
+function normalizeFixedDecimal(value, fractionDigits) {
+  if (typeof value !== 'string') fail('vplu_response_invalid')
+  const pattern = new RegExp(
+    `^(?:0|[1-9]\\d{0,5})(?:\\.\\d{1,${fractionDigits}})?$`,
+  )
+  if (!pattern.test(value)) fail('vplu_response_invalid')
+  const number = Number(value)
+  if (!Number.isFinite(number) || number < 0) fail('vplu_response_invalid')
+  return number.toFixed(fractionDigits)
 }
 
 function escapeXml(value) {
@@ -249,6 +291,165 @@ function nodeValue(node) {
   return value.length ? value : null
 }
 
+function descriptionValue(node) {
+  if (!node || node.children.length) return null
+  return node.text.trim()
+}
+
+function readCommanderReferenceIds(container, childName) {
+  if (
+    !container
+    || container.attrs.length !== 0
+    || container.text.trim() !== ''
+    || container.children.length > MAX_REFERENCE_IDS
+  ) fail('vplu_response_invalid')
+
+  const ids = container.children.map((item) => {
+    if (
+      localName(item.name) !== childName
+      || item.children.length !== 0
+      || item.text.trim() !== ''
+      || item.attrs.length !== 1
+      || localName(item.attrs[0].name) !== 'sysid'
+    ) fail('vplu_response_invalid')
+    return normalizeCommanderSysid(item.attrs[0].value)
+  })
+
+  if (new Set(ids).size !== ids.length) fail('vplu_response_invalid')
+  return Object.freeze(ids)
+}
+
+function validateCommanderTaxableRebateTaxRate(
+  node,
+  failureCode = 'vplu_response_invalid',
+) {
+  if (
+    !node
+    || localName(node.name) !== 'taxRate'
+    || node.children.length !== 0
+    || node.text.trim() !== ''
+    || node.attrs.length > 1
+  ) {
+    fail(failureCode)
+  }
+
+  if (node.attrs.length === 1) {
+    const attribute = node.attrs[0]
+
+    if (localName(attribute.name) !== 'sysid') {
+      fail(failureCode)
+    }
+
+    try {
+      normalizeCommanderSysid(attribute.value)
+    } catch {
+      fail(failureCode)
+    }
+  }
+}
+
+function readCommanderTaxableRebate(container) {
+  if (
+    !container
+    || container.attrs.length !== 0
+    || container.text.trim() !== ''
+    || container.children.length < 1
+    || container.children.length > 2
+  ) {
+    fail('vplu_response_invalid')
+  }
+
+  const amountNodes = container.children.filter(
+    item => localName(item.name) === 'amount',
+  )
+
+  const taxRateNodes = container.children.filter(
+    item => localName(item.name) === 'taxRate',
+  )
+
+  if (
+    amountNodes.length !== 1
+    || taxRateNodes.length > 1
+    || amountNodes.length + taxRateNodes.length
+      !== container.children.length
+  ) {
+    fail('vplu_response_invalid')
+  }
+
+  const amount = amountNodes[0]
+
+  if (
+    amount.attrs.length !== 0
+    || amount.children.length !== 0
+  ) {
+    fail('vplu_response_invalid')
+  }
+
+  if (taxRateNodes.length === 1) {
+    validateCommanderTaxableRebateTaxRate(
+      taxRateNodes[0],
+    )
+  }
+
+  const value =
+    amount.text.trim()
+
+  if (value.length === 0) {
+    fail('vplu_response_invalid')
+  }
+
+  try {
+    return normalizeMoney(value)
+  } catch {
+    fail('vplu_response_invalid')
+  }
+}
+
+function readExtendedCommanderProductState(node) {
+  const required = Object.fromEntries(
+    EXTENDED_REQUIRED_FIELDS.map((field) => [field, child(node, field, false)]),
+  )
+  const optional = Object.fromEntries(
+    EXTENDED_OPTIONAL_CONTAINER_FIELDS.map((field) => [field, child(node, field, false)]),
+  )
+  const requiredPresent = Object.values(required).filter(Boolean).length
+  const optionalPresent = Object.values(optional).filter(Boolean).length
+
+  // Preserve the explicit legacy V1 contract only when no V2 field is present.
+  if (requiredPresent === 0 && optionalPresent === 0) return null
+
+  // A V2 product must contain the four proven scalar/core fields. The three
+  // reference containers are conditional in real Commander responses.
+  if (requiredPresent !== EXTENDED_REQUIRED_FIELDS.length) {
+    fail('vplu_response_invalid')
+  }
+
+  const paymentProductCode = nodeValue(required.pcode)
+  const sellingUnit = nodeValue(required.SellUnit)
+  const maximumQuantity = nodeValue(required.maxQtyPerTrans)
+  if (
+    paymentProductCode === null
+    || sellingUnit === null
+    || maximumQuantity === null
+  ) fail('vplu_response_invalid')
+
+  return Object.freeze({
+    payment_product_code: normalizeCommanderSysid(paymentProductCode),
+    selling_unit: normalizeFixedDecimal(sellingUnit, 3),
+    maximum_quantity_per_transaction: normalizeFixedDecimal(maximumQuantity, 2),
+    taxable_rebate: readCommanderTaxableRebate(required.taxableRebate),
+    flag_ids: optional.flags === null
+      ? Object.freeze([])
+      : readCommanderReferenceIds(optional.flags, 'flag'),
+    tax_rate_ids: optional.taxRates === null
+      ? Object.freeze([])
+      : readCommanderReferenceIds(optional.taxRates, 'taxRate'),
+    id_check_ids: optional.idChecks === null
+      ? Object.freeze([])
+      : readCommanderReferenceIds(optional.idChecks, 'idCheck'),
+  })
+}
+
 function serializeNode(node) {
   const attributes = node.attrs
     .map(
@@ -353,6 +554,22 @@ function mapTransportError(error) {
   }
 
   if (error instanceof CommanderVpluReadError) return error
+
+  if (
+    error?.code === 'ECONNREFUSED'
+    || error?.code === 'ENETUNREACH'
+    || error?.code === 'EHOSTUNREACH'
+    || error?.code === 'EADDRNOTAVAIL'
+    || error?.code === 'ENOTFOUND'
+    || error?.code === 'EAI_AGAIN'
+  ) return new CommanderVpluReadError('commander_connect_failed')
+
+  if (
+    error?.code === 'ECONNRESET'
+    || error?.code === 'EPIPE'
+    || error?.message === 'socket hang up'
+  ) return new CommanderVpluReadError('commander_connection_reset')
+
   return new CommanderVpluReadError('transport_failed')
 }
 
@@ -384,7 +601,26 @@ export function buildCommanderVpluRequestBody({
   return `cmd=vPLUs&cookie=${encodeURIComponent(cookie)}\r\n\r\n${xml}`
 }
 
-export function parseCommanderVpluResponse(xml) {
+function buildCommanderVpluReadBody({ sessionCookie, xml }) {
+  const cookie = validateCookie(sessionCookie)
+
+  if (
+    typeof xml !== 'string'
+    || xml.length < 1
+    || Buffer.byteLength(xml, 'utf8') > COMMANDER_VPLU_MAX_RESPONSE_BYTES
+  ) fail('request_invalid')
+
+  return `cmd=vPLUs&cookie=${encodeURIComponent(cookie)}\r\n\r\n${xml}`
+}
+
+export function parseCommanderVpluResponse(
+  xml,
+  { includeWriteTemplate = false } = {},
+) {
+  if (typeof includeWriteTemplate !== 'boolean') {
+    fail('vplu_response_invalid')
+  }
+
   const root = parseXml(xml)
 
   if (
@@ -407,20 +643,20 @@ export function parseCommanderVpluResponse(xml) {
 
     const upc = nodeValue(child(node, 'upc', true))
     const modifier = nodeValue(child(node, 'upcModifier', true))
-    const description = nodeValue(child(node, 'description', true))
+    const description = descriptionValue(child(node, 'description', true))
     const price = nodeValue(child(node, 'price', true))
 
-    if (!upc || !modifier || !description || !price) {
+    if (!upc || !modifier || description === null || !price) {
       fail('vplu_response_invalid')
     }
 
     const departmentNumber =
       nodeValue(child(node, 'department', false))
 
-    return Object.freeze({
+    const product = {
       upc: normalizeUpc(upc),
       modifier: normalizeModifier(modifier),
-      description: text(description, 512),
+      description: descriptionText(description),
       retail_price: normalizeMoney(price),
       cost: null,
       department_number: departmentNumber,
@@ -434,7 +670,17 @@ export function parseCommanderVpluResponse(xml) {
       raw_payload_hash: createHash('sha256')
         .update(serializeNode(node), 'utf8')
         .digest('hex'),
-    })
+    }
+
+    const extended = readExtendedCommanderProductState(node)
+    if (extended) Object.assign(product, extended)
+
+    if (includeWriteTemplate) {
+      // Keep the validated node in memory only for the one controlled write.
+      product._write_template = node
+    }
+
+    return Object.freeze(product)
   })
 
   const seen = new Set()
@@ -528,6 +774,81 @@ export async function defaultCommanderVpluTransport({
     request.write(body)
     request.end()
   })
+}
+
+/**
+ * Sends one fixed read-only vPLUs request. The caller can choose only XML for
+ * the already fixed read command; it cannot select another Commander command.
+ */
+export async function sendCommanderVpluReadRequest({
+  origin,
+  sessionCookie,
+  trust,
+  xml,
+  timeoutMs = COMMANDER_VPLU_TIMEOUT_MS,
+  transport,
+  requestFactory,
+}) {
+  let agent
+
+  try {
+    if (
+      !Number.isInteger(timeoutMs)
+      || timeoutMs < 1
+      || timeoutMs > 60_000
+    ) fail('request_invalid')
+
+    const url = validateOrigin(origin)
+    const body = buildCommanderVpluReadBody({
+      sessionCookie,
+      xml,
+    })
+
+    const endpoint = `${url.origin}${COMMANDER_VPLU_PATH}`
+    const options = {
+      method: 'POST',
+      headers: {
+        'content-type': 'text/plain; charset=UTF-8',
+        'content-length': Buffer.byteLength(body),
+      },
+      rejectUnauthorized: true,
+      servername: trust?.serverName,
+    }
+
+    let response
+    if (transport) {
+      response = await transport({
+        url: endpoint,
+        options,
+        body,
+        timeoutMs,
+      })
+    } else {
+      agent = createVerifiedAgent(trust)
+      response = await defaultCommanderVpluTransport({
+        url: endpoint,
+        options: { ...options, agent },
+        body,
+        timeoutMs,
+        requestFactory,
+      })
+    }
+
+    if (
+      !response
+      || !Number.isInteger(response.status)
+      || typeof response.body !== 'string'
+      || Buffer.byteLength(response.body, 'utf8')
+        > COMMANDER_VPLU_MAX_RESPONSE_BYTES
+    ) fail('transport_failed')
+
+    return response
+  } catch (error) {
+    if (error instanceof CommanderVpluReadError) throw error
+    throw mapTransportError(error)
+  } finally {
+    agent?.destroy()
+  }
 }
 
 export async function readCommanderVpluProduct({

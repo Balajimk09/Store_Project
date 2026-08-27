@@ -871,7 +871,23 @@ function Invoke-StorePulseServiceRuntime {
     $heartbeatEnabled = Get-StorePulseConfigBool -Config $config -Name "heartbeat_enabled" -Default $false
     $posPublishRequested = Get-StorePulseConfigBool -Config $config -Name "pos_publish_enabled" -Default $false
     $posPublishMode = if ($config.PSObject.Properties["pos_publish_mode"]) { [string]$config.pos_publish_mode } else { "disabled" }
-    $posPublishEnabled = $posPublishRequested -and $posPublishMode -eq "manual_price_publish"
+    $posPublishEnabled = $posPublishRequested -and $posPublishMode -in @(
+        "manual_price_publish",
+        "automatic_price_publish"
+    )
+    $posPublishStatusMode = if (-not $posPublishEnabled) {
+        "disabled"
+    }
+    elseif ($posPublishMode -eq "automatic_price_publish") {
+        "automatic"
+    }
+    else {
+        "manual"
+    }
+    $posPublishRunEnabled = $posPublishEnabled -and (
+        $posPublishMode -eq "automatic_price_publish" -or
+        ($posPublishMode -eq "manual_price_publish" -and $Mode -eq "Once")
+    )
     $posPublishPollSeconds = Get-StorePulsePosPublishPollSeconds -Config $config
     if ($null -eq $LiveWorker) { $LiveWorker = New-StorePulseDefaultLiveWorker }
     if ($null -eq $ClosedDayWorker) { $ClosedDayWorker = New-StorePulseDefaultClosedDayWorker }

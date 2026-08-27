@@ -4,6 +4,9 @@ import test from 'node:test'
 
 const runtimePath = new URL('../service/storepulse-service-runtime.ps1', import.meta.url)
 const configPath = new URL('../service/storepulse-machine-config.ps1', import.meta.url)
+const priceWorkerPath = new URL('../lib/pos-publish-worker.mjs', import.meta.url)
+const priceApiClientPath = new URL('../lib/pos-publish-api-client.mjs', import.meta.url)
+const priceAdapterPath = new URL('../lib/commander-price-adapter.mjs', import.meta.url)
 
 const forbidden = [
   'commander-auth-cookie-worker.ps1',
@@ -33,13 +36,14 @@ test('service publishing authentication is PowerShell-first and fixed to the thr
   for (const name of forbidden) assert.doesNotMatch(runtime, new RegExp(name.replaceAll('.', '\\.')))
 })
 
-test('publishing remains disabled unless both the boolean and manual price mode are explicitly configured', async () => {
+test('publishing remains disabled by default and permits manual or automatic mode only when explicitly configured', async () => {
   const [runtime, config] = await Promise.all([readFile(runtimePath, 'utf8'), readFile(configPath, 'utf8')])
   assert.match(config, /NotePropertyName "pos_publish_enabled" -NotePropertyValue \$false/)
   assert.match(config, /NotePropertyName "pos_publish_mode" -NotePropertyValue "disabled"/)
-  assert.match(config, /\$posPublishMode -notin @\("disabled", "manual_price_publish"\)/)
-  assert.match(config, /\$posPublishEnabled -and \$posPublishMode -ne "manual_price_publish"/)
-  assert.match(runtime, /\$posPublishEnabled = \$posPublishRequested -and \$posPublishMode -eq "manual_price_publish"/)
+  assert.match(config, /\$posPublishMode -notin @\("disabled", "manual_price_publish", "automatic_price_publish"\)/)
+  assert.match(config, /\$posPublishEnabled -and \$posPublishMode -notin @\("manual_price_publish", "automatic_price_publish"\)/)
+  assert.match(config, /-not \$posPublishEnabled -and \$posPublishMode -ne "disabled"/)
+  assert.match(runtime, /\$posPublishEnabled = \$posPublishRequested -and \$posPublishMode -in @\(\s*"manual_price_publish",\s*"automatic_price_publish"\s*\)/s)
   assert.doesNotMatch(config, /pos_publish_enabled"\]\s*=\s*\$true/)
 })
 
@@ -50,4 +54,18 @@ test('Node child receives bounded HTTPS inputs but does not own Commander creden
   assert.match(runtime, /session_cookie = \[string\]\$cookie/)
   assert.doesNotMatch(runtime, /commander_username\s*=|commander_password\s*=/)
   assert.match(runtime, /Invoke-StorePulsePosPublishChild[\s\S]*?-Input \$input/)
+})
+test('normal publishing is dynamic and advertises the approved create-aware capability set', async () => {
+  const [worker, apiClient, adapter] = await Promise.all([
+    readFile(priceWorkerPath, 'utf8'),
+    readFile(priceApiClientPath, 'utf8'),
+    readFile(priceAdapterPath, 'utf8'),
+  ])
+  for (const source of [worker, apiClient, adapter]) {
+    assert.doesNotMatch(source, /00999999999993|STOREPULSE TEST/)
+  }
+  assert.match(apiClient, /capabilities = \['update_price', 'update_product', 'create_product'\]/)
+  assert.match(apiClient, /value\.operation === 'create_product'/)
+  assert.match(worker, /job\.operation === 'create_product'/)
+  assert.match(adapter, /async createProduct\(input\)/)
 })

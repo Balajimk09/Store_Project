@@ -18,6 +18,7 @@ $ErrorActionPreference = "Stop"
 . (Join-Path $PSScriptRoot "storepulse-machine-secrets.ps1")
 . (Join-Path $PSScriptRoot "storepulse-windows-service.ps1")
 . (Join-Path $PSScriptRoot "storepulse-node-runtime.ps1")
+. (Join-Path $PSScriptRoot "storepulse-runtime-node-dependencies.ps1")
 
 function Test-StorePulseElevation {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -30,6 +31,31 @@ function Read-StorePulseInstallManifest {
     $manifestPath = Join-Path (Join-Path $SourceRoot "service") "install-manifest.json"
     if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) { throw "Install manifest not found: $manifestPath" }
     return Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+}
+
+function Test-StorePulseInstallerSource {
+    param(
+        [Parameter(Mandatory)]$Manifest,
+        [Parameter(Mandatory)][string]$SourceRoot
+    )
+
+    foreach ($relative in $Manifest.required_files) {
+        $source = Join-Path $SourceRoot ([string]$relative)
+        if (-not (Test-Path -LiteralPath $source -PathType Leaf)) { throw "Missing source file: $source" }
+    }
+
+    Test-StorePulseNodeRuntime -InstallRoot $SourceRoot -ManifestPath (Join-Path (Join-Path $SourceRoot "service") "node-runtime-manifest.json") | Out-Null
+    Test-StorePulseRuntimeNodeDependencies -Manifest $Manifest -Root $SourceRoot | Out-Null
+
+    if ($Manifest.PSObject.Properties["winsw_runtime_relative_path"]) {
+        $sourceWinswManifestPath = Join-Path (Join-Path $SourceRoot "service") "winsw-manifest.json"
+        $sourceWinswPath = Join-Path $SourceRoot ([string]$Manifest.winsw_runtime_relative_path)
+        if (-not (Test-Path -LiteralPath $sourceWinswPath -PathType Leaf)) { throw "Native WinSW wrapper source is missing: $sourceWinswPath" }
+        $winswManifest = Read-StorePulseWinSWManifest -ManifestPath $sourceWinswManifestPath
+        if ((Get-FileHash -LiteralPath $sourceWinswPath -Algorithm SHA256).Hash.ToUpperInvariant() -ne ([string]$winswManifest.sha256).ToUpperInvariant()) { throw "Source WinSW wrapper SHA-256 mismatch." }
+    }
+
+    return $true
 }
 
 function Copy-StorePulseInstalledFiles {
@@ -57,6 +83,8 @@ function Copy-StorePulseInstalledFiles {
     else {
         throw "Private Node runtime source is missing: $nodeSource"
     }
+
+    Copy-StorePulseRuntimeNodeDependencies -Manifest $Manifest -SourceRoot $SourceRoot -InstallRoot $InstallRoot | Out-Null
 
     if ($Manifest.PSObject.Properties["winsw_runtime_relative_path"]) {
         $winswSource = Join-Path $SourceRoot ([string]$Manifest.winsw_runtime_relative_path)
@@ -116,10 +144,7 @@ Write-Host "ProgramData config, secrets, logs, working data, archive, and state 
 Write-Host "No employee Windows password is requested."
 Write-Host "A private Node runtime is expected under runtime\\node; this installer never installs Node globally."
 
-foreach ($relative in $manifest.required_files) {
-    $source = Join-Path $resolvedSourceRoot ([string]$relative)
-    if (-not (Test-Path -LiteralPath $source -PathType Leaf)) { throw "Missing source file: $source" }
-}
+Test-StorePulseInstallerSource -Manifest $manifest -SourceRoot $resolvedSourceRoot | Out-Null
 
 $servicePlan = Install-StorePulseWindowsService -InstallRoot $resolvedInstallRoot -ProgramDataRoot $resolvedProgramDataRoot -StartupMode $effectiveStartupMode -ValidateOnly
 Write-Host ("Planned service executable: {0}" -f $servicePlan.wrapper_path)
@@ -167,20 +192,13 @@ try {
         RestoreConfiguration = { param($migration) Restore-StorePulseMachineConfigBackup -Path $migration.path -BackupPath $migration.backup_path | Out-Null }
         ValidateSecrets = { $secrets = Read-StorePulseMachineSecrets -Path $secretsPath; Test-StorePulseMachineSecrets -Secrets $secrets | Out-Null }
         ValidateSource = {
-            Test-StorePulseNodeRuntime -InstallRoot $resolvedSourceRoot -ManifestPath (Join-Path (Join-Path $resolvedSourceRoot "service") "node-runtime-manifest.json") | Out-Null
-            if ($manifest.PSObject.Properties["winsw_runtime_relative_path"]) {
-                $sourceWinswManifestPath = Join-Path (Join-Path $resolvedSourceRoot "service") "winsw-manifest.json"
-                $sourceWinswPath = Join-Path $resolvedSourceRoot ([string]$manifest.winsw_runtime_relative_path)
-                if (-not (Test-Path -LiteralPath $sourceWinswPath -PathType Leaf)) { throw "Native WinSW wrapper source is missing: $sourceWinswPath" }
-                $winswManifest = Read-StorePulseWinSWManifest -ManifestPath $sourceWinswManifestPath
-                if ((Get-FileHash -LiteralPath $sourceWinswPath -Algorithm SHA256).Hash.ToUpperInvariant() -ne ([string]$winswManifest.sha256).ToUpperInvariant()) { throw "Source WinSW wrapper SHA-256 mismatch." }
-            }
+            Test-StorePulseInstallerSource -Manifest $manifest -SourceRoot $resolvedSourceRoot | Out-Null
         }
         ValidateVerifone = { $validation = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "prepare-storepulse-verifone-runtime.ps1") -Mode ValidateInstalled -DestinationRoot ([string]$config.commander_install_path) 2>&1; if ($LASTEXITCODE -ne 0) { throw "Verifone runtime validation failed." } }
         EnsureDirectories = { foreach ($dir in @($resolvedInstallRoot, $resolvedProgramDataRoot, (Join-Path $resolvedProgramDataRoot "logs"), (Join-Path $resolvedProgramDataRoot "working"), (Join-Path $resolvedProgramDataRoot "archive"), (Join-Path $resolvedProgramDataRoot "state"))) { if (-not (Test-Path -LiteralPath $dir -PathType Container)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null } } }
         CreateInstallBackup = { if ($Upgrade -and (Test-Path -LiteralPath $resolvedInstallRoot -PathType Container)) { $backup = Join-Path ([IO.Path]::GetTempPath()) ("storepulse-upgrade-backup-" + [guid]::NewGuid().ToString("N")); Copy-Item -LiteralPath $resolvedInstallRoot -Destination $backup -Recurse -Force; if ($serviceInstalledBefore) { $serviceConfiguration = Get-StorePulseServiceConfiguration; if ([string]$serviceConfiguration.status -ne "Stopped") { throw "Upgrade requires StorePulseConnector to be Stopped." } }; return $backup }; return $null }
         CopyPayload = { Copy-StorePulseInstalledFiles -Manifest $manifest -SourceRoot $resolvedSourceRoot -InstallRoot $resolvedInstallRoot }
-        ValidateInstalled = { Test-StorePulseNodeRuntime -InstallRoot $resolvedInstallRoot -ManifestPath (Join-Path (Join-Path $resolvedInstallRoot "service") "node-runtime-manifest.json") | Out-Null; Test-StorePulseWinSWBinary -InstallRoot $resolvedInstallRoot -ManifestPath (Join-Path (Join-Path $resolvedInstallRoot "service") "winsw-manifest.json") | Out-Null }
+        ValidateInstalled = { Test-StorePulseNodeRuntime -InstallRoot $resolvedInstallRoot -ManifestPath (Join-Path (Join-Path $resolvedInstallRoot "service") "node-runtime-manifest.json") | Out-Null; Test-StorePulseRuntimeNodeDependencies -Manifest $manifest -Root $resolvedInstallRoot | Out-Null; Test-StorePulseWinSWBinary -InstallRoot $resolvedInstallRoot -ManifestPath (Join-Path (Join-Path $resolvedInstallRoot "service") "winsw-manifest.json") | Out-Null }
         ConfigureService = { if ($serviceInstalledBefore) { Set-StorePulseServiceStartupMode -InstallRoot $resolvedInstallRoot -ProgramDataRoot $resolvedProgramDataRoot -StartupMode $effectiveStartupMode | Out-Null } else { Install-StorePulseWindowsService -InstallRoot $resolvedInstallRoot -ProgramDataRoot $resolvedProgramDataRoot -StartupMode $effectiveStartupMode | Out-Null } }
         RestoreInstallBackup = { param($backup) if (Test-Path -LiteralPath $backup -PathType Container) { Remove-Item -LiteralPath $resolvedInstallRoot -Recurse -Force -ErrorAction SilentlyContinue; Copy-Item -LiteralPath $backup -Destination $resolvedInstallRoot -Recurse -Force } }
         CleanupInstallBackup = { param($backup) Remove-Item -LiteralPath $backup -Recurse -Force -ErrorAction SilentlyContinue }

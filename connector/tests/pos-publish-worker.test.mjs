@@ -16,6 +16,26 @@ const JOB = {
   claimed_at: '2026-07-16T12:00:00.000Z',
 }
 
+const CREATE_JOB = Object.freeze({
+  job_id: '33333333-3333-4333-8333-333333333333',
+  operation: 'create_product',
+  product_id: '44444444-4444-4444-8444-444444444444',
+  upc: '00000000000017',
+  modifier: '000',
+  description: 'CREATE PRODUCT',
+  department: '18',
+  price: '1.00',
+  payment_product_code: '400',
+  selling_unit: '1.000',
+  max_qty_per_trans: '0.00',
+  taxable_rebate: '0.00',
+  tax_rate_ids: ['2'],
+  id_check_ids: ['1'],
+  flag_ids: ['1', '5'],
+  attempt: 1,
+  claimed_at: '2026-08-26T12:00:00.000Z',
+})
+
 function makeWorker({ claim = async () => JOB, reportFailure, adapter = {}, logger = () => {}, guard = new Set(), now = () => 100 } = {}) {
   const events = []
   const reports = []
@@ -35,6 +55,44 @@ function makeWorker({ claim = async () => JOB, reportFailure, adapter = {}, logg
     readProduct: async (value) => { calls.read += 1; events.push('read'); return adapter.readProduct?.(value) ?? { upc: value.upc, modifier: value.modifier, price: '1.00' } },
   }
   return { worker: createPosPublishWorker({ apiClient, commanderAdapter, logger, now, executionGuard: guard }), events, reports, calls, updateInputs, guard }
+}
+
+function createProductDetail(overrides = {}) {
+  return {
+    upc: CREATE_JOB.upc,
+    modifier: CREATE_JOB.modifier,
+    description: CREATE_JOB.description,
+    department: CREATE_JOB.department,
+    price: CREATE_JOB.price,
+    payment_product_code: CREATE_JOB.payment_product_code,
+    selling_unit: CREATE_JOB.selling_unit,
+    maximum_quantity_per_transaction: CREATE_JOB.max_qty_per_trans,
+    taxable_rebate: CREATE_JOB.taxable_rebate,
+    tax_rate_ids: CREATE_JOB.tax_rate_ids,
+    id_check_ids: CREATE_JOB.id_check_ids,
+    flag_ids: CREATE_JOB.flag_ids,
+    ...overrides,
+  }
+}
+
+function makeCreateWorker({ createProduct = async () => {}, readProductDetail = async () => createProductDetail(), reportFailure, sleep = async () => {}, guard = new Set() } = {}) {
+  const reports = []
+  const calls = { create: 0, read: 0 }
+  const apiClient = {
+    claim: async () => CREATE_JOB,
+    report: async (payload) => {
+      reports.push(payload)
+      if (reportFailure?.(payload)) throw new Error('report unavailable')
+      return { job_id: payload.job_id, status: payload.status }
+    },
+  }
+  const commanderAdapter = {
+    updatePrice: async () => {},
+    readProduct: async () => ({ upc: CREATE_JOB.upc, modifier: CREATE_JOB.modifier, price: CREATE_JOB.price }),
+    createProduct: async (input) => { calls.create += 1; return await createProduct(input) },
+    readProductDetail: async (input) => { calls.read += 1; return await readProductDetail(input) },
+  }
+  return { worker: createPosPublishWorker({ apiClient, commanderAdapter, sleep, executionGuard: guard }), reports, calls, guard }
 }
 
 test('idle claim performs no Commander work', async () => {
@@ -202,6 +260,64 @@ test('failed status reporting does not repeat Commander work or expose error con
   assert.equal(fixture.calls.update, 1)
   assert.equal(JSON.stringify(fixture.reports).includes(secret), false)
   assert.equal(JSON.stringify(logs).includes(secret), false)
+})
+
+test('create retries a delayed readback, reports the create operation, and completes with flags', async () => {
+  const waits = []
+  let reads = 0
+  const fixture = makeCreateWorker({
+    readProductDetail: async () => {
+      reads += 1
+      if (reads === 1) throw new CommanderPriceAdapterError('product_not_found', 'Not found.')
+      return createProductDetail()
+    },
+    sleep: async (delayMs) => { waits.push(delayMs) },
+  })
+
+  assert.deepEqual(await fixture.worker.processOne(), { outcome: 'completed', job_id: CREATE_JOB.job_id })
+  assert.equal(fixture.calls.create, 1)
+  assert.equal(fixture.calls.read, 2)
+  assert.deepEqual(waits, [250])
+  assert.deepEqual(fixture.reports.map((report) => report.status), ['sending', 'verifying', 'completed'])
+  assert.equal(fixture.reports.every((report) => report.operation === 'create_product'), true)
+  assert.deepEqual(fixture.reports.at(-1).verification.flag_ids, CREATE_JOB.flag_ids)
+})
+
+test('create readback mismatch or exception after verifying reports a terminal create failure', async () => {
+  const mismatch = makeCreateWorker({
+    readProductDetail: async () => createProductDetail({ description: 'DIFFERENT' }),
+  })
+  const mismatchResult = await mismatch.worker.processOne()
+  assert.equal(mismatchResult.outcome, 'commander_failed')
+  assert.equal(mismatchResult.failure_code, 'verification_failed')
+  assert.equal(mismatch.calls.create, 1)
+  assert.deepEqual(mismatch.reports.map((report) => report.status), ['sending', 'verifying', 'failed'])
+  assert.equal(mismatch.reports.every((report) => report.operation === 'create_product'), true)
+
+  const waits = []
+  const exception = makeCreateWorker({
+    readProductDetail: async () => { throw new CommanderPriceAdapterError('product_not_found', 'Not found.') },
+    sleep: async (delayMs) => { waits.push(delayMs) },
+  })
+  const exceptionResult = await exception.worker.processOne()
+  assert.equal(exceptionResult.outcome, 'commander_failed')
+  assert.equal(exceptionResult.failure_code, 'plu_not_found')
+  assert.equal(exception.calls.create, 1)
+  assert.equal(exception.calls.read, 3)
+  assert.deepEqual(waits, [250, 250])
+  assert.deepEqual(exception.reports.map((report) => report.status), ['sending', 'verifying', 'failed'])
+  assert.equal(exception.reports.every((report) => report.operation === 'create_product'), true)
+})
+
+test('create completion-report failure attempts a terminal create failure without another write', async () => {
+  const fixture = makeCreateWorker({
+    reportFailure: (payload) => payload.status === 'completed',
+  })
+  const result = await fixture.worker.processOne()
+  assert.deepEqual(result, { outcome: 'status_report_failed', job_id: CREATE_JOB.job_id, stage: 'completed', failure_reported: true })
+  assert.equal(fixture.calls.create, 1)
+  assert.deepEqual(fixture.reports.map((report) => report.status), ['sending', 'verifying', 'completed', 'failed'])
+  assert.equal(fixture.reports.every((report) => report.operation === 'create_product'), true)
 })
 
 test('only one run is active and the in-flight guard clears after success and failure', async () => {

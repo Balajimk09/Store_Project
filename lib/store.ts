@@ -123,6 +123,7 @@ export interface StoreData {
 export interface SaveResult {
   mode: 'cloud' | 'demo';
   error?: string;
+  productId?: string;
 }
 
 const DEMO_META: UploadMeta = {
@@ -246,7 +247,7 @@ function duplicateIdentifierFromError(message: string) {
   return null;
 }
 
-function productToDbFields(product: Product) {
+function productToDbFields(product: Product, options: { inventoryKnown?: boolean } = {}) {
   const normalized = normalizeProduct(product);
 
   return {
@@ -275,7 +276,46 @@ function productToDbFields(product: Product) {
     units_per_case: normalized.unitsPerCase ?? 1,
     cases_on_hand: normalized.casesOnHand ?? 0,
     loose_units: normalized.looseUnits ?? 0,
+    ...(options.inventoryKnown ? { inventory_initialized_at: new Date().toISOString() } : {}),
     updated_at: new Date().toISOString(),
+  };
+}
+
+function productToStorePulseLocalDbFields(
+  product: Product,
+  options: { inventoryKnown?: boolean } = {}
+) {
+  const normalized = normalizeProduct(product);
+
+  return {
+    sku: normalized.sku ?? null,
+    brand: normalized.brand ?? 'Unknown',
+    cost_price: normalized.costPrice,
+    stock: normalized.stock,
+    reorder_level: normalized.reorderLevel,
+    vendor: normalized.vendor ?? null,
+    notes: normalized.notes ?? null,
+    units_per_case: normalized.unitsPerCase ?? 1,
+    cases_on_hand: normalized.casesOnHand ?? 0,
+    loose_units: normalized.looseUnits ?? 0,
+    ...(options.inventoryKnown ? { inventory_initialized_at: new Date().toISOString() } : {}),
+    updated_at: new Date().toISOString(),
+  };
+}
+
+function mergeStorePulseLocalProductFields(current: Product, edited: Product): Product {
+  return {
+    ...current,
+    sku: edited.sku,
+    brand: edited.brand,
+    costPrice: edited.costPrice,
+    stock: edited.stock,
+    reorderLevel: edited.reorderLevel,
+    vendor: edited.vendor,
+    notes: edited.notes,
+    unitsPerCase: edited.unitsPerCase,
+    casesOnHand: edited.casesOnHand,
+    looseUnits: edited.looseUnits,
   };
 }
 
@@ -347,7 +387,7 @@ export function useStoreData(): StoreData & {
   refresh: () => void;
   resetProductsToDemo: () => void;
   updateProductPrice: (productKey: string, costPrice: number, sellPrice: number) => void;
-  updateProduct: (product: Product) => Promise<SaveResult>;
+  updateProduct: (product: Product, options?: { inventoryKnown?: boolean; storePulseLocalOnly?: boolean }) => Promise<SaveResult>;
   createProduct: (product: Product) => Promise<SaveResult>;
 } {
   const { user, store: authStore, loading: authLoading } = useAuth();
@@ -514,7 +554,7 @@ export function useStoreData(): StoreData & {
   }, []);
 
   const updateProduct = useCallback(
-    async (product: Product): Promise<SaveResult> => {
+    async (product: Product, options: { inventoryKnown?: boolean; storePulseLocalOnly?: boolean } = {}): Promise<SaveResult> => {
       const nextProduct = normalizeProduct(product);
 
       if (!hasProductIdentifier(nextProduct)) {
@@ -525,7 +565,13 @@ export function useStoreData(): StoreData & {
       const previousProducts = data.products;
 
       setData((previous) => {
-        const nextProducts = upsertProductList(previous.products, nextProduct);
+        const nextProducts = options.storePulseLocalOnly
+          ? previous.products.map((current) =>
+              productIdentity(current) === productIdentity(nextProduct)
+                ? mergeStorePulseLocalProductFields(current, nextProduct)
+                : current
+            )
+          : upsertProductList(previous.products, nextProduct);
 
         try {
           localStorage.setItem(PRODUCTS_KEY, JSON.stringify(nextProducts));
@@ -557,7 +603,11 @@ export function useStoreData(): StoreData & {
       if (user && authStore && data.dataMode === 'cloud') {
         let updateQuery = supabase
           .from('products')
-          .update(productToDbFields(nextProduct))
+          .update(
+            options.storePulseLocalOnly
+              ? productToStorePulseLocalDbFields(nextProduct, options)
+              : productToDbFields(nextProduct, options)
+          )
           .eq('store_id', authStore.id);
 
         if (nextProduct.id) {
@@ -685,7 +735,9 @@ export function useStoreData(): StoreData & {
               .from('products')
               .insert(productToDbInsert(nextProduct, authStore.id));
 
-        const { error } = await writeQuery;
+        const { data: writtenProduct, error } = await writeQuery
+          .select('id')
+          .single();
 
         if (error) {
           const duplicateKind = duplicateIdentifierFromError(error.message);
@@ -702,7 +754,7 @@ export function useStoreData(): StoreData & {
         }
 
         window.dispatchEvent(new Event('storepulse:data-updated'));
-        return { mode: 'cloud' };
+        return { mode: 'cloud', productId: writtenProduct.id };
       }
 
       window.dispatchEvent(new Event('storepulse:data-updated'));

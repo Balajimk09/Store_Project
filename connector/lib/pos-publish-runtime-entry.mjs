@@ -40,7 +40,11 @@ async function loadFixedCommanderConfig(filesystem = { lstat, readFile }) {
     throw new Error('commander_adapter_unavailable')
   }
   let config
-  try { config = JSON.parse(await filesystem.readFile(CONFIG_PATH, 'utf8')) } catch { throw new Error('commander_adapter_unavailable') }
+  try {
+    const raw = await filesystem.readFile(CONFIG_PATH, 'utf8')
+    const text = raw.charCodeAt(0) === 0xFEFF ? raw.slice(1) : raw
+    config = JSON.parse(text)
+  } catch { throw new Error('commander_adapter_unavailable') }
   if (!config || Array.isArray(config) || typeof config.commander_ip !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9.-]{0,252}$/.test(config.commander_ip)) {
     throw new Error('commander_adapter_unavailable')
   }

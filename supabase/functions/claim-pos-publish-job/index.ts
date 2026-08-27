@@ -9,11 +9,12 @@ import {
   readBoundedJsonBody,
   validateClaimRequest,
   type ClaimedPublishJob,
+  type PublishCapability,
 } from '../_shared/pos-publish-contract.ts'
 
 type ClaimDependencies = {
   authenticateConnector?: (request: Request, requestId: string) => Promise<ConnectorAuthResult | Response>
-  claimJob?: (auth: ConnectorAuthResult) => Promise<ClaimedPublishJob | null>
+  claimJob?: (auth: ConnectorAuthResult, capabilities: PublishCapability[]) => Promise<ClaimedPublishJob | null>
   requestId?: () => string
 }
 
@@ -25,26 +26,37 @@ async function defaultAuthenticateConnector(request: Request, requestId: string)
   return await authenticateConnector(request, requestId, { distinguishInactive: true })
 }
 
-async function defaultClaimJob(auth: ConnectorAuthResult): Promise<ClaimedPublishJob | null> {
+async function defaultClaimJob(auth: ConnectorAuthResult, capabilities: PublishCapability[]): Promise<ClaimedPublishJob | null> {
   const rpcClient = auth.supabase as unknown as PublishRpcClient
-  const { data, error } = await rpcClient.rpc('claim_pos_publish_job', {
+  const { error: leaseError } = await rpcClient.rpc('expire_stale_commander_publish_jobs_for_connector', {
     p_connector_id: auth.connector.id,
   })
+  if (leaseError) throw leaseError
+
+  if (capabilities.includes('create_product')) {
+    const { data, error } = await rpcClient.rpc('claim_commander_product_create_job', { p_connector_id: auth.connector.id })
+    if (error) throw error
+    const result = Array.isArray(data) ? data[0] : null
+    if (result) {
+      if (!isSafeClaimedPublishJob(result)) throw new Error('invalid_claim_result')
+      return result
+    }
+  }
+
+  const supportsProductUpdate = capabilities.includes('update_product')
+  const { data, error } = await rpcClient.rpc('claim_pos_publish_job', supportsProductUpdate
+    ? {
+        p_connector_id: auth.connector.id,
+        p_capabilities: capabilities,
+      }
+    : {
+        p_connector_id: auth.connector.id,
+      })
   if (error) throw error
   const result = Array.isArray(data) ? data[0] : null
   if (!result) return null
   if (!isSafeClaimedPublishJob(result)) throw new Error('invalid_claim_result')
-  return {
-    job_id: result.job_id,
-    operation: result.operation,
-    product_id: result.product_id,
-    upc: result.upc,
-    modifier: result.modifier,
-    expected_price: result.expected_price,
-    price: result.price,
-    attempt: result.attempt,
-    claimed_at: result.claimed_at,
-  }
+  return result
 }
 
 function errorResponse(error: unknown): Response {
@@ -68,21 +80,11 @@ export function createClaimPosPublishJobHandler(dependencies: ClaimDependencies 
     if (auth instanceof Response) return auth
 
     try {
-      validateClaimRequest(await readBoundedJsonBody(request))
-      const job = await claimJob(auth)
+      const claimRequest = validateClaimRequest(await readBoundedJsonBody(request))
+      const job = await claimJob(auth, claimRequest.capabilities)
       if (!job) return new Response(null, { status: 204, headers: { 'cache-control': 'no-store' } })
       if (!isSafeClaimedPublishJob(job)) throw new Error('invalid_claim_result')
-      return jsonResponse({
-        job_id: job.job_id,
-        operation: job.operation,
-        product_id: job.product_id,
-        upc: job.upc,
-        modifier: job.modifier,
-        expected_price: job.expected_price,
-        price: job.price,
-        attempt: job.attempt,
-        claimed_at: job.claimed_at,
-      })
+      return jsonResponse(job)
     } catch (error) {
       return errorResponse(error)
     }

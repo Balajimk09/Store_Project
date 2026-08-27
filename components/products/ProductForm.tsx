@@ -1,7 +1,7 @@
 'use client';
 
-import type { Dispatch, Ref, SetStateAction } from 'react';
-import { CircleAlert } from 'lucide-react';
+import type { Dispatch, KeyboardEvent, Ref, SetStateAction } from 'react';
+import { Barcode, CheckCircle2, CircleAlert, LoaderCircle } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { cn } from '@/lib/utils';
@@ -63,6 +63,36 @@ type ProductFormFieldErrors = {
   name?: string;
 };
 
+export type ProductFormBarcodeResolution = {
+  status: 'idle' | 'resolving' | 'matched' | 'not_found' | 'ambiguous' | 'error';
+  productName?: string | null;
+  productUpc?: string | null;
+};
+
+export type ProductFormCommanderPriceContext = {
+  product_id: string;
+  source_product_key: string;
+  source_upc: string;
+  source_modifier: string;
+  commander_price: string;
+  canonical_price: string;
+  observed_at: string;
+};
+
+export type ProductFormCommanderProductCodeOption = {
+  key: string;
+  name: string;
+  isNotSold: boolean;
+  isFuel: boolean;
+};
+
+export type ProductFormCommanderFields = {
+  paymentProductCode: string;
+  sellingUnit: string;
+  maxQtyPerTrans: string;
+  taxableRebate: string;
+};
+
 type ProductFormProps = {
   mode: ProductFormMode;
   form: ProductFormState;
@@ -90,6 +120,17 @@ type ProductFormProps = {
   fieldErrors?: ProductFormFieldErrors;
   upcHelperText?: string;
   upcInputRef?: Ref<HTMLInputElement>;
+  productNameInputRef?: Ref<HTMLInputElement>;
+  barcodeResolution?: ProductFormBarcodeResolution;
+  onUpcEnter?: (value: string) => void;
+  onClearBarcode?: () => void;
+  posPriceStatus?: string | null;
+  onRetryPosPrice?: () => void;
+  commanderFields?: ProductFormCommanderFields | null;
+  commanderFlagIds?: string[];
+  commanderProductCodeOptions?: ProductFormCommanderProductCodeOption[];
+  onCommanderProductCodeSearch?: (value: string) => void;
+  onCommanderFieldsChange?: (patch: Partial<ProductFormCommanderFields>) => void;
 };
 
 function safeNumber(value: string | number | null | undefined, fallback = 0) {
@@ -132,6 +173,17 @@ export function ProductForm({
   fieldErrors,
   upcHelperText,
   upcInputRef,
+  productNameInputRef,
+  barcodeResolution,
+  onUpcEnter,
+  onClearBarcode,
+  posPriceStatus,
+  onRetryPosPrice,
+  commanderFields,
+  commanderFlagIds = [],
+  commanderProductCodeOptions = [],
+  onCommanderProductCodeSearch,
+  onCommanderFieldsChange,
 }: ProductFormProps) {
   const selectedTax = taxCategoryOptions.find((tax) => tax.name === form.taxCategory);
   const selectedAge = ageRestrictionOptions.find(
@@ -160,6 +212,15 @@ export function ProductForm({
   const updateFields = (patch: Partial<ProductFormState>) => {
     setForm((current) => ({ ...current, ...patch }));
   };
+  const handleUpcKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
+    if (mode !== 'add' || event.key !== 'Enter' || event.nativeEvent.isComposing) return;
+    event.preventDefault();
+    onUpcEnter?.(event.currentTarget.value);
+  };
+  const barcodeBlocksSubmit =
+    mode === 'add'
+    && Boolean(form.upc.trim())
+    && barcodeResolution?.status !== 'not_found';
 
   return (
     <>
@@ -173,10 +234,11 @@ export function ProductForm({
 
         <div className="grid gap-3">
           <div className="grid gap-2 sm:grid-cols-2">
-            <label className={labelClass}>
-              <span className={labelTextClass}>UPC</span>
+            <div className={labelClass}>
+              <label htmlFor="product-form-upc" className={labelTextClass}>Barcode / UPC</label>
               <Input
                 ref={upcInputRef}
+                id="product-form-upc"
                 className={fieldClass}
                 value={form.upc}
                 onChange={(event) => {
@@ -185,18 +247,53 @@ export function ProductForm({
                   onUpcChange(nextValue);
                 }}
                 onBlur={onUpcBlur}
+                onKeyDown={handleUpcKeyDown}
                 disabled={disableUpc}
                 placeholder="0120000010101"
                 aria-invalid={Boolean(fieldErrors?.upc)}
               />
+              {mode === 'add' && (
+                <span className="inline-flex items-center gap-1 text-xs text-muted-foreground">
+                  <Barcode className="h-3.5 w-3.5" />
+                  Ready to scan barcode or enter UPC manually.
+                </span>
+              )}
               {upcHelperText && <span className="text-xs text-muted-foreground">{upcHelperText}</span>}
               {fieldErrors?.upc && <span className="text-xs font-medium text-destructive">{fieldErrors.upc}</span>}
+              {mode === 'add' && barcodeResolution?.status === 'resolving' && (
+                <p className="inline-flex items-center gap-1 text-xs text-muted-foreground">
+                  <LoaderCircle className="h-3.5 w-3.5 animate-spin" />
+                  Checking existing products...
+                </p>
+              )}
+              {mode === 'add' && barcodeResolution?.status === 'matched' && (
+                <div className="rounded border border-amber-200 bg-amber-50 px-2 py-1 text-xs text-amber-800">
+                  <p className="inline-flex items-center gap-1 font-medium"><CircleAlert className="h-3.5 w-3.5" /> Existing product found</p>
+                  <p>{barcodeResolution.productName || 'Existing product'}{barcodeResolution.productUpc ? ` - UPC ${barcodeResolution.productUpc}` : ''}</p>
+                  {onClearBarcode && <Button type="button" variant="ghost" size="sm" className="mt-1 h-6 px-1 text-xs" onClick={onClearBarcode}>Clear / Scan Another</Button>}
+                </div>
+              )}
+              {mode === 'add' && barcodeResolution?.status === 'not_found' && (
+                <p className="inline-flex items-center gap-1 text-xs font-medium text-success">
+                  <CheckCircle2 className="h-3.5 w-3.5" /> New barcode. No existing product found.
+                </p>
+              )}
+              {mode === 'add' && barcodeResolution?.status === 'ambiguous' && (
+                <div className="rounded border border-destructive/30 bg-destructive/10 px-2 py-1 text-xs text-destructive">
+                  Multiple products match this identity. Review existing products before creating another.
+                </div>
+              )}
+              {mode === 'add' && barcodeResolution?.status === 'error' && (
+                <div className="rounded border border-destructive/30 bg-destructive/10 px-2 py-1 text-xs text-destructive">
+                  Unable to verify this barcode right now. Retry by pressing Enter after confirming the UPC.
+                </div>
+              )}
               {upcDuplicate && mode === 'add' && (
                 <p className="rounded border border-amber-200 bg-amber-50 px-2 py-1 text-xs text-amber-800">
                   This UPC already exists: {upcDuplicate.name}.
                 </p>
               )}
-            </label>
+            </div>
 
             <label className={labelClass}>
               <span className={labelTextClass}>PLU Code</span>
@@ -218,6 +315,7 @@ export function ProductForm({
           <label className={labelClass}>
             <span className={labelTextClass}>Product Name *</span>
             <Input
+              ref={productNameInputRef}
               className={fieldClass}
               value={form.name}
               onChange={(event) => {
@@ -229,6 +327,17 @@ export function ProductForm({
             />
             {fieldErrors?.name && <span className="text-xs font-medium text-destructive">{fieldErrors.name}</span>}
           </label>
+
+          {mode === 'edit' && posPriceStatus && (
+            <div className="flex items-center justify-between gap-3 text-xs text-muted-foreground">
+              <span>{posPriceStatus}</span>
+              {onRetryPosPrice && (
+                <Button type="button" size="sm" variant="outline" onClick={onRetryPosPrice}>
+                  Retry
+                </Button>
+              )}
+            </div>
+          )}
 
           <div className="grid gap-2 sm:grid-cols-2">
             <label className={labelClass}>
@@ -256,6 +365,54 @@ export function ProductForm({
               />
             </label>
           </div>
+
+          {commanderFields && onCommanderFieldsChange && (
+            <div className="grid gap-2 border-t border-border pt-3 sm:grid-cols-4">
+              <label className={labelClass}>
+                <span className={labelTextClass}>Commander Product / Payment Code</span>
+                <Input
+                  className={fieldClass}
+                  inputMode="numeric"
+                  pattern="^\\d{1,16}$"
+                  list="commander-product-code-options"
+                  value={commanderFields.paymentProductCode}
+                  onFocus={(event) => onCommanderProductCodeSearch?.(event.currentTarget.value)}
+                  onChange={(event) => {
+                    onCommanderFieldsChange({ paymentProductCode: event.target.value });
+                    onCommanderProductCodeSearch?.(event.target.value);
+                  }}
+                />
+                <datalist id="commander-product-code-options">
+                  {commanderProductCodeOptions.map((option) => (
+                    <option key={option.key} value={option.key}>
+                      {option.name}{option.isFuel ? ' · Fuel' : ''}{option.isNotSold ? ' · Not sold' : ''}
+                    </option>
+                  ))}
+                </datalist>
+                <span className="block text-[11px] text-muted-foreground">
+                  Search current synced Commander product codes. The selected code is revalidated against the latest master-data run before queueing.
+                </span>
+              </label>
+              <label className={labelClass}>
+                <span className={labelTextClass}>Commander Selling Unit</span>
+                <Input className={fieldClass} inputMode="decimal" pattern="^(?:0|[1-9]\\d{0,5})\\.\\d{3}$" value={commanderFields.sellingUnit} onChange={(event) => onCommanderFieldsChange({ sellingUnit: event.target.value })} />
+              </label>
+              <label className={labelClass}>
+                <span className={labelTextClass}>Commander Max Qty / Transaction</span>
+                <Input className={fieldClass} inputMode="decimal" pattern="^(?:0|[1-9]\\d{0,5})\\.\\d{2}$" value={commanderFields.maxQtyPerTrans} onChange={(event) => onCommanderFieldsChange({ maxQtyPerTrans: event.target.value })} />
+              </label>
+              <label className={labelClass}>
+                <span className={labelTextClass}>Commander Taxable Rebate</span>
+                <Input className={fieldClass} inputMode="decimal" pattern="^(?:0|[1-9]\\d{0,5})\\.\\d{2}$" value={commanderFields.taxableRebate} onChange={(event) => onCommanderFieldsChange({ taxableRebate: event.target.value })} />
+              </label>
+            </div>
+          )}
+
+          {commanderFields && commanderFlagIds.length > 0 && (
+            <p className="text-xs text-muted-foreground">
+              Commander flags (read-only): {commanderFlagIds.join(', ')}
+            </p>
+          )}
 
           <div className="grid gap-2 sm:grid-cols-2">
             <label className={labelClass}>
@@ -563,7 +720,7 @@ export function ProductForm({
         <Button variant="outline" onClick={onCancel} disabled={saving}>
           {cancelLabel}
         </Button>
-        <Button onClick={onSubmit} disabled={saving || writeBlocked}>
+        <Button onClick={onSubmit} disabled={saving || writeBlocked || barcodeBlocksSubmit}>
           {resolvedSubmitLabel}
         </Button>
       </div>

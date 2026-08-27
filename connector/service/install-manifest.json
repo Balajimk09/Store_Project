@@ -9,6 +9,16 @@
   "winsw_runtime_relative_path": "service\\host\\StorePulseConnector.exe",
   "winsw_xml_relative_path": "service\\host\\StorePulseConnector.xml",
   "supported_upgrade_schema_version": 1,
+  "runtime_node_dependencies": [
+    { "name": "@nodable/entities", "version": "2.2.0", "relative_path": "node_modules\\@nodable\\entities" },
+    { "name": "anynum", "version": "1.0.1", "relative_path": "node_modules\\anynum" },
+    { "name": "fast-xml-builder", "version": "1.2.1", "relative_path": "node_modules\\fast-xml-builder" },
+    { "name": "fast-xml-parser", "version": "5.9.3", "relative_path": "node_modules\\fast-xml-parser" },
+    { "name": "is-unsafe", "version": "1.0.1", "relative_path": "node_modules\\is-unsafe" },
+    { "name": "path-expression-matcher", "version": "1.6.2", "relative_path": "node_modules\\path-expression-matcher" },
+    { "name": "strnum", "version": "2.4.1", "relative_path": "node_modules\\strnum" },
+    { "name": "xml-naming", "version": "0.1.0", "relative_path": "node_modules\\xml-naming" }
+  ],
   "required_files": [
     "storepulse-connector.mjs",
     "storepulse-finalize-closed-day.ps1",
@@ -19,6 +29,7 @@
     "maintenance\\run-commander-test-product-price-update.ps1",
     "research\\commander-test-product-price-update-child.mjs",
     "lib\\commander-price-adapter.mjs",
+    "lib\\commander\\commander-vplu-read-client.mjs",
     "lib\\commander\\commander-naxml-client.mjs",
     "lib\\commander\\commander-product-integration.mjs",
     "lib\\commander\\session\\commander-tls-trust.mjs",
@@ -39,6 +50,7 @@
     "service\\storepulse-windows-service.ps1",
     "service\\storepulse-service-entrypoint.ps1",
     "service\\storepulse-node-runtime.ps1",
+    "service\\storepulse-runtime-node-dependencies.ps1",
     "service\\storepulse-machine-identity.ps1",
     "service\\storepulse-connector-heartbeat.ps1",
     "service\\winsw-manifest.json",

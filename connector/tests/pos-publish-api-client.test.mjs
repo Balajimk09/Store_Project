@@ -73,7 +73,7 @@ test('client uses fixed paths, no credentials, manual redirects, and fixed heade
   assert.equal(request.options.redirect, 'manual')
   assert.equal(request.options.credentials, 'omit')
   assert.deepEqual(request.options.headers, { 'content-type': 'application/json', 'x-storepulse-connector-token': TOKEN })
-  assert.deepEqual(JSON.parse(request.options.body), { worker_version: 'offline-test.1', capabilities: ['update_price'] })
+  assert.deepEqual(JSON.parse(request.options.body), { worker_version: 'offline-test.1', capabilities: ['update_price', 'update_product', 'create_product'] })
 })
 
 test('client rejects redirects and times out without echoing the token', async () => {
@@ -169,6 +169,34 @@ test('report validation permits only strict safe payloads', () => {
     { job_id: JOB_ID, status: 'failed', error_code: 'update_rejected', error_message: 'Bearer secret' },
   ]
   for (const value of invalids) assert.throws(() => validateReportPayload(value), /report_payload_invalid/)
+})
+
+test('create lifecycle reports retain their operation discriminator and require flag verification', () => {
+  const verification = {
+    upc: '00012345678901', modifier: '000', description: 'CREATE PRODUCT', department: '18', price: '1.00',
+    payment_product_code: '400', selling_unit: '1.000', maximum_quantity_per_transaction: '0.00', taxable_rebate: '0.00',
+    tax_rate_ids: ['2'], id_check_ids: ['1'], flag_ids: ['1', '5'],
+  }
+  assert.deepEqual(
+    validateReportPayload({ job_id: JOB_ID, status: 'sending', operation: 'create_product' }),
+    { job_id: JOB_ID, status: 'sending', operation: 'create_product' },
+  )
+  assert.deepEqual(
+    validateReportPayload({ job_id: JOB_ID, status: 'verifying', operation: 'create_product' }),
+    { job_id: JOB_ID, status: 'verifying', operation: 'create_product' },
+  )
+  assert.deepEqual(
+    validateReportPayload({ job_id: JOB_ID, status: 'completed', operation: 'create_product', verification }),
+    { job_id: JOB_ID, status: 'completed', operation: 'create_product', verification },
+  )
+  assert.deepEqual(
+    validateReportPayload({ job_id: JOB_ID, status: 'failed', operation: 'create_product', error_code: 'verification_failed', error_message: 'Commander product verification failed.' }),
+    { job_id: JOB_ID, status: 'failed', operation: 'create_product', error_code: 'verification_failed', error_message: 'Commander product verification failed.' },
+  )
+  assert.throws(
+    () => validateReportPayload({ job_id: JOB_ID, status: 'completed', verification }),
+    /report_payload_invalid/,
+  )
 })
 
 test('report returns only the safe acknowledgement', async () => {

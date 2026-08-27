@@ -282,7 +282,7 @@ jobs:
             throw 'runtime_manifest_path_invalid'
           }
 
-          $setupNodePath = (Get-Command node.exe -CommandType Application -ErrorAction Stop).Source
+          $setupNodePath = (Get-Command node.exe -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
           $setupVersion = (& $setupNodePath --version).Trim()
           $setupArchitecture = (& $setupNodePath -p 'process.arch').Trim()
           if ($setupVersion -ne "v$($manifest.version)" -or $setupArchitecture -ne $manifest.architecture) {

@@ -25,15 +25,93 @@ async function defaultAuthenticateConnector(request: Request, requestId: string)
 }
 
 async function defaultReportStatus(auth: ConnectorAuthResult, payload: ReportRequest) {
+  if ('operation' in payload && payload.operation === 'create_product') {
+    const verification = payload.status === 'completed' ? payload.verification : null
+    const { data, error } = await (auth.supabase as unknown as PublishRpcClient).rpc('report_commander_product_create_status', {
+      p_connector_id: auth.connector.id, p_job_id: payload.jobId, p_status: payload.status,
+      p_verification_upc: verification?.upc ?? null, p_verification_modifier: verification?.modifier ?? null,
+      p_verification_description: verification && 'description' in verification ? verification.description : null,
+      p_verification_department: verification && 'department' in verification ? verification.department : null,
+      p_verification_price: verification?.price ?? null,
+      p_verification_payment_product_code: verification && 'payment_product_code' in verification ? verification.payment_product_code : null,
+      p_verification_selling_unit: verification && 'selling_unit' in verification ? verification.selling_unit : null,
+      p_verification_max_qty_per_trans: verification && 'maximum_quantity_per_transaction' in verification ? verification.maximum_quantity_per_transaction : null,
+      p_verification_taxable_rebate: verification && 'taxable_rebate' in verification ? verification.taxable_rebate : null,
+      p_verification_tax_rate_ids: verification && 'tax_rate_ids' in verification ? verification.tax_rate_ids : null,
+      p_verification_id_check_ids: verification && 'id_check_ids' in verification ? verification.id_check_ids : null,
+      p_verification_flag_ids: verification && 'flag_ids' in verification ? verification.flag_ids : null,
+      p_failure_code: payload.status === 'failed' ? payload.errorCode : null, p_failure_message: payload.status === 'failed' ? payload.errorMessage : null,
+    })
+    if (error) throw error
+    const result = Array.isArray(data) ? data[0] : null
+    if (!result || result.job_id !== payload.jobId || result.status !== payload.status) throw new Error('invalid_report_result')
+    return { job_id: result.job_id, status: result.status }
+  }
+  const completedVerification = payload.status === 'completed' ? payload.verification : null
+  const productVerification = completedVerification
+    && 'description' in completedVerification
+    && 'department' in completedVerification
+    ? completedVerification
+    : null
+
+  const fullProductVerification =
+    productVerification
+    && 'payment_product_code' in productVerification
+    && 'selling_unit' in productVerification
+    && 'maximum_quantity_per_transaction' in productVerification
+    && 'taxable_rebate' in productVerification
+    && 'tax_rate_ids' in productVerification
+    && 'id_check_ids' in productVerification
+      ? productVerification
+      : null
+
   const parameters = {
     p_connector_id: auth.connector.id,
     p_job_id: payload.jobId,
     p_status: payload.status,
-    p_verification_upc: payload.status === 'completed' ? payload.verification.upc : null,
-    p_verification_modifier: payload.status === 'completed' ? payload.verification.modifier : null,
-    p_verification_price: payload.status === 'completed' ? payload.verification.price : null,
-    p_failure_code: payload.status === 'failed' ? payload.errorCode : null,
-    p_failure_message: payload.status === 'failed' ? payload.errorMessage : null,
+
+    p_verification_upc:
+      completedVerification?.upc ?? null,
+
+    p_verification_modifier:
+      completedVerification?.modifier ?? null,
+
+    p_verification_description:
+      productVerification?.description ?? null,
+
+    p_verification_department:
+      productVerification?.department ?? null,
+
+    p_verification_price:
+      completedVerification?.price ?? null,
+
+    p_verification_payment_product_code:
+      fullProductVerification?.payment_product_code ?? null,
+
+    p_verification_selling_unit:
+      fullProductVerification?.selling_unit ?? null,
+
+    p_verification_max_qty_per_trans:
+      fullProductVerification?.maximum_quantity_per_transaction ?? null,
+
+    p_verification_taxable_rebate:
+      fullProductVerification?.taxable_rebate ?? null,
+
+    p_verification_tax_rate_ids:
+      fullProductVerification?.tax_rate_ids ?? null,
+
+    p_verification_id_check_ids:
+      fullProductVerification?.id_check_ids ?? null,
+
+    p_failure_code:
+      payload.status === 'failed'
+        ? payload.errorCode
+        : null,
+
+    p_failure_message:
+      payload.status === 'failed'
+        ? payload.errorMessage
+        : null,
   }
   const rpcClient = auth.supabase as unknown as PublishRpcClient
   const { data, error } = await rpcClient.rpc('report_pos_publish_job_status', parameters)

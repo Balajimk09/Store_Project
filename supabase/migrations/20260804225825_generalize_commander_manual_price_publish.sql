@@ -395,4 +395,4 @@ comment on function public.request_commander_price_update(uuid, uuid, numeric, n
 comment on function public.claim_pos_publish_job(uuid) is
   'Service-role-only claim RPC returning only the bounded update_price job identity and prices.';
 
-notify pgrst, 'reload schema';
+notify pgrst, 'reload schema';;

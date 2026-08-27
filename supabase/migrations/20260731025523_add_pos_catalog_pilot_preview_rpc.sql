@@ -222,4 +222,4 @@ grant execute on function public.create_pos_catalog_pilot_preview(jsonb, jsonb) 
 comment on function public.create_pos_catalog_pilot_preview(jsonb, jsonb) is
   'Atomically persists a connector-authenticated selected-products catalog preview. No product writes or POS publishing.';
 
-notify pgrst, 'reload schema';
+notify pgrst, 'reload schema';;

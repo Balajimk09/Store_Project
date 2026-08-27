@@ -166,9 +166,89 @@ jobs:
       - name: Run local database lint
         run: |
           set -euo pipefail
-          supabase db lint --local --schema public,auth --level warning --fail-on error \
+
+          supabase db lint \
+            --local \
+            --schema public,auth \
+            --level warning \
+            --fail-on none \
             2>&1 | tee ci-artifacts/database/db-lint.log
 
+          python3 - <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          log_path = pathlib.Path("ci-artifacts/database/db-lint.log")
+          text = log_path.read_text(encoding="utf-8")
+
+          start = text.find("[")
+          end = text.rfind("]")
+
+          if start < 0 or end < start:
+              print("Could not locate Supabase lint JSON output.", file=sys.stderr)
+              sys.exit(1)
+
+          try:
+              results = json.loads(text[start:end + 1])
+          except json.JSONDecodeError as exc:
+              print(f"Could not parse Supabase lint output: {exc}", file=sys.stderr)
+              sys.exit(1)
+
+          allowed_functions = {
+              "public.complete_pos_catalog_source_sync",
+              "public.complete_pos_catalog_source_sync_v2",
+          }
+
+          ignored_errors = []
+          unexpected_errors = []
+
+          for result in results:
+              function_name = result.get("function")
+
+              for issue in result.get("issues", []):
+                  if issue.get("level") != "error":
+                      continue
+
+                  query = issue.get("query")
+                  query_text = query.get("text", "") if isinstance(query, dict) else ""
+
+                  is_known_false_positive = (
+                      function_name in allowed_functions
+                      and issue.get("sqlState") == "42P01"
+                      and issue.get("message")
+                          == 'relation "pg_temp.live_catalog_sync_input" does not exist'
+                      and query_text.lstrip().startswith(
+                          "insert into pg_temp.live_catalog_sync_input"
+                      )
+                  )
+
+                  if is_known_false_positive:
+                      ignored_errors.append(function_name)
+                  else:
+                      unexpected_errors.append({
+                          "function": function_name,
+                          "issue": issue,
+                      })
+
+          if unexpected_errors:
+              print("Unexpected database lint errors detected:", file=sys.stderr)
+              print(json.dumps(unexpected_errors, indent=2), file=sys.stderr)
+              sys.exit(1)
+
+          if set(ignored_errors) != allowed_functions or len(ignored_errors) != 2:
+              print(
+                  "Expected exactly the two known pg_temp lint false positives.",
+                  file=sys.stderr,
+              )
+              print(json.dumps(ignored_errors, indent=2), file=sys.stderr)
+              sys.exit(1)
+
+          print(
+              "Database lint passed; ignored exactly two known "
+              "pg_temp static-analysis false positives."
+          )
+          PY
       - name: Verify reset and reapply path
         run: |
           set -euo pipefail
@@ -258,6 +338,138 @@ jobs:
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: ${{ env.NODE_VERSION }}
+
+      - name: Provision pinned private Node runtime for connector tests
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $manifestPath = Join-Path $env:GITHUB_WORKSPACE 'connector\service\node-runtime-manifest.json'
+          $runtimeDirectory = Join-Path $env:GITHUB_WORKSPACE 'connector\runtime\node'
+          $runtimePath = Join-Path $runtimeDirectory 'node.exe'
+
+          if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
+            throw "runtime_manifest_missing: $manifestPath"
+          }
+
+          $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+          if ($manifest.version -ne $env:NODE_VERSION) {
+            throw "runtime_version_pin_invalid: manifest=$($manifest.version) workflow=$env:NODE_VERSION"
+          }
+          if ($manifest.required_node_major -ne 20 -or $manifest.architecture -ne 'x64') {
+            throw "runtime_manifest_platform_invalid: major=$($manifest.required_node_major) architecture=$($manifest.architecture)"
+          }
+          if ($manifest.expected_relative_path -ne 'runtime\node' -or $manifest.executable_name -ne 'node.exe') {
+            throw 'runtime_manifest_path_invalid'
+          }
+
+          $setupNodePath = (Get-Command node.exe -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
+          $setupVersion = (& $setupNodePath --version).Trim()
+          $setupArchitecture = (& $setupNodePath -p 'process.arch').Trim()
+          if ($setupVersion -ne "v$($manifest.version)" -or $setupArchitecture -ne $manifest.architecture) {
+            throw "setup_node_invalid: version=$setupVersion architecture=$setupArchitecture"
+          }
+
+          New-Item -ItemType Directory -Path $runtimeDirectory -Force | Out-Null
+          Copy-Item -LiteralPath $setupNodePath -Destination $runtimePath -Force
+
+          $runtimeVersion = (& $runtimePath --version).Trim()
+          $runtimeArchitecture = (& $runtimePath -p 'process.arch').Trim()
+          $runtimeHash = (Get-FileHash -LiteralPath $runtimePath -Algorithm SHA256).Hash.ToUpperInvariant()
+          $expectedHash = ([string]$manifest.sha256).ToUpperInvariant()
+          if ($runtimeVersion -ne "v$($manifest.version)" -or $runtimeArchitecture -ne $manifest.architecture -or $runtimeHash -ne $expectedHash) {
+            throw "runtime_validation_failed: path=$runtimePath version=$runtimeVersion architecture=$runtimeArchitecture sha256=$runtimeHash"
+          }
+
+      - name: Provision declared connector Node dependencies for connector tests
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          npm ci
+          if ($LASTEXITCODE -ne 0) {
+            throw "npm_ci_failed: exit_code=$LASTEXITCODE"
+          }
+
+          $connectorRoot = Join-Path $env:GITHUB_WORKSPACE 'connector'
+          $manifestPath = Join-Path $connectorRoot 'service\install-manifest.json'
+          $dependencyHelperPath = Join-Path $connectorRoot 'service\storepulse-runtime-node-dependencies.ps1'
+          if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf) -or -not (Test-Path -LiteralPath $dependencyHelperPath -PathType Leaf)) {
+            throw 'runtime_dependency_source_missing'
+          }
+
+          $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+          . $dependencyHelperPath
+          Test-StorePulseRuntimeNodeDependencies -Manifest $manifest -Root $env:GITHUB_WORKSPACE | Out-Null
+          Copy-StorePulseRuntimeNodeDependencies -Manifest $manifest -SourceRoot $env:GITHUB_WORKSPACE -InstallRoot $connectorRoot | Out-Null
+          Test-StorePulseRuntimeNodeDependencies -Manifest $manifest -Root $connectorRoot | Out-Null
+
+      - name: Provision pinned WinSW wrapper for connector tests
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $connectorRoot = Join-Path $env:GITHUB_WORKSPACE 'connector'
+          $manifestPath = Join-Path $connectorRoot 'service\winsw-manifest.json'
+          $installManifestPath = Join-Path $connectorRoot 'service\install-manifest.json'
+          $wrapperPath = Join-Path $connectorRoot 'service\host\StorePulseConnector.exe'
+          $downloadPath = Join-Path $env:RUNNER_TEMP ('storepulse-winsw-' + [guid]::NewGuid().ToString('N') + '.exe')
+
+          if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf) -or -not (Test-Path -LiteralPath $installManifestPath -PathType Leaf)) {
+            throw 'winsw_manifest_missing'
+          }
+
+          $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+          $installManifest = Get-Content -LiteralPath $installManifestPath -Raw | ConvertFrom-Json
+          foreach ($name in @('name', 'version', 'asset_name', 'download_url', 'sha256', 'architecture', 'installed_relative_path', 'expected_hosts')) {
+            if (-not $manifest.PSObject.Properties[$name] -or [string]::IsNullOrWhiteSpace([string]$manifest.$name)) {
+              throw 'winsw_manifest_invalid'
+            }
+          }
+          if ($manifest.name -ne 'WinSW' -or $manifest.version -notmatch '^\d+(?:\.\d+){2}$' -or $manifest.architecture -ne 'x64' -or $manifest.sha256 -notmatch '^[A-Fa-f0-9]{64}$') {
+            throw 'winsw_manifest_invalid'
+          }
+          try {
+            $uri = [uri][string]$manifest.download_url
+          }
+          catch {
+            throw 'winsw_manifest_invalid'
+          }
+          $expectedHosts = @($manifest.expected_hosts | ForEach-Object { [string]$_ })
+          if ($uri.Scheme -ne 'https' -or [string]::IsNullOrWhiteSpace($uri.Host) -or $expectedHosts -notcontains $uri.Host) {
+            throw 'winsw_manifest_host_invalid'
+          }
+          $relativePath = ([string]$manifest.installed_relative_path).Replace('/', '\\')
+          if ([IO.Path]::IsPathRooted($relativePath) -or $relativePath.Contains('..') -or $relativePath -notmatch '^service\\host\\[^\\]+\.exe$' -or $relativePath -ne [string]$installManifest.winsw_runtime_relative_path) {
+            throw 'winsw_manifest_path_invalid'
+          }
+          if ($wrapperPath -ne (Join-Path $connectorRoot $relativePath)) {
+            throw 'winsw_wrapper_path_invalid'
+          }
+
+          try {
+            try {
+              Invoke-WebRequest -Uri $uri.AbsoluteUri -OutFile $downloadPath -UseBasicParsing -ErrorAction Stop
+            }
+            catch {
+              throw 'winsw_download_failed'
+            }
+            $expectedHash = ([string]$manifest.sha256).ToUpperInvariant()
+            $downloadHash = (Get-FileHash -LiteralPath $downloadPath -Algorithm SHA256).Hash.ToUpperInvariant()
+            if ($downloadHash -ne $expectedHash) {
+              throw 'winsw_hash_mismatch'
+            }
+
+            New-Item -ItemType Directory -Path (Split-Path -Parent $wrapperPath) -Force | Out-Null
+            Copy-Item -LiteralPath $downloadPath -Destination $wrapperPath -Force
+            $wrapperHash = (Get-FileHash -LiteralPath $wrapperPath -Algorithm SHA256).Hash.ToUpperInvariant()
+            if ($wrapperHash -ne $expectedHash) {
+              throw 'winsw_wrapper_hash_mismatch'
+            }
+
+            . (Join-Path $connectorRoot 'service\storepulse-windows-service.ps1')
+            Test-StorePulseWinSWBinary -InstallRoot $connectorRoot -ManifestPath $manifestPath | Out-Null
+          }
+          finally {
+            Remove-Item -LiteralPath $downloadPath -Force -ErrorAction SilentlyContinue
+          }
 
       - name: Parse connector PowerShell scripts
         shell: powershell

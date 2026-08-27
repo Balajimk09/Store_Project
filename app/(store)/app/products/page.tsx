@@ -1,7 +1,7 @@
 'use client';
 
 import Link from 'next/link';
-import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type Dispatch, type SetStateAction } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type Dispatch, type RefObject, type SetStateAction } from 'react';
 import {
   AlertTriangle,
   Bell,
@@ -29,7 +29,7 @@ import {
   Tooltip,
 } from 'recharts';
 import { DashboardShell, PageHeader, PageLoading } from '@/components/layout/sidebar';
-import { ProductForm, type ProductFormState } from '@/components/products/ProductForm';
+import { ProductForm, type ProductFormBarcodeResolution, type ProductFormCommanderFields, type ProductFormCommanderPriceContext, type ProductFormCommanderProductCodeOption, type ProductFormState } from '@/components/products/ProductForm';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
@@ -55,6 +55,18 @@ import {
   type ReceivingLineStatus,
 } from '@/lib/invoices';
 import { exportToCsv, formatCurrency, formatNumber } from '@/lib/format';
+import {
+  isMappedCategorySelectionValid,
+  isMappedCommanderDepartmentSelectionValid,
+  resolveMappedCategoriesForDepartment,
+  resolveMappedCategorySelection,
+  resolveMappedCommanderDepartmentName,
+  resolveMappedCommanderDepartments,
+} from '@/lib/pos/commander-category-department-binding.mjs';
+import {
+  doesCanonicalProductBarcodeResolutionBlockCreation,
+  normalizeCanonicalProductBarcode,
+} from '@/lib/pos/canonical-product-barcode-scan.mjs';
 import { cn } from '@/lib/utils';
 
 type Tab = 'overview' | 'products' | 'newProducts' | 'receiving' | 'reorder' | 'history';
@@ -188,6 +200,7 @@ type CommanderObservationsResponse =
 
 type CommanderPriceJob = {
   id: string;
+  operation: 'update_price' | 'update_product' | 'create_product';
   status: 'pending' | 'claimed' | 'sending' | 'verifying' | 'completed' | 'failed' | 'cancelled';
   expected_price: string;
   requested_price: string;
@@ -209,6 +222,127 @@ type CommanderPriceIdentity = {
 type CommanderPriceIdentityResponse =
   | { ok: true; identities: CommanderPriceIdentity[] }
   | { ok: false; error_code: string };
+
+type CommanderPriceContextResponse =
+  | { ok: true; context: ProductFormCommanderPriceContext | null }
+  | { ok: false; error_code: string };
+
+type CommanderProductContext = {
+  product_id: string;
+  source_product_key: string;
+  source_upc: string;
+  source_modifier: string;
+  commander_description: string;
+  commander_department_key: string;
+  commander_department_name: string | null;
+  commander_price: string;
+  commander_payment_product_code: string;
+  commander_selling_unit: string;
+  commander_max_qty_per_trans: string;
+  commander_taxable_rebate: string;
+  commander_tax_rate_ids: string[];
+  commander_id_check_ids: string[];
+  commander_flag_ids: string[];
+  canonical_description: string;
+  canonical_department: string | null;
+  canonical_price: string;
+  observed_at: string;
+};
+
+const EMPTY_COMMANDER_PRODUCT_FIELDS: ProductFormCommanderFields = {
+  paymentProductCode: '',
+  sellingUnit: '',
+  maxQtyPerTrans: '',
+  taxableRebate: '',
+};
+
+const EMPTY_COMMANDER_PRODUCT_FIELD_EDITS: Record<keyof ProductFormCommanderFields, boolean> = {
+  paymentProductCode: false,
+  sellingUnit: false,
+  maxQtyPerTrans: false,
+  taxableRebate: false,
+};
+
+type CommanderProductContextResponse =
+  | { ok: true; context: CommanderProductContext | null }
+  | { ok: false; error_code: string };
+
+type CommanderProductResponse = CommanderPriceResponse;
+
+type CommanderSourceMasterDataResponse =
+  | {
+      ok: true;
+      available: true;
+      summary: { master_data_run_id: string };
+      departments: Array<{
+        source_department_key: string;
+        category: { source_category_key: string; source_name: string } | null;
+      }>;
+      product_codes: Array<{
+        source_product_code_key: string;
+        source_name: string;
+        is_not_sold: boolean;
+        is_fuel: boolean;
+      }>;
+    }
+  | { ok: true; available: false }
+  | { ok: false; error_code: string };
+
+type CommanderCategoryMappingResponse =
+  | {
+      ok: true;
+      mappings: Array<{
+        entity_type: string;
+        source_key: string;
+        source_context_key: string;
+        status: string;
+        canonical_department_id: string | null;
+        canonical_category_id: string | null;
+      }>;
+      canonical_targets: {
+        departments: Array<{ id: string; name: string }>;
+        categories: Array<{ id: string; name: string; department_id: string }>;
+      };
+    }
+  | { ok: false; error_code: string };
+
+type CommanderCategoryMappingData = {
+  sourceDepartments: Extract<CommanderSourceMasterDataResponse, { ok: true; available: true }>['departments'];
+  mappings: Extract<CommanderCategoryMappingResponse, { ok: true }>['mappings'];
+  canonicalTargets: Extract<CommanderCategoryMappingResponse, { ok: true }>['canonical_targets'];
+};
+
+type CanonicalIdentityProduct = {
+  id: string;
+  upc: string | null;
+  plu: string | null;
+  productCode: string | null;
+  itemName: string | null;
+  department: string | null;
+  sellingPrice: string | null;
+  isActive: boolean | null;
+};
+
+type CanonicalIdentityResolution = {
+  clientKey: string;
+  status: 'MATCHED' | 'AMBIGUOUS' | 'NOT_FOUND';
+  product: CanonicalIdentityProduct | null;
+  candidates: CanonicalIdentityProduct[];
+};
+
+type CanonicalIdentityResolveResponse = {
+  ok: true;
+  resolutions: CanonicalIdentityResolution[];
+} | { ok: false; error_code: string };
+
+type AddProductBarcodeResolution = ProductFormBarcodeResolution & {
+  upc: string;
+};
+
+const EMPTY_ADD_PRODUCT_BARCODE_RESOLUTION: AddProductBarcodeResolution = {
+  status: 'idle',
+  upc: '',
+};
 
 type SaveNewProductResponse =
   | {
@@ -278,6 +412,53 @@ type TaxCategoryOption = {
   rate: number;
   is_active: boolean;
 };
+
+type CanonicalCatalogProduct = {
+  id: string;
+  upc: string;
+  item_name: string;
+  category: string;
+  department: string;
+  sku: string | null;
+  plu: string | null;
+  product_code: string | null;
+  brand: string | null;
+  cost_price: string | null;
+  selling_price: string | null;
+  stock: string | null;
+  reorder_level: string | null;
+  vendor: string | null;
+  tax_rate: string | null;
+  tax_category: string | null;
+  taxable: boolean;
+  ebt_eligible: boolean;
+  age_verification: boolean;
+  minimum_age: number | null;
+  age_restriction_type: string | null;
+  is_active: boolean | null;
+  notes: string | null;
+  units_per_case: string | null;
+  cases_on_hand: string | null;
+  loose_units: string | null;
+  commander_linked: boolean;
+};
+
+type CanonicalCatalogMetrics = {
+  total_products: number;
+  commander_linked: number;
+  active_products: number;
+  inactive_products: number;
+  unknown_products: number;
+  low_stock_products: number;
+};
+
+type CanonicalCatalogResponse = {
+  ok: true;
+  products: CanonicalCatalogProduct[];
+  metrics: CanonicalCatalogMetrics;
+  facets: { departments: string[]; vendors: string[] };
+  pagination: { page: number; page_size: number; total: number; total_pages: number };
+} | { ok: false; error_code: string };
 
 type AgeRestrictionPreset = {
   id: string;
@@ -469,6 +650,23 @@ function formatCandidateDate(value: string | null) {
   if (Number.isNaN(date.getTime())) return '-';
   return date.toLocaleDateString();
 }
+
+function normalizeCommanderPublishPrice(value: string) {
+  const text = value.trim();
+  if (!/^(?:0|[1-9]\d*)(?:\.\d{1,2})?$/.test(text)) return null;
+  const numeric = Number(text);
+  if (!Number.isFinite(numeric) || numeric <= 0 || numeric > 999999.99) return null;
+  return numeric.toFixed(2);
+}
+
+function normalizeCommanderFixedDecimal(value: string, scale: 2 | 3) {
+  const text = value.trim();
+  const pattern = scale === 3
+    ? /^(?:0|[1-9]\d{0,5})\.\d{3}$/
+    : /^(?:0|[1-9]\d{0,5})\.\d{2}$/;
+  return pattern.test(text) ? text : null;
+}
+
 
 function formatObservationDate(value: string | null) {
   if (!value) return '-';
@@ -873,7 +1071,19 @@ function ProductModal({
   onUpcBlur,
   onPluBlur,
   onProductCodeBlur,
+  barcodeResolution,
+  onUpcEnter,
+  onClearBarcode,
+  upcInputRef,
+  productNameInputRef,
   writeBlocked,
+  posPriceStatus,
+  onRetryPosPrice,
+  commanderFields,
+  commanderFlagIds,
+  commanderProductCodeOptions,
+  onCommanderProductCodeSearch,
+  onCommanderFieldsChange,
 }: {
   open: boolean;
   mode: 'add' | 'edit';
@@ -895,7 +1105,19 @@ function ProductModal({
   onUpcBlur: () => void;
   onPluBlur: () => void;
   onProductCodeBlur: () => void;
+  barcodeResolution: ProductFormBarcodeResolution;
+  onUpcEnter: (value: string) => void;
+  onClearBarcode: () => void;
+  upcInputRef: RefObject<HTMLInputElement>;
+  productNameInputRef: RefObject<HTMLInputElement>;
   writeBlocked?: boolean;
+  posPriceStatus?: string | null;
+  onRetryPosPrice?: () => void;
+  commanderFields?: ProductFormCommanderFields | null;
+  commanderFlagIds?: string[];
+  commanderProductCodeOptions?: ProductFormCommanderProductCodeOption[];
+  onCommanderProductCodeSearch?: (value: string) => void;
+  onCommanderFieldsChange?: (patch: Partial<ProductFormCommanderFields>) => void;
 }) {
   if (!open) return null;
 
@@ -932,7 +1154,19 @@ function ProductModal({
           onUpcBlur={onUpcBlur}
           onPluBlur={onPluBlur}
           onProductCodeBlur={onProductCodeBlur}
+          barcodeResolution={barcodeResolution}
+          onUpcEnter={onUpcEnter}
+          onClearBarcode={onClearBarcode}
+          upcInputRef={upcInputRef}
+          productNameInputRef={productNameInputRef}
           writeBlocked={writeBlocked}
+          posPriceStatus={posPriceStatus}
+          onRetryPosPrice={onRetryPosPrice}
+          commanderFields={commanderFields}
+          commanderFlagIds={commanderFlagIds}
+          commanderProductCodeOptions={commanderProductCodeOptions}
+          onCommanderProductCodeSearch={onCommanderProductCodeSearch}
+          onCommanderFieldsChange={onCommanderFieldsChange}
           disableUpc={mode === 'edit'}
           submitLabel={
             saving
@@ -946,6 +1180,37 @@ function ProductModal({
     </div>
   );
 }
+function canonicalCatalogProductToProduct(product: CanonicalCatalogProduct): Product {
+  return {
+    id: product.id,
+    upc: product.upc,
+    name: product.item_name,
+    category: product.category || product.department || 'Uncategorized',
+    department: product.department || product.category || 'Uncategorized',
+    sku: product.sku || undefined,
+    plu: product.plu || undefined,
+    productCode: product.product_code || undefined,
+    brand: product.brand || 'Unknown',
+    costPrice: safeNumber(product.cost_price ?? undefined),
+    sellPrice: safeNumber(product.selling_price ?? undefined),
+    stock: safeNumber(product.stock ?? undefined),
+    reorderLevel: safeNumber(product.reorder_level ?? undefined),
+    vendor: product.vendor || undefined,
+    taxRate: safeNumber(product.tax_rate ?? undefined),
+    taxCategory: product.tax_category || 'standard',
+    taxable: product.taxable,
+    ebtEligible: product.ebt_eligible,
+    ageVerification: product.age_verification,
+    minimumAge: product.minimum_age ?? undefined,
+    ageRestrictionType: product.age_restriction_type || undefined,
+    isActive: product.is_active ?? undefined,
+    notes: product.notes || undefined,
+    unitsPerCase: Math.max(1, safeNumber(product.units_per_case ?? undefined, 1)),
+    casesOnHand: safeNumber(product.cases_on_hand ?? undefined),
+    looseUnits: safeNumber(product.loose_units ?? undefined),
+  };
+}
+
 export default function ProductsPage() {
   const { user, store, activeStoreId, storeScope } = useAuth();
 
@@ -972,6 +1237,13 @@ export default function ProductsPage() {
   const [ageVerificationFilter, setAgeVerificationFilter] = useState(false);
   const [taxableFilter, setTaxableFilter] = useState(false);
   const [stockFilter, setStockFilter] = useState('All');
+  const [canonicalCatalog, setCanonicalCatalog] = useState<Extract<CanonicalCatalogResponse, { ok: true }> | null>(null);
+  const [canonicalCatalogLoading, setCanonicalCatalogLoading] = useState(false);
+  const [canonicalCatalogError, setCanonicalCatalogError] = useState<string | null>(null);
+  const [canonicalCatalogPage, setCanonicalCatalogPage] = useState(1);
+  const [canonicalCatalogPageSize, setCanonicalCatalogPageSize] = useState<25 | 50 | 100>(50);
+  const [canonicalCatalogRefresh, setCanonicalCatalogRefresh] = useState(0);
+  const canonicalCatalogRequestKeyRef = useRef<string | null>(null);
   const [modalMode, setModalMode] = useState<'add' | 'edit'>('add');
   const [modalOpen, setModalOpen] = useState(false);
   const [editingProduct, setEditingProduct] = useState<Product | null>(null);
@@ -981,6 +1253,26 @@ export default function ProductsPage() {
   const [upcDuplicate, setUpcDuplicate] = useState<Product | null>(null);
   const [pluDuplicate, setPluDuplicate] = useState<Product | null>(null);
   const [productCodeDuplicate, setProductCodeDuplicate] = useState<Product | null>(null);
+  const [addProductBarcodeResolution, setAddProductBarcodeResolution] = useState<AddProductBarcodeResolution>(EMPTY_ADD_PRODUCT_BARCODE_RESOLUTION);
+  const addProductUpcInputRef = useRef<HTMLInputElement | null>(null);
+  const addProductNameInputRef = useRef<HTMLInputElement | null>(null);
+  const addProductBarcodeRequestRef = useRef(0);
+  const addProductBarcodeInFlightRef = useRef<string | null>(null);
+  const [editingCommanderPriceContext, setEditingCommanderPriceContext] = useState<ProductFormCommanderPriceContext | null>(null);
+  const [editingCommanderPriceContextLoading, setEditingCommanderPriceContextLoading] = useState(false);
+  const [editingCommanderPriceContextError, setEditingCommanderPriceContextError] = useState<string | null>(null);
+  const editingCommanderPriceContextRequestRef = useRef(0);
+  const [editingCommanderProductContext, setEditingCommanderProductContext] = useState<CommanderProductContext | null>(null);
+  const [editingCommanderProductContextLoading, setEditingCommanderProductContextLoading] = useState(false);
+  const [editingCommanderProductContextError, setEditingCommanderProductContextError] = useState<string | null>(null);
+  const editingCommanderProductContextRequestRef = useRef(0);
+  const [editingCommanderProductFields, setEditingCommanderProductFields] = useState<ProductFormCommanderFields>(EMPTY_COMMANDER_PRODUCT_FIELDS);
+  const [editingCommanderProductFieldEdits, setEditingCommanderProductFieldEdits] = useState(EMPTY_COMMANDER_PRODUCT_FIELD_EDITS);
+  const [editingCommanderProductCodeOptions, setEditingCommanderProductCodeOptions] = useState<ProductFormCommanderProductCodeOption[]>([]);
+  const editingCommanderProductCodeRequestRef = useRef(0);
+  const [editingCategoryMapping, setEditingCategoryMapping] = useState<CommanderCategoryMappingData | null>(null);
+  const [editingCategoryMappingLoading, setEditingCategoryMappingLoading] = useState(false);
+  const editingCategoryMappingRequestRef = useRef(0);
   const [productImportResult, setProductImportResult] = useState<ReturnType<typeof parseProductsCsv> | null>(null);
   const [productImportFileName, setProductImportFileName] = useState('');
   const [productImportError, setProductImportError] = useState<string | null>(null);
@@ -1002,8 +1294,14 @@ export default function ProductsPage() {
   const [commanderRequestedPrice, setCommanderRequestedPrice] = useState('');
   const [commanderPriceConfirmed, setCommanderPriceConfirmed] = useState(false);
   const [commanderPriceJob, setCommanderPriceJob] = useState<CommanderPriceJob | null>(null);
+  const [commanderPriceJobProductId, setCommanderPriceJobProductId] = useState<string | null>(null);
+  const [commanderProductJob, setCommanderProductJob] = useState<CommanderPriceJob | null>(null);
+  const [commanderProductJobProductId, setCommanderProductJobProductId] = useState<string | null>(null);
+  const [commanderProductPollingError, setCommanderProductPollingError] = useState<string | null>(null);
+  const [commanderProductCompletionMessage, setCommanderProductCompletionMessage] = useState<string | null>(null);
   const [commanderPriceSubmitting, setCommanderPriceSubmitting] = useState(false);
   const [commanderPriceError, setCommanderPriceError] = useState<string | null>(null);
+  const [commanderPricePollingError, setCommanderPricePollingError] = useState<string | null>(null);
   const [reviewingNewProduct, setReviewingNewProduct] = useState<NewProductCandidate | null>(null);
   const [newProductReviewForm, setNewProductReviewForm] = useState<ProductFormState>(EMPTY_NEW_PRODUCT_REVIEW_FORM);
   const [newProductReviewFieldErrors, setNewProductReviewFieldErrors] = useState<NewProductReviewFieldErrors>({});
@@ -1075,6 +1373,62 @@ export default function ProductsPage() {
     },
     [productsWriteBlocked]
   );
+
+  const loadCanonicalCatalog = useCallback(async () => {
+    if (!activeStoreId) {
+      canonicalCatalogRequestKeyRef.current = null;
+      setCanonicalCatalog(null);
+      setCanonicalCatalogError(null);
+      return;
+    }
+
+    try {
+      const params = new URLSearchParams({
+        storeId: activeStoreId,
+        page: String(canonicalCatalogPage),
+        pageSize: String(canonicalCatalogPageSize),
+        stock: stockFilter === 'Reorder' ? 'reorder' : stockFilter === 'In Stock' ? 'in_stock' : 'all',
+      });
+      if (query.trim()) params.set('search', query.trim());
+      if (departmentFilter !== 'All') params.set('department', departmentFilter);
+      if (vendorFilter !== 'All') params.set('vendor', vendorFilter);
+      if (minPrice.trim()) params.set('minPrice', minPrice.trim());
+      if (maxPrice.trim()) params.set('maxPrice', maxPrice.trim());
+      if (ebtFilter) params.set('ebtOnly', 'true');
+      if (ageVerificationFilter) params.set('ageRestrictedOnly', 'true');
+      if (taxableFilter) params.set('taxableOnly', 'true');
+
+      const requestKey = `${canonicalCatalogRefresh}:${params.toString()}`;
+      if (canonicalCatalogRequestKeyRef.current === requestKey) return;
+      canonicalCatalogRequestKeyRef.current = requestKey;
+
+      setCanonicalCatalogLoading(true);
+      setCanonicalCatalogError(null);
+      const response = await fetch(`/api/products/catalog?${params.toString()}`);
+      const payload = await response.json().catch(() => null) as CanonicalCatalogResponse | null;
+      if (!response.ok || !payload || !payload.ok) throw new Error('catalog_unavailable');
+      setCanonicalCatalog(payload);
+    } catch {
+      setCanonicalCatalog(null);
+      setCanonicalCatalogError('Canonical products could not be loaded.');
+    } finally {
+      setCanonicalCatalogLoading(false);
+    }
+  }, [
+    activeStoreId,
+    ageVerificationFilter,
+    canonicalCatalogRefresh,
+    canonicalCatalogPage,
+    canonicalCatalogPageSize,
+    departmentFilter,
+    ebtFilter,
+    maxPrice,
+    minPrice,
+    query,
+    stockFilter,
+    taxableFilter,
+    vendorFilter,
+  ]);
 
   const loadNewProductCandidates = useCallback(async () => {
     if (!activeStoreId) {
@@ -1149,6 +1503,24 @@ export default function ProductsPage() {
     [commanderPriceIdentities]
   );
 
+  const commanderPriceTarget = useMemo(() => {
+    if (commanderPriceObservation) {
+      return {
+        source_product_key: commanderPriceObservation.source_product_key,
+        source_upc: commanderPriceObservation.upc,
+        source_modifier: commanderPriceObservation.modifier,
+        commander_price: commanderPriceObservation.price,
+      };
+    }
+    if (
+      editingCommanderPriceContext
+      && editingCommanderPriceContext.product_id === commanderPriceProductId
+    ) {
+      return editingCommanderPriceContext;
+    }
+    return null;
+  }, [commanderPriceObservation, commanderPriceProductId, editingCommanderPriceContext]);
+
   const closeCommanderPrice = useCallback(() => {
     if (commanderPriceSubmitting) return;
     setCommanderPriceObservation(null);
@@ -1172,6 +1544,251 @@ export default function ProductsPage() {
     setCommanderPriceJob(null);
     setCommanderPriceError(null);
   }, [commanderPriceIdentityByKey, items]);
+
+  const loadEditingCommanderPriceContext = useCallback(async (productId: string) => {
+    if (!activeStoreId || !productId) return;
+    const requestId = editingCommanderPriceContextRequestRef.current + 1;
+    editingCommanderPriceContextRequestRef.current = requestId;
+    setEditingCommanderPriceContext(null);
+    setEditingCommanderPriceContextError(null);
+    setEditingCommanderPriceContextLoading(true);
+    try {
+      const response = await fetch(
+        `/api/products/commander-price?storeId=${encodeURIComponent(activeStoreId)}&productId=${encodeURIComponent(productId)}&context=1`,
+        { credentials: 'same-origin' },
+      );
+      const json = (await response.json().catch(() => null)) as CommanderPriceContextResponse | null;
+      if (!response.ok || !json || !json.ok) throw new Error('commander_price_context_unavailable');
+      if (editingCommanderPriceContextRequestRef.current !== requestId) return;
+      setEditingCommanderPriceContext(json.context);
+    } catch {
+      if (editingCommanderPriceContextRequestRef.current === requestId) {
+        setEditingCommanderPriceContextError('commander_price_context_unavailable');
+      }
+    } finally {
+      if (editingCommanderPriceContextRequestRef.current === requestId) {
+        setEditingCommanderPriceContextLoading(false);
+      }
+    }
+  }, [activeStoreId]);
+
+  const loadEditingCategoryMapping = useCallback(async (
+    sourceData: Extract<CommanderSourceMasterDataResponse, { ok: true; available: true }>,
+  ) => {
+    if (!activeStoreId) return;
+    const requestId = editingCategoryMappingRequestRef.current + 1;
+    editingCategoryMappingRequestRef.current = requestId;
+    setEditingCategoryMapping(null);
+    setEditingCategoryMappingLoading(true);
+    try {
+      const mappingQuery = new URLSearchParams({
+        storeId: activeStoreId,
+        masterDataRunId: sourceData.summary.master_data_run_id,
+      });
+      const mappingResponse = await fetch(`/api/products/source-master-data/mappings?${mappingQuery.toString()}`, {
+        credentials: 'same-origin',
+        cache: 'no-store',
+      });
+      const mappingJson = (await mappingResponse.json().catch(() => null)) as CommanderCategoryMappingResponse | null;
+      if (
+        editingCategoryMappingRequestRef.current !== requestId
+        || !mappingResponse.ok
+        || !mappingJson
+        || !mappingJson.ok
+        || !Array.isArray(mappingJson.mappings)
+        || !mappingJson.canonical_targets
+        || !Array.isArray(mappingJson.canonical_targets.departments)
+        || !Array.isArray(mappingJson.canonical_targets.categories)
+      ) return;
+      setEditingCategoryMapping({
+        sourceDepartments: sourceData.departments,
+        mappings: mappingJson.mappings,
+        canonicalTargets: mappingJson.canonical_targets,
+      });
+    } finally {
+      if (editingCategoryMappingRequestRef.current === requestId) {
+        setEditingCategoryMappingLoading(false);
+      }
+    }
+  }, [activeStoreId]);
+
+  const loadEditingCommanderProductCodeOptions = useCallback(async (searchValue: string, loadCategoryMapping = false) => {
+    if (!activeStoreId) return;
+    const search = searchValue.trim();
+    if (search && !/^[A-Za-z0-9 ._&()/-]{1,80}$/.test(search)) {
+      setEditingCommanderProductCodeOptions([]);
+      return;
+    }
+
+    const requestId = editingCommanderProductCodeRequestRef.current + 1;
+    editingCommanderProductCodeRequestRef.current = requestId;
+    try {
+      const query = new URLSearchParams({
+        storeId: activeStoreId,
+        page: '1',
+        pageSize: '50',
+      });
+      if (search) query.set('search', search);
+      const response = await fetch(`/api/products/source-master-data?${query.toString()}`, {
+        credentials: 'same-origin',
+        cache: 'no-store',
+      });
+      const json = (await response.json().catch(() => null)) as CommanderSourceMasterDataResponse | null;
+      if (editingCommanderProductCodeRequestRef.current !== requestId) return;
+      if (!response.ok || !json || !json.ok || !json.available || !Array.isArray(json.product_codes)) {
+        setEditingCommanderProductCodeOptions([]);
+        if (loadCategoryMapping) {
+          setEditingCategoryMapping(null);
+          setEditingCategoryMappingLoading(false);
+        }
+        return;
+      }
+      const options = json.product_codes
+        .filter((row) => /^\d{1,16}$/.test(row.source_product_code_key) && typeof row.source_name === 'string')
+        .map((row) => ({
+          key: row.source_product_code_key,
+          name: row.source_name,
+          isNotSold: row.is_not_sold === true,
+          isFuel: row.is_fuel === true,
+        }));
+      setEditingCommanderProductCodeOptions(options);
+      if (loadCategoryMapping) {
+        void loadEditingCategoryMapping(json);
+      }
+    } catch {
+      if (editingCommanderProductCodeRequestRef.current === requestId) {
+        setEditingCommanderProductCodeOptions([]);
+        if (loadCategoryMapping) {
+          setEditingCategoryMapping(null);
+          setEditingCategoryMappingLoading(false);
+        }
+      }
+    }
+  }, [activeStoreId, loadEditingCategoryMapping]);
+
+  const editingCategoryOptions = useMemo(() => (
+    editingCategoryMapping
+      ? resolveMappedCategoriesForDepartment({
+          departmentName: form.department,
+          sourceDepartments: editingCategoryMapping.sourceDepartments,
+          mappings: editingCategoryMapping.mappings,
+          canonicalTargets: editingCategoryMapping.canonicalTargets,
+        })
+      : []
+  ), [editingCategoryMapping, form.department]);
+
+  const editingCommanderDepartmentOptions = useMemo(() => (
+    editingCategoryMapping
+      ? resolveMappedCommanderDepartments({
+          sourceDepartments: editingCategoryMapping.sourceDepartments,
+          mappings: editingCategoryMapping.mappings,
+          canonicalTargets: editingCategoryMapping.canonicalTargets,
+        })
+      : []
+  ), [editingCategoryMapping]);
+
+  const editingCommanderMappedDepartmentName = useMemo(() => (
+    editingCommanderProductContext
+      ? resolveMappedCommanderDepartmentName(
+          editingCommanderProductContext.commander_department_key,
+          editingCommanderDepartmentOptions,
+        )
+      : ''
+  ), [editingCommanderDepartmentOptions, editingCommanderProductContext]);
+
+  useEffect(() => {
+    if (
+      !modalOpen
+      || modalMode !== 'edit'
+      || editingCategoryMappingLoading
+      || !editingCommanderProductContext
+      || isMappedCommanderDepartmentSelectionValid(form.department, editingCommanderDepartmentOptions)
+    ) return;
+    setForm((current) => ({
+      ...current,
+      department: editingCommanderMappedDepartmentName,
+      customDepartment: '',
+    }));
+  }, [
+    editingCategoryMappingLoading,
+    editingCommanderDepartmentOptions,
+    editingCommanderMappedDepartmentName,
+    editingCommanderProductContext,
+    form.department,
+    modalMode,
+    modalOpen,
+  ]);
+
+  useEffect(() => {
+    if (!modalOpen || modalMode !== 'edit' || editingCategoryMappingLoading) return;
+    const category = resolveMappedCategorySelection(form.category, editingCategoryOptions);
+    if (category === form.category) return;
+    setForm((current) => (
+      current.department === form.department
+        ? { ...current, category }
+        : current
+    ));
+  }, [editingCategoryMappingLoading, editingCategoryOptions, form.category, form.department, modalMode, modalOpen]);
+
+  const loadEditingCommanderProductContext = useCallback(async (productId: string) => {
+    if (!activeStoreId || !productId) return;
+    const requestId = editingCommanderProductContextRequestRef.current + 1;
+    editingCommanderProductContextRequestRef.current = requestId;
+    setEditingCommanderProductContext(null);
+    setEditingCommanderProductContextError(null);
+    setEditingCommanderProductContextLoading(true);
+    try {
+      const response = await fetch(
+        `/api/products/commander-product?storeId=${encodeURIComponent(activeStoreId)}&productId=${encodeURIComponent(productId)}&context=1`,
+        { credentials: 'same-origin' },
+      );
+      const json = (await response.json().catch(() => null)) as CommanderProductContextResponse | null;
+      if (!response.ok || !json || !json.ok) throw new Error('commander_product_context_unavailable');
+      if (editingCommanderProductContextRequestRef.current !== requestId) return;
+      setEditingCommanderProductContext(json.context);
+      setEditingCommanderProductFields(json.context
+        ? {
+            paymentProductCode: json.context.commander_payment_product_code,
+            sellingUnit: json.context.commander_selling_unit,
+            maxQtyPerTrans: json.context.commander_max_qty_per_trans,
+            taxableRebate: json.context.commander_taxable_rebate,
+          }
+        : EMPTY_COMMANDER_PRODUCT_FIELDS);
+      setEditingCommanderProductFieldEdits(EMPTY_COMMANDER_PRODUCT_FIELD_EDITS);
+      if (json.context) {
+        void loadEditingCommanderProductCodeOptions(json.context.commander_payment_product_code, true);
+      } else {
+        void loadEditingCommanderProductCodeOptions('', true);
+      }
+    } catch {
+      if (editingCommanderProductContextRequestRef.current === requestId) {
+        setEditingCommanderProductContextError('commander_product_context_unavailable');
+        void loadEditingCommanderProductCodeOptions('', true);
+      }
+    } finally {
+      if (editingCommanderProductContextRequestRef.current === requestId) {
+        setEditingCommanderProductContextLoading(false);
+      }
+    }
+  }, [activeStoreId, loadEditingCommanderProductCodeOptions]);
+
+  const editingCommanderEffectiveProductFields = useMemo<ProductFormCommanderFields>(() => {
+    if (!editingCommanderProductContext) return editingCommanderProductFields;
+    return {
+      paymentProductCode: editingCommanderProductFieldEdits.paymentProductCode
+        ? editingCommanderProductFields.paymentProductCode
+        : editingCommanderProductContext.commander_payment_product_code,
+      sellingUnit: editingCommanderProductFieldEdits.sellingUnit
+        ? editingCommanderProductFields.sellingUnit
+        : editingCommanderProductContext.commander_selling_unit,
+      maxQtyPerTrans: editingCommanderProductFieldEdits.maxQtyPerTrans
+        ? editingCommanderProductFields.maxQtyPerTrans
+        : editingCommanderProductContext.commander_max_qty_per_trans,
+      taxableRebate: editingCommanderProductFieldEdits.taxableRebate
+        ? editingCommanderProductFields.taxableRebate
+        : editingCommanderProductContext.commander_taxable_rebate,
+    };
+  }, [editingCommanderProductContext, editingCommanderProductFieldEdits, editingCommanderProductFields]);
 
   const refreshCommanderPriceJob = useCallback(async (jobId: string) => {
     if (!activeStoreId) return;
@@ -1206,58 +1823,250 @@ export default function ProductsPage() {
     return () => window.clearTimeout(timer);
   }, [commanderPriceJob, refreshCommanderPriceJob]);
 
-  const submitCommanderPrice = useCallback(async () => {
-    if (!activeStoreId || !commanderPriceObservation || !commanderPriceProductId) {
+  const refreshCommanderProductJob = useCallback(async (jobId: string) => {
+    if (!activeStoreId) return;
+    try {
+      const response = await fetch(
+        `/api/products/commander-product?storeId=${encodeURIComponent(activeStoreId)}&jobId=${encodeURIComponent(jobId)}`,
+        { credentials: 'same-origin' },
+      );
+      const json = (await response.json()) as CommanderProductResponse;
+      if (!response.ok || !json.ok) throw new Error('Unable to check the Commander product update.');
+      setCommanderProductJob(json.job);
+      setCommanderProductPollingError(null);
+      if (json.job.status === 'completed') {
+        if (json.job.operation === 'create_product') {
+          setCommanderProductCompletionMessage('Product created in Commander.');
+        }
+        await Promise.resolve(refreshStoreData());
+        await loadCommanderObservations();
+        if (commanderProductJobProductId && editingProduct?.id === commanderProductJobProductId) {
+          await loadEditingCommanderProductContext(commanderProductJobProductId);
+          await loadEditingCommanderPriceContext(commanderProductJobProductId);
+        }
+      }
+    } catch {
+      setCommanderProductPollingError('Product update was queued, but its current status could not be loaded.');
+    }
+  }, [activeStoreId, commanderProductJobProductId, editingProduct?.id, loadCommanderObservations, loadEditingCommanderPriceContext, loadEditingCommanderProductContext, refreshStoreData]);
+
+  useEffect(() => {
+    if (!commanderProductJob || !COMMANDER_PRICE_ACTIVE_JOB_STATUSES.has(commanderProductJob.status)) return;
+    const timer = window.setTimeout(() => {
+      void refreshCommanderProductJob(commanderProductJob.id);
+    }, 2000);
+    return () => window.clearTimeout(timer);
+  }, [commanderProductJob, refreshCommanderProductJob]);
+
+  const submitCommanderProduct = useCallback(async ({
+    productId,
+    requestedDescription,
+    requestedDepartment,
+    requestedPrice,
+    requestedPaymentProductCode,
+    requestedSellingUnit,
+    requestedMaxQtyPerTrans,
+    requestedTaxableRebate,
+    requestedTaxCategoryId,
+    requestedAgeRestrictionId,
+  }: {
+    productId: string;
+    requestedDescription: string;
+    requestedDepartment: string | null;
+    requestedPrice: string;
+    requestedPaymentProductCode: string;
+    requestedSellingUnit: string;
+    requestedMaxQtyPerTrans: string;
+    requestedTaxableRebate: string;
+    requestedTaxCategoryId: string | null;
+    requestedAgeRestrictionId: string | null;
+  }) => {
+    if (!activeStoreId || !productId) {
+      return { queued: false, message: 'The mapped StorePulse product is unavailable.' };
+    }
+    const normalizedRequestedPrice = normalizeCommanderPublishPrice(requestedPrice);
+    const normalizedDescription = requestedDescription.trim();
+    const normalizedDepartment = requestedDepartment?.trim() || null;
+    const normalizedPaymentProductCode = requestedPaymentProductCode.trim();
+    const normalizedSellingUnit = normalizeCommanderFixedDecimal(requestedSellingUnit, 3);
+    const normalizedMaxQtyPerTrans = normalizeCommanderFixedDecimal(requestedMaxQtyPerTrans, 2);
+    const normalizedTaxableRebate = normalizeCommanderFixedDecimal(requestedTaxableRebate, 2);
+    if (
+      !normalizedRequestedPrice
+      || !normalizedDescription
+      || normalizedDescription.length > 512
+      || !/^\d{1,16}$/.test(normalizedPaymentProductCode)
+      || !normalizedSellingUnit
+      || !normalizedMaxQtyPerTrans
+      || !normalizedTaxableRebate
+    ) {
+      return { queued: false, message: 'Enter valid Commander product code, selling-unit, quantity, rebate, product name, and selling-price values.' };
+    }
+
+    setCommanderProductPollingError(null);
+    try {
+      const response = await fetch('/api/products/commander-product', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          store_id: activeStoreId,
+          product_id: productId,
+          requested_description: normalizedDescription,
+          requested_department: normalizedDepartment,
+          requested_price: normalizedRequestedPrice,
+          requested_payment_product_code: normalizedPaymentProductCode,
+          requested_selling_unit: normalizedSellingUnit,
+          requested_max_qty_per_trans: normalizedMaxQtyPerTrans,
+          requested_taxable_rebate: normalizedTaxableRebate,
+          requested_tax_category_id: requestedTaxCategoryId,
+          requested_age_restriction_id: requestedAgeRestrictionId,
+          idempotency_key: `commander-product:${crypto.randomUUID()}`,
+        }),
+      });
+      const json = (await response.json()) as CommanderProductResponse;
+      if (response.status !== 202 || !json.ok) {
+        const code = json.ok ? 'publish_unavailable' : json.error_code;
+        throw new Error(code);
+      }
+      setCommanderProductJob(json.job);
+      setCommanderProductJobProductId(productId);
+      return { queued: true };
+    } catch (error) {
+      const code = error instanceof Error ? error.message : 'publish_unavailable';
+      const message = code === 'publish_already_active'
+        ? 'Another Commander product update is already active for this store. This change was not queued.'
+        : code === 'publish_conflict'
+          ? 'Commander product data changed before this update could be queued. Refresh and try again.'
+          : code === 'forbidden'
+            ? 'You are not authorized to publish for this store.'
+            : code === 'master_data_mapping_unavailable' || code === 'master_data_mapping_ambiguous'
+              ? 'The current Commander tax or age mapping is unavailable. Refresh and review the product settings.'
+            : 'Unable to queue the Commander product update.';
+      return { queued: false, message };
+    }
+  }, [activeStoreId]);
+
+  const submitCommanderProductCreate = useCallback(async ({
+    productId,
+    requestedTaxCategoryId,
+    requestedAgeRestrictionId,
+  }: {
+    productId: string;
+    requestedTaxCategoryId: string | null;
+    requestedAgeRestrictionId: string | null;
+  }) => {
+    if (!activeStoreId || !productId) {
+      return { queued: false, message: 'The saved StorePulse product is unavailable.' };
+    }
+
+    setCommanderProductPollingError(null);
+    try {
+      const response = await fetch('/api/products/commander-product', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          store_id: activeStoreId,
+          product_id: productId,
+          requested_tax_category_id: requestedTaxCategoryId,
+          requested_age_restriction_id: requestedAgeRestrictionId,
+          idempotency_key: `commander-product:${crypto.randomUUID()}`,
+        }),
+      });
+      const json = (await response.json()) as CommanderPriceResponse;
+      if (response.status !== 202 || !json.ok) {
+        const code = json.ok ? 'publish_unavailable' : json.error_code;
+        throw new Error(code);
+      }
+      setCommanderProductJob(json.job);
+      setCommanderProductJobProductId(productId);
+      return { queued: true };
+    } catch (error) {
+      const code = error instanceof Error ? error.message : 'publish_unavailable';
+      const message = code === 'publish_already_active'
+        ? 'Another Commander product update is already active for this store. This change was not queued.'
+        : code === 'publish_conflict'
+          ? 'Commander product data changed before this update could be queued. Refresh and try again.'
+          : code === 'forbidden'
+            ? 'You are not authorized to publish for this store.'
+            : code === 'master_data_mapping_unavailable' || code === 'master_data_mapping_ambiguous'
+              ? 'The current Commander department, tax, or age mapping is unavailable. Refresh and review the product settings.'
+              : code === 'commander_create_profile_missing' || code === 'commander_create_profile_invalid'
+                ? 'The current Commander create profile is unavailable. The StorePulse product remains unlinked.'
+                : 'Product was saved locally, but Commander creation was not queued.';
+      return { queued: false, message };
+    }
+  }, [activeStoreId]);
+
+  const submitCommanderPrice = useCallback(async ({
+    productId = commanderPriceProductId,
+    target = commanderPriceTarget,
+    requestedPrice = commanderRequestedPrice,
+    requireConfirmation = true,
+  }: {
+    productId?: string | null;
+    target?: Pick<ProductFormCommanderPriceContext, 'commander_price'> | null;
+    requestedPrice?: string;
+    requireConfirmation?: boolean;
+  } = {}) => {
+    if (!activeStoreId || !target || !productId) {
       setCommanderPriceError('The mapped StorePulse product is unavailable.');
-      return;
+      return { queued: false, message: 'The mapped StorePulse product is unavailable.' };
     }
-    if (!commanderPriceConfirmed) {
+    if (requireConfirmation && !commanderPriceConfirmed) {
       setCommanderPriceError('Confirm that this action will change the price in Commander.');
-      return;
+      return { queued: false, message: 'Confirm that this action will change the price in Commander.' };
     }
-    if (!/^(?:0|[1-9]\d*)\.\d{2}$/.test(commanderRequestedPrice)) {
-      setCommanderPriceError('Enter the new price with exactly two decimal places.');
-      return;
+    const normalizedRequestedPrice = normalizeCommanderPublishPrice(requestedPrice);
+    if (!normalizedRequestedPrice) {
+      setCommanderPriceError('Enter a valid positive selling price.');
+      return { queued: false, message: 'Enter a valid positive selling price.' };
     }
-    if (commanderRequestedPrice === commanderPriceObservation.price) {
+    if (normalizedRequestedPrice === target.commander_price) {
       setCommanderPriceError('The requested price must differ from the current Commander price.');
-      return;
+      return { queued: false, message: 'The requested price must differ from the current Commander price.' };
     }
 
     setCommanderPriceSubmitting(true);
     setCommanderPriceError(null);
+    setCommanderPricePollingError(null);
     try {
       const response = await fetch('/api/products/commander-price', {
         method: 'POST',
+        credentials: 'same-origin',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
           store_id: activeStoreId,
-          product_id: commanderPriceProductId,
-          expected_price: commanderPriceObservation.price,
-          requested_price: commanderRequestedPrice,
+          product_id: productId,
+          expected_price: target.commander_price,
+          requested_price: normalizedRequestedPrice,
           idempotency_key: `commander-price:${crypto.randomUUID()}`,
         }),
       });
       const json = (await response.json()) as CommanderPriceResponse;
-      if (!response.ok || !json.ok) {
+      if (response.status !== 202 || !json.ok) {
         const code = json.ok ? 'publish_unavailable' : json.error_code;
         throw new Error(code);
       }
       setCommanderPriceJob(json.job);
+      setCommanderPriceJobProductId(productId);
+      return { queued: true };
     } catch (error) {
       const code = error instanceof Error ? error.message : 'publish_unavailable';
       const message = code === 'publish_already_active'
-        ? 'A price update is already active for this product.'
+        ? 'A Commander price update is already active for this store. This change was not queued.'
         : code === 'publish_conflict'
           ? 'StorePulse or the staged Commander price changed. Refresh before trying again.'
           : code === 'forbidden'
             ? 'You are not authorized to publish for this store.'
             : 'Unable to queue the Commander price update.';
       setCommanderPriceError(message);
+      return { queued: false, message };
     } finally {
       setCommanderPriceSubmitting(false);
     }
-  }, [activeStoreId, commanderPriceConfirmed, commanderPriceObservation, commanderPriceProductId, commanderRequestedPrice]);
+  }, [activeStoreId, commanderPriceProductId, commanderPriceTarget, commanderRequestedPrice]);
 
   const resetNewProductReviewModal = useCallback(() => {
     setReviewingNewProduct(null);
@@ -1370,6 +2179,11 @@ export default function ProductsPage() {
       setSavingNewProduct(false);
     }
   };
+
+  useEffect(() => {
+    if (activeTab !== 'products') return;
+    void loadCanonicalCatalog();
+  }, [activeTab, loadCanonicalCatalog]);
 
   useEffect(() => {
     setItems(storeProducts);
@@ -2175,7 +2989,12 @@ export default function ProductsPage() {
     );
   };
 
+  const canonicalCatalogProducts = useMemo(
+    () => canonicalCatalog?.products.map(canonicalCatalogProductToProduct) || [],
+    [canonicalCatalog],
+  );
   const filteredProducts = useMemo(() => {
+    if (activeStoreId) return canonicalCatalogProducts;
     return items.filter((product) => {
       const stockStatus = product.stock <= product.reorderLevel ? 'Reorder' : 'In Stock';
       const haystack = [
@@ -2207,6 +3026,8 @@ export default function ProductsPage() {
       return true;
     });
   }, [
+    activeStoreId,
+    canonicalCatalogProducts,
     items,
     query,
     departmentFilter,
@@ -2400,18 +3221,109 @@ export default function ProductsPage() {
     }
   };
 
+  const clearAddProductBarcodeResolution = () => {
+    addProductBarcodeRequestRef.current += 1;
+    addProductBarcodeInFlightRef.current = null;
+    setAddProductBarcodeResolution(EMPTY_ADD_PRODUCT_BARCODE_RESOLUTION);
+  };
+
+  const resolveAddProductBarcode = async (rawUpc: string) => {
+    if (modalMode !== 'add') return;
+
+    const upc = normalizeCanonicalProductBarcode(rawUpc);
+    if (!upc) {
+      clearAddProductBarcodeResolution();
+      return;
+    }
+    if (!activeStoreId) {
+      setAddProductBarcodeResolution({ status: 'error', upc });
+      return;
+    }
+    if (addProductBarcodeInFlightRef.current === upc) return;
+
+    const requestId = addProductBarcodeRequestRef.current + 1;
+    addProductBarcodeRequestRef.current = requestId;
+    addProductBarcodeInFlightRef.current = upc;
+    setAddProductBarcodeResolution({ status: 'resolving', upc });
+
+    try {
+      const response = await fetch('/api/products/resolve-identities', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          storeId: activeStoreId,
+          identities: [{
+            clientKey: 'add-product-upc',
+            upc,
+            plu: null,
+            productCode: null,
+            name: null,
+          }],
+        }),
+      });
+      const payload = await response.json().catch(() => null) as CanonicalIdentityResolveResponse | null;
+      if (!response.ok || !payload || !payload.ok) throw new Error('barcode_resolution_unavailable');
+
+      const resolution = payload.resolutions.find((candidate) => candidate.clientKey === 'add-product-upc');
+      if (!resolution) throw new Error('barcode_resolution_missing');
+      if (requestId !== addProductBarcodeRequestRef.current) return;
+
+      if (resolution.status === 'MATCHED' && resolution.product) {
+        setAddProductBarcodeResolution({
+          status: 'matched',
+          upc,
+          productName: resolution.product.itemName,
+          productUpc: resolution.product.upc,
+        });
+        return;
+      }
+      if (resolution.status === 'AMBIGUOUS') {
+        setAddProductBarcodeResolution({ status: 'ambiguous', upc });
+        return;
+      }
+
+      setAddProductBarcodeResolution({ status: 'not_found', upc });
+      window.requestAnimationFrame(() => addProductNameInputRef.current?.focus());
+    } catch {
+      if (requestId === addProductBarcodeRequestRef.current) {
+        setAddProductBarcodeResolution({ status: 'error', upc });
+      }
+    } finally {
+      if (addProductBarcodeInFlightRef.current === upc) {
+        addProductBarcodeInFlightRef.current = null;
+      }
+    }
+  };
+
+  const handleClearAddProductBarcode = () => {
+    clearAddProductBarcodeResolution();
+    setUpcDuplicate(null);
+    setForm((current) => ({ ...current, upc: '' }));
+    window.requestAnimationFrame(() => addProductUpcInputRef.current?.focus());
+  };
+
+  useEffect(() => {
+    if (!modalOpen || modalMode !== 'add') return;
+    const frame = window.requestAnimationFrame(() => addProductUpcInputRef.current?.focus());
+    return () => window.cancelAnimationFrame(frame);
+  }, [modalMode, modalOpen]);
+
   const openAddModal = () => {
     if (!requireSelectedStoreForWrite(setFormError)) return;
 
     setModalMode('add');
     setEditingProduct(null);
     setForm(EMPTY_PRODUCT_FORM);
+    setEditingCommanderProductFields(EMPTY_COMMANDER_PRODUCT_FIELDS);
+    setEditingCommanderProductFieldEdits(EMPTY_COMMANDER_PRODUCT_FIELD_EDITS);
     setFormError(null);
     setUpcDuplicate(null);
     setPluDuplicate(null);
     setProductCodeDuplicate(null);
+    clearAddProductBarcodeResolution();
     void loadTaxCategories();
     void loadAgeRestrictionPresets();
+    void loadEditingCommanderProductCodeOptions('');
     setModalOpen(true);
   };
 
@@ -2421,10 +3333,31 @@ export default function ProductsPage() {
     setModalMode('edit');
     setEditingProduct(product);
     setForm(productToForm(product));
+    setEditingCommanderPriceContext(null);
+    setEditingCommanderPriceContextError(null);
+    setEditingCommanderProductContext(null);
+    setEditingCommanderProductContextError(null);
+    setEditingCommanderProductFields(EMPTY_COMMANDER_PRODUCT_FIELDS);
+    setEditingCommanderProductFieldEdits(EMPTY_COMMANDER_PRODUCT_FIELD_EDITS);
+    setEditingCategoryMapping(null);
+    setEditingCategoryMappingLoading(true);
+    setCommanderPriceJob(null);
+    setCommanderPriceJobProductId(null);
+    setCommanderPriceError(null);
+    setCommanderPricePollingError(null);
+    setCommanderProductJob(null);
+    setCommanderProductJobProductId(null);
+    setCommanderProductPollingError(null);
+    if (product.id) {
+      void loadEditingCommanderPriceContext(product.id);
+      void loadEditingCommanderProductContext(product.id);
+    } else {
+    }
     setFormError(null);
     setUpcDuplicate(null);
     setPluDuplicate(null);
     setProductCodeDuplicate(null);
+    clearAddProductBarcodeResolution();
     void loadTaxCategories();
     void loadAgeRestrictionPresets();
     setModalOpen(true);
@@ -2433,11 +3366,77 @@ export default function ProductsPage() {
   const closeProductModal = () => {
     setModalOpen(false);
     setEditingProduct(null);
+    editingCommanderPriceContextRequestRef.current += 1;
+    setEditingCommanderPriceContext(null);
+    setEditingCommanderPriceContextLoading(false);
+    setEditingCommanderPriceContextError(null);
+    editingCommanderProductContextRequestRef.current += 1;
+    setEditingCommanderProductContext(null);
+    setEditingCommanderProductContextLoading(false);
+    setEditingCommanderProductContextError(null);
+    setEditingCommanderProductFields(EMPTY_COMMANDER_PRODUCT_FIELDS);
+    setEditingCommanderProductFieldEdits(EMPTY_COMMANDER_PRODUCT_FIELD_EDITS);
+    editingCommanderProductCodeRequestRef.current += 1;
+    setEditingCommanderProductCodeOptions([]);
+    editingCategoryMappingRequestRef.current += 1;
+    setEditingCategoryMapping(null);
+    setEditingCategoryMappingLoading(false);
     setFormError(null);
     setUpcDuplicate(null);
     setPluDuplicate(null);
     setProductCodeDuplicate(null);
+    clearAddProductBarcodeResolution();
   };
+
+  const editPosPriceStatus = useMemo(() => {
+    if (modalMode !== 'edit') return null;
+    const isCurrentCommanderProductJob = commanderProductJobProductId === editingProduct?.id;
+    if (commanderProductJob && isCurrentCommanderProductJob && COMMANDER_PRICE_ACTIVE_JOB_STATUSES.has(commanderProductJob.status)) {
+      if (commanderProductPollingError) return commanderProductPollingError;
+      return commanderProductJob.status === 'pending'
+        ? 'POS product update queued. StorePulse will update after Commander verification.'
+        : 'Updating product in POS...';
+    }
+    if (isCurrentCommanderProductJob && commanderProductJob?.status === 'completed') {
+      return commanderProductJob.operation === 'create_product'
+        ? 'Product created in Commander. StorePulse now reflects the confirmed POS state.'
+        : 'Commander verified. StorePulse now reflects the confirmed POS state.';
+    }
+    if (isCurrentCommanderProductJob && (commanderProductJob?.status === 'failed' || commanderProductJob?.status === 'cancelled')) {
+      return 'POS product update failed. Confirmed StorePulse product fields were left unchanged.';
+    }
+    const isCurrentProductJob = commanderPriceJobProductId === editingProduct?.id;
+    if (commanderPriceJob && isCurrentProductJob && COMMANDER_PRICE_ACTIVE_JOB_STATUSES.has(commanderPriceJob.status)) {
+      if (commanderPricePollingError) return commanderPricePollingError;
+      return commanderPriceJob.status === 'pending'
+        ? 'Product saved. POS price update queued.'
+        : 'Updating POS price...';
+    }
+    if (isCurrentProductJob && commanderPriceJob?.status === 'completed') return 'Saved and synchronized with POS.';
+    if (isCurrentProductJob && (commanderPriceJob?.status === 'failed' || commanderPriceJob?.status === 'cancelled')) {
+      return 'Product details saved, but POS price update failed.';
+    }
+    if (editingCommanderPriceContextLoading) return 'Checking POS price...';
+    if (editingCommanderPriceContextError) return 'POS price could not be verified. Selling price will remain unchanged when saved.';
+    if (!editingCommanderPriceContext) return null;
+    const requestedPrice = normalizeCommanderPublishPrice(form.sellPrice);
+    if (requestedPrice === editingCommanderPriceContext.commander_price) {
+      return `POS price synchronized at ${formatCurrency(Number(editingCommanderPriceContext.commander_price))}`;
+    }
+    return requestedPrice
+      ? `Saving will update POS price: ${formatCurrency(Number(editingCommanderPriceContext.commander_price))} to ${formatCurrency(Number(requestedPrice))}`
+      : 'Enter a valid positive selling price before saving to update POS price.';
+  }, [commanderPriceJob, commanderPriceJobProductId, commanderPricePollingError, commanderProductJob, commanderProductJobProductId, commanderProductPollingError, editingCommanderPriceContext, editingCommanderPriceContextError, editingCommanderPriceContextLoading, editingProduct?.id, form.sellPrice, modalMode]);
+
+  const retryEditPosPrice = useCallback(() => {
+    if (!editingCommanderPriceContext || !editingProduct?.id) return;
+    void submitCommanderPrice({
+      productId: editingProduct.id,
+      target: editingCommanderPriceContext,
+      requestedPrice: form.sellPrice,
+      requireConfirmation: false,
+    });
+  }, [editingCommanderPriceContext, editingProduct?.id, form.sellPrice, submitCommanderPrice]);
 
   const checkUpcDuplicate = (value = form.upc) => {
     if (modalMode !== 'add') return;
@@ -2465,10 +3464,13 @@ export default function ProductsPage() {
 
   const handleProductUpcChange = (value: string) => {
     setForm((current) => ({ ...current, upc: value }));
+    addProductBarcodeRequestRef.current += 1;
+    addProductBarcodeInFlightRef.current = null;
+    setAddProductBarcodeResolution(EMPTY_ADD_PRODUCT_BARCODE_RESOLUTION);
+    setUpcDuplicate(null);
     if (value.trim() && formError === 'Enter a UPC, PLU, or Product Code.') {
       setFormError(null);
     }
-    if (modalMode === 'add') checkUpcDuplicate(value);
   };
 
   const handleProductNameChange = (value: string) => {
@@ -2480,6 +3482,24 @@ export default function ProductsPage() {
   const saveProduct = async () => {
     if (!requireSelectedStoreForWrite(setFormError)) return;
 
+    if (modalMode === 'edit') {
+      if (editingCategoryMappingLoading) {
+        setFormError('Checking mapped categories for the selected department. Please try again in a moment.');
+        return;
+      }
+      if (editingCategoryOptions.length > 0 && !isMappedCategorySelectionValid(form.category, editingCategoryOptions)) {
+        setFormError('Select a mapped category for the selected department before saving.');
+        return;
+      }
+      if (
+        editingCommanderProductContext
+        && !isMappedCommanderDepartmentSelectionValid(form.department, editingCommanderDepartmentOptions)
+      ) {
+        setFormError('Select a mapped Commander department before saving.');
+        return;
+      }
+    }
+
     const validationError = validateProductForm(form);
 
     if (validationError) {
@@ -2489,19 +3509,31 @@ export default function ProductsPage() {
 
     if (
       modalMode === 'edit'
-      && editingProduct?.id
-      && commanderPriceIdentities.some((identity) => identity.product_id === editingProduct.id)
-      && safeNumber(form.sellPrice).toFixed(2) !== editingProduct.sellPrice.toFixed(2)
+      && (editingCommanderPriceContextLoading || editingCommanderProductContextLoading)
     ) {
-      setFormError('Use Commander POS Sync to change a mapped Commander price. StorePulse updates only after Commander readback succeeds.');
+      setFormError('Checking the current POS product before saving. Please try again in a moment.');
       return;
     }
 
     if (modalMode === 'add') {
-      const upc = form.upc.trim();
+      const upc = normalizeCanonicalProductBarcode(form.upc);
       const plu = form.plu.trim();
       const productCode = form.productCode.trim();
-      const duplicateUpc = upc ? items.find((product) => product.upc.trim() === upc) || null : null;
+      if (doesCanonicalProductBarcodeResolutionBlockCreation(addProductBarcodeResolution, upc)) {
+        if (addProductBarcodeResolution.upc !== upc || addProductBarcodeResolution.status === 'idle') {
+          void resolveAddProductBarcode(upc);
+          setFormError('Verify this barcode before creating a new product.');
+        } else if (addProductBarcodeResolution.status === 'matched') {
+          setFormError('An existing product has this UPC. Clear or scan another barcode before creating a product.');
+        } else if (addProductBarcodeResolution.status === 'ambiguous') {
+          setFormError('Multiple existing products match this barcode. Review them before creating another product.');
+        } else {
+          setFormError('Unable to verify this barcode right now. Retry before creating a product.');
+        }
+        return;
+      }
+
+      const duplicateUpc = null;
       const duplicatePlu = plu ? items.find((product) => product.plu?.trim() === plu) || null : null;
       const duplicateProductCode = productCode
         ? items.find((product) => product.productCode?.trim() === productCode) || null
@@ -2529,21 +3561,218 @@ export default function ProductsPage() {
 
     setSaving(true);
     setFormError(null);
+    setCommanderPriceError(null);
+    setCommanderPricePollingError(null);
+    setCommanderProductPollingError(null);
 
     const product = formToProduct(form);
+    const commanderPriceContext = editingCommanderPriceContext;
+    const commanderProductContext = editingCommanderProductContext;
+    const requestedCommanderPrice = normalizeCommanderPublishPrice(form.sellPrice);
+    const commanderLinkedEdit =
+      modalMode === 'edit'
+      && Boolean(
+        editingCommanderPriceContext
+        || editingCommanderPriceContextError
+        || editingCommanderProductContext
+        || editingCommanderProductContextError
+      );
+    const commanderUnlinkedEdit =
+      modalMode === 'edit'
+      && Boolean(editingProduct?.id)
+      && editingCommanderProductContext === null
+      && editingCommanderProductContextError === null
+      && !editingCommanderProductContextLoading;
+    const commanderNameChangedByUser =
+      commanderLinkedEdit && editingProduct ? product.name !== editingProduct.name : false;
+    const commanderDepartmentChangedByUser =
+      commanderLinkedEdit && editingProduct
+        ? product.department !== (editingCommanderMappedDepartmentName || editingProduct.department)
+        : false;
+    const commanderPriceChangedByUser =
+      commanderLinkedEdit && editingProduct ? product.sellPrice !== editingProduct.sellPrice : false;
+    const commanderTaxChangedByUser = commanderLinkedEdit && editingProduct
+      ? product.taxable !== editingProduct.taxable
+        || product.taxCategory !== editingProduct.taxCategory
+        || product.taxRate !== editingProduct.taxRate
+      : false;
+    const commanderAgeChangedByUser = commanderLinkedEdit && editingProduct
+      ? product.ageVerification !== editingProduct.ageVerification
+        || product.minimumAge !== editingProduct.minimumAge
+        || product.ageRestrictionType !== editingProduct.ageRestrictionType
+      : false;
+    const commanderDirectFieldsChanged = commanderLinkedEdit && commanderProductContext
+      ? editingCommanderEffectiveProductFields.paymentProductCode !== commanderProductContext.commander_payment_product_code
+        || editingCommanderEffectiveProductFields.sellingUnit !== commanderProductContext.commander_selling_unit
+        || editingCommanderEffectiveProductFields.maxQtyPerTrans !== commanderProductContext.commander_max_qty_per_trans
+        || editingCommanderEffectiveProductFields.taxableRebate !== commanderProductContext.commander_taxable_rebate
+      : false;
+    const commanderProductFieldChange = commanderNameChangedByUser
+      || commanderDepartmentChangedByUser
+      || commanderPriceChangedByUser
+      || commanderTaxChangedByUser
+      || commanderAgeChangedByUser
+      || commanderDirectFieldsChanged;
+
+    if (
+      modalMode === 'edit'
+      && commanderLinkedEdit
+      && commanderPriceChangedByUser
+      && requestedCommanderPrice === null
+    ) {
+      setSaving(false);
+      setFormError('Enter a valid positive selling price before saving to update POS price.');
+      return;
+    }
+
+    if (commanderProductFieldChange && (!commanderProductContext || editingCommanderProductContextError)) {
+      setSaving(false);
+      setFormError('The current Commander product could not be verified. Product changes were not sent to Commander.');
+      return;
+    }
+
+    const categoryWasNormalizedByMapping =
+      commanderLinkedEdit
+      && editingProduct
+      && product.category !== editingProduct.category
+      && product.category === resolveMappedCategorySelection(editingProduct.category, editingCategoryOptions);
+    const productCodeChanged =
+      (product.productCode?.trim() || '') !== (editingProduct?.productCode?.trim() || '');
+    const unsupportedCommanderProductChange =
+      commanderLinkedEdit
+      && editingProduct
+      && (
+        product.upc !== editingProduct.upc
+        || (product.category !== editingProduct.category && !categoryWasNormalizedByMapping)
+        || product.plu !== editingProduct.plu
+        || productCodeChanged
+        || product.ebtEligible !== editingProduct.ebtEligible
+        || product.isActive !== editingProduct.isActive
+      );
+
+    if (unsupportedCommanderProductChange) {
+      setSaving(false);
+      setFormError(
+        'This Commander-linked product cannot publish UPC, PLU, StorePulse Product Code, category, EBT, or status changes. Use the Commander Product/Payment Code field for the supported Commander pcode.'
+      );
+      return;
+    }
+
+    // For a Commander-linked existing product, Commander-supported values are
+    // never written to the canonical StorePulse product before the connector
+    // performs its fresh pre-read, one uPLUs mutation, and verified vPLUs
+    // readback. A successful report transaction owns the canonical update.
+    if (commanderProductFieldChange && commanderProductContext && editingProduct?.id) {
+      const productRequestedPrice = commanderPriceChangedByUser
+        ? requestedCommanderPrice
+        : commanderProductContext.commander_price;
+      if (!productRequestedPrice) {
+        setSaving(false);
+        setFormError('The POS product update could not be validated. Confirmed StorePulse product fields were left unchanged.');
+        return;
+      }
+
+      const selectedTaxOptions = product.taxable
+        ? taxCategoryOptions.filter((tax) => tax.is_active && tax.name === product.taxCategory && Number(tax.rate) === product.taxRate)
+        : [];
+      const selectedAgeOptions = product.ageVerification
+        ? ageRestrictionPresets.filter((preset) => (
+          preset.is_active
+          && preset.restriction_type === product.ageRestrictionType
+          && preset.minimum_age === product.minimumAge
+        ))
+        : [];
+      if ((product.taxable && selectedTaxOptions.length !== 1) || (product.ageVerification && selectedAgeOptions.length !== 1)) {
+        setSaving(false);
+        setFormError('Select one current tax category and age restriction before saving this Commander product.');
+        return;
+      }
+
+      const queued = await submitCommanderProduct({
+        productId: editingProduct.id,
+        requestedDescription: commanderNameChangedByUser
+          ? product.name
+          : commanderProductContext.commander_description,
+        requestedDepartment: commanderDepartmentChangedByUser ? (product.department ?? null) : null,
+        requestedPrice: productRequestedPrice,
+        requestedPaymentProductCode: editingCommanderEffectiveProductFields.paymentProductCode,
+        requestedSellingUnit: editingCommanderEffectiveProductFields.sellingUnit,
+        requestedMaxQtyPerTrans: editingCommanderEffectiveProductFields.maxQtyPerTrans,
+        requestedTaxableRebate: editingCommanderEffectiveProductFields.taxableRebate,
+        requestedTaxCategoryId: product.taxable ? selectedTaxOptions[0].id : null,
+        requestedAgeRestrictionId: product.ageVerification ? selectedAgeOptions[0].id : null,
+      });
+      if (!queued.queued) {
+        setSaving(false);
+        setFormError(queued.message ?? 'Unable to queue the Commander product update. Confirmed StorePulse product fields were left unchanged.');
+        return;
+      }
+
+      setSaving(false);
+      closeProductModal();
+      return;
+    }
+
     const productToSave =
       modalMode === 'edit' && editingProduct
-          ? { ...editingProduct, ...product, id: editingProduct.id, upc: editingProduct.upc }
-          : product;
-    const result = modalMode === 'add' ? await createProduct(productToSave) : await updateProduct(productToSave);
-
-    setSaving(false);
+        ? {
+            ...editingProduct,
+            ...product,
+            id: editingProduct.id,
+            upc: editingProduct.upc,
+          }
+        : product;
+    const inventoryChanged = modalMode === 'edit' && editingProduct
+      ? product.stock !== editingProduct.stock
+        || product.reorderLevel !== editingProduct.reorderLevel
+        || product.unitsPerCase !== editingProduct.unitsPerCase
+        || product.casesOnHand !== editingProduct.casesOnHand
+        || product.looseUnits !== editingProduct.looseUnits
+      : false;
+    const result = modalMode === 'add'
+      ? await createProduct(productToSave)
+      : await updateProduct(productToSave, {
+          inventoryKnown: inventoryChanged,
+          storePulseLocalOnly: commanderLinkedEdit,
+        });
 
     if (result.error) {
+      setSaving(false);
       setFormError(result.error);
       return;
     }
 
+    if ((modalMode === 'add' || commanderUnlinkedEdit) && result.mode === 'cloud') {
+      const commanderCreateProductId = modalMode === 'add' ? result.productId : editingProduct?.id;
+      if (!commanderCreateProductId) {
+        setSaving(false);
+        setFormError('Product was saved locally, but Commander creation could not be prepared.');
+        return;
+      }
+      const selectedTaxOptions = product.taxable
+        ? taxCategoryOptions.filter((tax) => tax.is_active && tax.name === product.taxCategory && Number(tax.rate) === product.taxRate)
+        : [];
+      const selectedAgeOptions = product.ageVerification
+        ? ageRestrictionPresets.filter((preset) => preset.is_active && preset.restriction_type === product.ageRestrictionType && preset.minimum_age === product.minimumAge)
+        : [];
+      if ((product.taxable && selectedTaxOptions.length !== 1) || (product.ageVerification && selectedAgeOptions.length !== 1)) {
+        setSaving(false);
+        setFormError('Product was saved locally, but current Commander tax or age mapping is unavailable.');
+        return;
+      }
+      const queued = await submitCommanderProductCreate({
+        productId: commanderCreateProductId,
+        requestedTaxCategoryId: product.taxable ? selectedTaxOptions[0].id : null,
+        requestedAgeRestrictionId: product.ageVerification ? selectedAgeOptions[0].id : null,
+      });
+      if (!queued.queued) {
+        setSaving(false);
+        setFormError(queued.message ?? 'Product was saved locally, but Commander creation was not queued.');
+        return;
+      }
+    }
+    setCanonicalCatalogRefresh((current) => current + 1);
+    setSaving(false);
     closeProductModal();
   };
 
@@ -3450,7 +4679,7 @@ const nextBreakdown = getCaseBreakdown(nextStock, unitsPerCase);
                 <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
                 <Input
                   value={query}
-                  onChange={(event) => setQuery(event.target.value)}
+                  onChange={(event) => { setQuery(event.target.value); setCanonicalCatalogPage(1); }}
                   placeholder="Search name, UPC, PLU, code, SKU, brand, vendor, department..."
                   className="pl-9"
                 />
@@ -3458,7 +4687,7 @@ const nextBreakdown = getCaseBreakdown(nextStock, unitsPerCase);
 
               <select
                 value={departmentFilter}
-                onChange={(event) => setDepartmentFilter(event.target.value)}
+                onChange={(event) => { setDepartmentFilter(event.target.value); setCanonicalCatalogPage(1); }}
                 className="h-10 rounded-md border border-input bg-background px-3 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
               >
                 <option value="All">All departments</option>
@@ -3471,7 +4700,7 @@ const nextBreakdown = getCaseBreakdown(nextStock, unitsPerCase);
 
               <select
                 value={vendorFilter}
-                onChange={(event) => setVendorFilter(event.target.value)}
+                onChange={(event) => { setVendorFilter(event.target.value); setCanonicalCatalogPage(1); }}
                 className="h-10 rounded-md border border-input bg-background px-3 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
               >
                 <option value="All">All Vendors</option>
@@ -3484,7 +4713,7 @@ const nextBreakdown = getCaseBreakdown(nextStock, unitsPerCase);
 
               <select
                 value={stockFilter}
-                onChange={(event) => setStockFilter(event.target.value)}
+                onChange={(event) => { setStockFilter(event.target.value); setCanonicalCatalogPage(1); }}
                 className="h-10 rounded-md border border-input bg-background px-3 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
               >
                 <option value="All">All stock</option>
@@ -3496,7 +4725,7 @@ const nextBreakdown = getCaseBreakdown(nextStock, unitsPerCase);
                 type="number"
                 min="0"
                 value={minPrice}
-                onChange={(event) => setMinPrice(event.target.value)}
+                onChange={(event) => { setMinPrice(event.target.value); setCanonicalCatalogPage(1); }}
                 placeholder="Min $"
               />
 
@@ -3504,7 +4733,7 @@ const nextBreakdown = getCaseBreakdown(nextStock, unitsPerCase);
                 type="number"
                 min="0"
                 value={maxPrice}
-                onChange={(event) => setMaxPrice(event.target.value)}
+                onChange={(event) => { setMaxPrice(event.target.value); setCanonicalCatalogPage(1); }}
                 placeholder="Max $"
               />
 
@@ -3515,19 +4744,19 @@ const nextBreakdown = getCaseBreakdown(nextStock, unitsPerCase);
 
             <div className="mt-3 flex flex-wrap gap-4 text-sm text-muted-foreground">
               <label className="inline-flex items-center gap-2">
-                <input type="checkbox" checked={ebtFilter} onChange={(event) => setEbtFilter(event.target.checked)} />
+                <input type="checkbox" checked={ebtFilter} onChange={(event) => { setEbtFilter(event.target.checked); setCanonicalCatalogPage(1); }} />
                 EBT Only
               </label>
               <label className="inline-flex items-center gap-2">
                 <input
                   type="checkbox"
                   checked={ageVerificationFilter}
-                  onChange={(event) => setAgeVerificationFilter(event.target.checked)}
+                  onChange={(event) => { setAgeVerificationFilter(event.target.checked); setCanonicalCatalogPage(1); }}
                 />
                 Age Restricted Only
               </label>
               <label className="inline-flex items-center gap-2">
-                <input type="checkbox" checked={taxableFilter} onChange={(event) => setTaxableFilter(event.target.checked)} />
+                <input type="checkbox" checked={taxableFilter} onChange={(event) => { setTaxableFilter(event.target.checked); setCanonicalCatalogPage(1); }} />
                 Taxable Only
               </label>
             </div>
@@ -3659,6 +4888,13 @@ const nextBreakdown = getCaseBreakdown(nextStock, unitsPerCase);
             </div>
           )}
 
+          {commanderProductCompletionMessage && (
+            <div className="flex items-center justify-between gap-3 rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-900">
+              <span>{commanderProductCompletionMessage}</span>
+              <Button variant="outline" size="sm" onClick={() => setCommanderProductCompletionMessage(null)}>Dismiss</Button>
+            </div>
+          )}
+
           {bulkEditMode && selectedProductKeys.size > 0 && (
             <Card className="sticky top-3 z-20 border-primary/30 p-4 shadow-md">
               <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
@@ -3731,6 +4967,10 @@ const nextBreakdown = getCaseBreakdown(nextStock, unitsPerCase);
                 </select>
               </div>
             </Card>
+          )}
+
+          {canonicalCatalogError && (
+            <Card className="border-destructive/30 bg-destructive/10 p-4 text-sm text-destructive">{canonicalCatalogError}</Card>
           )}
 
           <Card className="overflow-hidden">
@@ -3850,6 +5090,10 @@ const nextBreakdown = getCaseBreakdown(nextStock, unitsPerCase);
                 </tbody>
               </table>
             </div>
+          </Card>
+          <Card className="flex flex-wrap items-center justify-between gap-3 p-4 text-sm">
+            <span className="text-muted-foreground">{canonicalCatalogLoading ? 'Loading products...' : canonicalCatalog ? `Showing ${canonicalCatalog.pagination.total === 0 ? 0 : (canonicalCatalog.pagination.page - 1) * canonicalCatalog.pagination.page_size + 1}-${Math.min(canonicalCatalog.pagination.page * canonicalCatalog.pagination.page_size, canonicalCatalog.pagination.total)} of ${formatNumber(canonicalCatalog.pagination.total)}` : 'Products are unavailable'}</span>
+            <div className="flex flex-wrap items-center gap-2"><select value={canonicalCatalogPageSize} onChange={(event) => { setCanonicalCatalogPageSize(Number(event.target.value) as 25 | 50 | 100); setCanonicalCatalogPage(1); }} className="h-9 rounded-md border border-input bg-background px-2 text-sm" aria-label="Products per page"><option value={25}>25 per page</option><option value={50}>50 per page</option><option value={100}>100 per page</option></select><Button variant="outline" size="sm" disabled={!canonicalCatalog || canonicalCatalog.pagination.page <= 1 || canonicalCatalogLoading} onClick={() => setCanonicalCatalogPage((page) => Math.max(1, page - 1))}>Previous</Button><span>Page {canonicalCatalog?.pagination.page || 1} of {canonicalCatalog?.pagination.total_pages || 1}</span><Button variant="outline" size="sm" disabled={!canonicalCatalog || canonicalCatalog.pagination.page >= canonicalCatalog.pagination.total_pages || canonicalCatalogLoading} onClick={() => setCanonicalCatalogPage((page) => page + 1)}>Next</Button></div>
           </Card>
         </div>
       )}
@@ -5477,7 +6721,37 @@ const nextBreakdown = getCaseBreakdown(nextStock, unitsPerCase);
         onUpcBlur={() => checkUpcDuplicate()}
         onPluBlur={checkPluDuplicate}
         onProductCodeBlur={checkProductCodeDuplicate}
+        barcodeResolution={addProductBarcodeResolution}
+        onUpcEnter={(value) => void resolveAddProductBarcode(value)}
+        onClearBarcode={handleClearAddProductBarcode}
+        upcInputRef={addProductUpcInputRef}
+        productNameInputRef={addProductNameInputRef}
         writeBlocked={productsWriteBlocked}
+        posPriceStatus={editPosPriceStatus}
+        onRetryPosPrice={
+          modalMode === 'edit'
+          && commanderPriceJobProductId === editingProduct?.id
+          && (commanderPriceJob?.status === 'failed' || commanderPriceJob?.status === 'cancelled')
+            ? retryEditPosPrice
+            : undefined
+        }
+        commanderFields={
+          modalMode === 'edit' && editingCommanderProductContext
+            ? editingCommanderEffectiveProductFields
+            : null
+        }
+        commanderFlagIds={editingCommanderProductContext?.commander_flag_ids ?? []}
+        commanderProductCodeOptions={editingCommanderProductCodeOptions}
+        onCommanderProductCodeSearch={(value) => {
+          void loadEditingCommanderProductCodeOptions(value);
+        }}
+        onCommanderFieldsChange={(patch) => {
+          setEditingCommanderProductFields((current) => ({ ...current, ...patch }));
+          setEditingCommanderProductFieldEdits((current) => ({
+            ...current,
+            ...Object.fromEntries(Object.keys(patch).map((field) => [field, true])),
+          }));
+        }}
       />
     </DashboardShell>
   );

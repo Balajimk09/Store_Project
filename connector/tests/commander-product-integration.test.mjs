@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { buildCommanderNaxmlBody, sendCommanderNaxml } from '../lib/commander/commander-naxml-client.mjs'
 import { buildProductWriteXml, buildSourceProductKey, buildVpluReadXml, createIdempotencyStore, executeProductCommand, normalizePlu, normalizeProductIdentity, parseVpluResponse, readCommanderCatalog, readCommanderProduct, reconcileCommanderCatalog, sendSupportedProductWrite, validateFutureProductQueueCommand, validateProductCommand } from '../lib/commander/commander-product-integration.mjs'
+import { CommanderVpluReadError } from '../lib/commander/commander-vplu-read-client.mjs'
 
 const UPC = '012345678905'
 const XML = `<domain:PLUs page="1" ofPages="1" xmlns:domain="urn:vfi-sapphire:np.domain.2001-07-01" xmlns:vs="urn:vfi-sapphire:vs.2001-10-01"><domain:PLU><upc>${UPC}</upc><upcModifier>000</upcModifier><description>STOREPULSE TEST</description><department>1</department><fees><fee>0</fee></fees><pcode>0</pcode><price>0.02</price><flags><domain:flag sysid="1"/></flags><taxRates><domain:taxRate sysid="1"/></taxRates><idChecks><domain:idCheck sysid="1"/></idChecks><SellUnit>1.000</SellUnit><taxableRebate><amount>0.00</amount></taxableRebate><maxQtyPerTrans>0.00</maxQtyPerTrans></domain:PLU></domain:PLUs>`
@@ -40,7 +41,7 @@ test('parses only the historically evidenced vPLUs shape and preserves no raw pa
   assert.equal(buildVpluReadXml({ upc: UPC }).includes(`<upc source="keyboard">${UPC}</upc>`), true)
   assert.deepEqual(buildProductWriteXml(command(), product).supported, true)
   assert.match(buildProductWriteXml(command(), product).xml, /<price>0.75<\/price>/)
-  assert.equal(buildProductWriteXml({ ...command(), command_type: 'create_product', requested_changes: {} }, product).error_code, 'create_product_schema_unverified')
+  assert.throws(() => buildProductWriteXml({ ...command(), command_type: 'create_product', requested_changes: {} }, product), /validation_failed/)
 })
 
 test('rejects duplicate identities and unverified pagination is explicit', () => {
@@ -62,6 +63,98 @@ test('single-product reads and writes use only fixture transport; catalog reads 
   assert.deepEqual(await sendSupportedProductWrite({ origin: 'https://commander.fixture', sessionCookie: 'fixture-cookie', command: { ...command(), command_type: 'delete_product', requested_changes: {} }, product, transport }), { status: 'unsupported_operation', error_code: 'permanent_delete_not_supported' })
 })
 
+test('price pre-read uses the proven vPLUs transport and reserves session failure for HTTP authentication rejection', async () => {
+  const requests = []
+  const base = {
+    origin: 'https://commander.fixture',
+    sessionCookie: 'fixture-cookie',
+    trust: {
+      caBundle: Buffer.from('fixture-ca'),
+      serverName: 'commander.fixture',
+      peerSha256: 'A'.repeat(64),
+    },
+    upc: UPC,
+    modifier: '000',
+  }
+
+  const read = await readCommanderProduct({
+    ...base,
+    transport: async (request) => {
+      requests.push(request)
+      return { status: 200, body: XML }
+    },
+  })
+
+  assert.equal(read.status, 'success')
+  assert.equal(requests.length, 1)
+  assert.equal(requests[0].url, 'https://commander.fixture/cgi-bin/NAXML?')
+  assert.equal(requests[0].options.method, 'POST')
+  assert.equal(requests[0].options.rejectUnauthorized, true)
+  assert.equal(requests[0].options.servername, 'commander.fixture')
+  assert.equal(requests[0].options.headers['content-type'], 'text/plain; charset=UTF-8')
+  assert.equal(requests[0].body, `cmd=vPLUs&cookie=fixture-cookie\r\n\r\n${buildVpluReadXml({ upc: UPC, modifier: '000' })}`)
+
+  assert.deepEqual(
+    await readCommanderProduct({ ...base, transport: async () => ({ status: 401, body: '' }) }),
+    { status: 'session_failed' },
+  )
+  assert.deepEqual(
+    await readCommanderProduct({ ...base, transport: async () => { throw new Error('offline transport failure') } }),
+    { status: 'readback_failed' },
+  )
+})
+
+test('price pre-read classifies bounded transport failures without exposing transport details', async (t) => {
+  const secret = 'Bearer secret-cookie-value https://commander.internal/cgi-bin/NAXML?'
+  const base = {
+    origin: 'https://commander.fixture',
+    sessionCookie: 'fixture-cookie',
+    trust: {
+      caBundle: Buffer.from('fixture-ca'),
+      serverName: 'commander.fixture',
+      peerSha256: 'A'.repeat(64),
+    },
+    upc: UPC,
+    modifier: '000',
+  }
+  const cases = [
+    [Object.assign(new Error(secret), { code: 'ECONNREFUSED' }), 'commander_connect_failed'],
+    [Object.assign(new Error(secret), { code: 'ENOTFOUND' }), 'commander_connect_failed'],
+    [Object.assign(new Error(secret), { code: 'ECONNRESET' }), 'commander_connection_reset'],
+    [Object.assign(new Error(secret), { code: 'EPIPE' }), 'commander_connection_reset'],
+    [new CommanderVpluReadError('timeout'), 'commander_request_timeout'],
+    [new CommanderVpluReadError('response_too_large'), 'commander_response_invalid'],
+    [new CommanderVpluReadError('response_invalid'), 'commander_response_invalid'],
+    [new CommanderVpluReadError('vplu_response_invalid'), 'commander_response_invalid'],
+  ]
+
+  for (const [error, status] of cases) {
+    await t.test(status, async () => {
+      const result = await readCommanderProduct({
+        ...base,
+        transport: async () => { throw error },
+      })
+      assert.deepEqual(result, { status })
+      assert.equal(JSON.stringify(result).includes(secret), false)
+    })
+  }
+
+  assert.deepEqual(
+    await readCommanderProduct({
+      ...base,
+      transport: async () => ({ status: 502, body: secret }),
+    }),
+    { status: 'commander_http_status_failed' },
+  )
+  assert.deepEqual(
+    await readCommanderProduct({
+      ...base,
+      transport: async () => ({ status: 200, body: '' }),
+    }),
+    { status: 'commander_response_invalid' },
+  )
+})
+
 test('offline write workflow reads before writing, readbacks every write, detects conflicts and idempotency', async () => {
   const product = { ...parseVpluResponse(XML)[0], ...normalizeProductIdentity(identity) }
   let reads = 0; let writes = 0; let state = product
@@ -80,12 +173,13 @@ test('offline write workflow reads before writing, readbacks every write, detect
   assert.deepEqual(await executeProductCommand({ command: command('0.74', 'k4'), sessionProvider: async () => ({}), readProduct: (() => { let pass = 0; return async () => (++pass === 1 ? product : { ...product, retail_price: '0.02' }) })(), writeProduct: async () => ({ ok: true }) }), { status: 'readback_mismatch' })
 })
 
-test('reconciliation never proposes deactivation for a partial catalog and queue commands remain disabled', () => {
+test('reconciliation never proposes deactivation for a partial catalog and unproven queue commands remain disabled', () => {
   const c = { ...normalizeProductIdentity(identity), raw_payload_hash: 'a' }
   const s = { source_product_key: c.source_product_key, pos_payload_hash: 'b' }
   assert.equal(reconcileCommanderCatalog({ commanderProducts: [], storePulseProducts: [s], completeCatalog: false }).proposed_deactivations.length, 0)
   assert.equal(reconcileCommanderCatalog({ commanderProducts: [], storePulseProducts: [s], completeCatalog: true }).proposed_deactivations.length, 1)
-  assert.deepEqual(validateFutureProductQueueCommand({ command_type: 'create_product' }), { valid: true, executable: false, error_code: 'product_queue_execution_disabled' })
+  assert.deepEqual(validateFutureProductQueueCommand({ command_type: 'create_product' }), { valid: false, executable: false, error_code: 'validation_failed' })
+  assert.deepEqual(validateFutureProductQueueCommand({ command_type: 'deactivate_product' }), { valid: true, executable: false, error_code: 'product_queue_execution_disabled' })
 })
 
 test('verified trust is forwarded through single-product read and write transports', async () => {

@@ -45,4 +45,4 @@ create index if not exists product_history_sync_run_store_idx
 
 create index if not exists product_history_sync_item_store_idx
   on public.product_history (sync_item_id, store_id)
-  where sync_item_id is not null;
+  where sync_item_id is not null;;

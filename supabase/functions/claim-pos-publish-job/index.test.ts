@@ -104,6 +104,45 @@ Deno.test('claim returns only the allowlisted job shape', async () => {
   assertEquals(body.price, '1.25', 'requested price is returned')
 })
 
+Deno.test('claim accepts legacy product and create capabilities while rejecting invalid combinations', async () => {
+  const received: unknown[] = []
+  const handler = createClaimPosPublishJobHandler({
+    authenticateConnector: async () => fakeAuth(),
+    claimJob: async (_auth, capabilities) => {
+      received.push(capabilities)
+      return null
+    },
+  })
+
+  assertEquals((await handler(request({ worker_version: '1.2.3', capabilities: ['update_price', 'update_product'] }))).status, 204, 'legacy update product capability accepted')
+  assertEquals((await handler(request({ worker_version: '1.2.3', capabilities: ['update_price', 'update_product', 'create_product'] }))).status, 204, 'create capability accepted')
+  for (const capabilities of [
+    ['create_product'],
+    ['update_price', 'create_product', 'create_product'],
+    ['update_price', 'unknown_operation'],
+  ]) {
+    assertEquals((await handler(request({ worker_version: '1.2.3', capabilities }))).status, 400, 'invalid capability combination rejected')
+  }
+  assertEquals(received.length, 2, 'only valid capabilities reach the claim dependency')
+})
+
+Deno.test('claim returns the exact create job shape including flag_ids', async () => {
+  const handler = createClaimPosPublishJobHandler({
+    authenticateConnector: async () => fakeAuth(),
+    claimJob: async () => ({
+      job_id: JOB_ID, operation: 'create_product', product_id: PRODUCT_ID, upc: '00012345678901', modifier: '000',
+      description: 'New product', department: '1', price: '1.25', payment_product_code: '0', selling_unit: '1.000',
+      max_qty_per_trans: '0.00', taxable_rebate: '0.00', tax_rate_ids: ['2'], id_check_ids: ['1'], flag_ids: ['1', '5'],
+      attempt: 1, claimed_at: '2026-07-16T16:00:00.000Z',
+    }),
+  })
+  const response = await handler(request({ worker_version: '1.2.3', capabilities: ['update_price', 'update_product', 'create_product'] }))
+  const body = JSON.parse(await response.text()) as Record<string, unknown>
+  assertEquals(response.status, 200, 'create claim status')
+  assertEquals(Object.keys(body).sort().join(','), 'attempt,claimed_at,department,description,flag_ids,id_check_ids,job_id,max_qty_per_trans,modifier,operation,payment_product_code,price,product_id,selling_unit,tax_rate_ids,taxable_rebate,upc', 'exact create claim keys')
+  assertEquals((body.flag_ids as string[]).join(','), '1,5', 'create flags are returned')
+})
+
 Deno.test('claim rejects non-allowlisted claimed-job fields without reflection', async () => {
   const handler = createClaimPosPublishJobHandler({
     authenticateConnector: async () => fakeAuth(),

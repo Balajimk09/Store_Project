@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises'
 import test from 'node:test'
 
 const routePath = new URL('../app/api/connectors/catalog-pilot/preview/route.ts', import.meta.url)
-const migrationPath = new URL('../supabase/migrations/20260730215000_add_pos_catalog_pilot_preview_rpc.sql', import.meta.url)
+const migrationPath = new URL('../supabase/migrations/20260731025523_add_pos_catalog_pilot_preview_rpc.sql', import.meta.url)
 
 test('preview route is bounded, connector-authenticated, JSON-only, and preview-only', async () => {
   const source = await readFile(routePath, 'utf8')

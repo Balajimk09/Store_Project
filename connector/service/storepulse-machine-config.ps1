@@ -239,8 +239,9 @@ function Test-StorePulseMachineConfig {
     if ($Config.PSObject.Properties["pos_publish_enabled"] -and $Config.pos_publish_enabled -isnot [bool]) { throw "pos_publish_enabled must be a boolean." }
     $posPublishEnabled = if ($Config.PSObject.Properties["pos_publish_enabled"]) { [bool]$Config.pos_publish_enabled } else { $false }
     $posPublishMode = if ($Config.PSObject.Properties["pos_publish_mode"]) { [string]$Config.pos_publish_mode } else { "disabled" }
-    if ($posPublishMode -notin @("disabled", "manual_price_publish")) { throw "pos_publish_mode is invalid." }
-    if ($posPublishEnabled -and $posPublishMode -ne "manual_price_publish") { throw "pos_publish_enabled requires manual_price_publish mode." }
+    if ($posPublishMode -notin @("disabled", "manual_price_publish", "automatic_price_publish")) { throw "pos_publish_mode is invalid." }
+    if ($posPublishEnabled -and $posPublishMode -notin @("manual_price_publish", "automatic_price_publish")) { throw "pos_publish_enabled requires a price publishing mode." }
+    if (-not $posPublishEnabled -and $posPublishMode -ne "disabled") { throw "disabled POS publishing requires disabled mode." }
     if ($Config.PSObject.Properties["pos_publish_poll_seconds"]) {
         $pollText = [string]$Config.pos_publish_poll_seconds
         if ($pollText -notmatch '^[0-9]+$') { throw "pos_publish_poll_seconds must be a whole number." }

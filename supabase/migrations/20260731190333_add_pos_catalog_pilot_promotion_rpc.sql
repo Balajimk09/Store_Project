@@ -634,4 +634,4 @@ grant execute on function public.promote_pos_catalog_pilot_products(uuid)
 comment on function public.promote_pos_catalog_pilot_products(uuid) is
   'Atomically promotes one reviewed 1-5 item selected-products preview into products, source identities, sync links, and history. Modifier 000 only; no POS publishing.';
 
-notify pgrst, 'reload schema';
+notify pgrst, 'reload schema';;

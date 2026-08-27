@@ -52,7 +52,24 @@ function Test-StorePulseInstallerSource {
         $sourceWinswPath = Join-Path $SourceRoot ([string]$Manifest.winsw_runtime_relative_path)
         if (-not (Test-Path -LiteralPath $sourceWinswPath -PathType Leaf)) { throw "Native WinSW wrapper source is missing: $sourceWinswPath" }
         $winswManifest = Read-StorePulseWinSWManifest -ManifestPath $sourceWinswManifestPath
-        if ((Get-FileHash -LiteralPath $sourceWinswPath -Algorithm SHA256).Hash.ToUpperInvariant() -ne ([string]$winswManifest.sha256).ToUpperInvariant()) { throw "Source WinSW wrapper SHA-256 mismatch." }
+        $sourceWinswStream = $null
+        $sourceWinswHasher = $null
+        $sourceWinswHash = $null
+        try {
+            # Source integrity validation is read-only and must still run during installer previews.
+            $sourceWinswStream = [IO.File]::OpenRead($sourceWinswPath)
+            $sourceWinswHasher = [Security.Cryptography.SHA256]::Create()
+            $sourceWinswHash = -join ($sourceWinswHasher.ComputeHash($sourceWinswStream) | ForEach-Object { $_.ToString('X2') })
+        }
+        catch {
+            throw "Source WinSW wrapper SHA-256 could not be calculated."
+        }
+        finally {
+            if ($null -ne $sourceWinswHasher) { $sourceWinswHasher.Dispose() }
+            if ($null -ne $sourceWinswStream) { $sourceWinswStream.Dispose() }
+        }
+        if ($sourceWinswHash -notmatch '^[A-Fa-f0-9]{64}$') { throw "Source WinSW wrapper SHA-256 could not be calculated." }
+        if ($sourceWinswHash.ToUpperInvariant() -ne ([string]$winswManifest.sha256).ToUpperInvariant()) { throw "Source WinSW wrapper SHA-256 mismatch." }
     }
 
     return $true

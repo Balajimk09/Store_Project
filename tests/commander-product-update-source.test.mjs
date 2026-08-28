@@ -20,13 +20,15 @@ function sliceBetween(text, startNeedle, endNeedle) {
 
 test('Edit Product routes name and department changes through the Commander product queue', () => {
   const save = sliceBetween(page, '  const saveProduct = async () => {', '  const handleProductImportFile = async')
+  const requestBuilder = sliceBetween(page, '  const buildCommanderProductUpdateRequest = useCallback', '  const submitCommanderProductCreate = useCallback')
   assert.match(save, /commanderNameChangedByUser/)
   assert.match(save, /commanderDepartmentChangedByUser/)
-  assert.match(save, /submitCommanderProduct\(\{/)
+  assert.match(save, /buildCommanderProductUpdateRequest\(/)
+  assert.match(save, /submitCommanderProduct\(request\.request\)/)
   assert.match(save, /StorePulse product before the connector/)
-  assert.ok(save.indexOf('submitCommanderProduct({') < save.indexOf('await updateProduct(productToSave'))
-  assert.match(save, /requestedDescription: commanderNameChangedByUser/)
-  assert.match(save, /requestedDepartment: commanderDepartmentChangedByUser/)
+  assert.ok(save.indexOf('submitCommanderProduct(request.request)') < save.indexOf('await updateProduct(productToSave'))
+  assert.match(requestBuilder, /requestedDescription: commanderNameChangedByUser/)
+  assert.match(requestBuilder, /requestedDepartment: commanderDepartmentChangedByUser/)
   assert.doesNotMatch(save, /product\.name !== editingProduct\.name[\s\S]{0,220}unsupportedCommanderProductChange/)
 })
 
@@ -87,15 +89,16 @@ test('full product queue call uses the exact deployed V2 request parameter names
 })
 
 test('Products UI publishes current mapped tax and age selections plus bounded direct Commander fields only', () => {
+  const requestBuilder = sliceBetween(page, '  const buildCommanderProductUpdateRequest = useCallback', '  const submitCommanderProductCreate = useCallback')
   const save = sliceBetween(page, '  const saveProduct = async () => {', '  const handleProductImportFile = async')
-  assert.match(save, /selectedTaxOptions\.length !== 1/)
-  assert.match(save, /selectedAgeOptions\.length !== 1/)
-  assert.match(save, /requestedTaxCategoryId: product\.taxable \? selectedTaxOptions\[0\]\.id : null/)
-  assert.match(save, /requestedAgeRestrictionId: product\.ageVerification \? selectedAgeOptions\[0\]\.id : null/)
-  assert.match(save, /requestedPaymentProductCode: editingCommanderEffectiveProductFields\.paymentProductCode/)
-  assert.match(save, /requestedSellingUnit: editingCommanderEffectiveProductFields\.sellingUnit/)
-  assert.match(save, /requestedMaxQtyPerTrans: editingCommanderEffectiveProductFields\.maxQtyPerTrans/)
-  assert.match(save, /requestedTaxableRebate: editingCommanderEffectiveProductFields\.taxableRebate/)
+  assert.match(requestBuilder, /selectedTaxOptions\.length !== 1/)
+  assert.match(requestBuilder, /selectedAgeOptions\.length !== 1/)
+  assert.match(requestBuilder, /requestedTaxCategoryId: product\.taxable \? selectedTaxOptions\[0\]\.id : null/)
+  assert.match(requestBuilder, /requestedAgeRestrictionId: product\.ageVerification \? selectedAgeOptions\[0\]\.id : null/)
+  assert.match(requestBuilder, /requestedPaymentProductCode: commanderFields\.paymentProductCode/)
+  assert.match(requestBuilder, /requestedSellingUnit: commanderFields\.sellingUnit/)
+  assert.match(requestBuilder, /requestedMaxQtyPerTrans: commanderFields\.maxQtyPerTrans/)
+  assert.match(requestBuilder, /requestedTaxableRebate: commanderFields\.taxableRebate/)
   assert.match(save, /commanderTaxChangedByUser/)
   assert.match(save, /commanderAgeChangedByUser/)
   assert.doesNotMatch(save, /commander_flag_ids/)
@@ -105,6 +108,7 @@ test('Edit Product keeps untouched Commander V2 fields from its loaded context w
   const contextLoader = sliceBetween(page, '  const loadEditingCommanderProductContext = useCallback', '  const editingCommanderEffectiveProductFields = useMemo')
   const effectiveFields = sliceBetween(page, '  const editingCommanderEffectiveProductFields = useMemo', '  const refreshCommanderPriceJob = useCallback')
   const submit = sliceBetween(page, '  const submitCommanderProduct = useCallback', '  const resetNewProductReviewModal = useCallback')
+  const requestBuilder = sliceBetween(page, '  const buildCommanderProductUpdateRequest = useCallback', '  const submitCommanderProductCreate = useCallback')
   const save = sliceBetween(page, '  const saveProduct = async () => {', '  const handleProductImportFile = async')
 
   for (const [formField, contextField] of [
@@ -116,11 +120,12 @@ test('Edit Product keeps untouched Commander V2 fields from its loaded context w
     assert.match(contextLoader, new RegExp(`${formField}: json\\.context\\.${contextField}`))
     assert.match(effectiveFields, new RegExp(`editingCommanderProductFieldEdits\\.${formField}[\\s\\S]*?editingCommanderProductContext\\.${contextField}`))
     const requestedField = `requested${formField[0].toUpperCase()}${formField.slice(1)}`
-    assert.match(save, new RegExp(`${requestedField}: editingCommanderEffectiveProductFields\\.${formField}`))
+    assert.match(requestBuilder, new RegExp(`${requestedField}: commanderFields\\.${formField}`))
   }
 
   assert.match(save, /commanderNameChangedByUser/)
   assert.match(save, /commanderDepartmentChangedByUser/)
+  assert.match(save, /buildCommanderProductUpdateRequest\(/)
   assert.match(page, /commanderFields=\{[\s\S]*?modalMode === 'edit' && editingCommanderProductContext[\s\S]*?editingCommanderEffectiveProductFields/)
   assert.match(page, /Object\.keys\(patch\)\.map\(\(field\) => \[field, true\]\)/)
   assert.match(submit, /!\/\^\\d\{1,16\}\$\/\.test\(normalizedPaymentProductCode\)/)

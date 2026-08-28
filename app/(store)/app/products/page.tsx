@@ -29,7 +29,7 @@ import {
   Tooltip,
 } from 'recharts';
 import { DashboardShell, PageHeader, PageLoading } from '@/components/layout/sidebar';
-import { ProductForm, type ProductFormBarcodeResolution, type ProductFormCommanderFields, type ProductFormCommanderPriceContext, type ProductFormCommanderProductCodeOption, type ProductFormState } from '@/components/products/ProductForm';
+import { ProductForm, type ProductFormBarcodeResolution, type ProductFormCommanderFields, type ProductFormCommanderProductCodeOption, type ProductFormState } from '@/components/products/ProductForm';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
@@ -223,9 +223,12 @@ type CommanderPriceIdentityResponse =
   | { ok: true; identities: CommanderPriceIdentity[] }
   | { ok: false; error_code: string };
 
-type CommanderPriceContextResponse =
-  | { ok: true; context: ProductFormCommanderPriceContext | null }
-  | { ok: false; error_code: string };
+type CommanderPriceTarget = {
+  source_product_key: string;
+  source_upc: string;
+  source_modifier: string;
+  commander_price: string;
+};
 
 type CommanderProductContext = {
   product_id: string;
@@ -262,6 +265,40 @@ const EMPTY_COMMANDER_PRODUCT_FIELD_EDITS: Record<keyof ProductFormCommanderFiel
   maxQtyPerTrans: false,
   taxableRebate: false,
 };
+
+type CommanderProductUpdateRequest = {
+  productId: string;
+  requestedDescription: string;
+  requestedDepartment: string | null;
+  requestedPrice: string;
+  requestedPaymentProductCode: string;
+  requestedSellingUnit: string;
+  requestedMaxQtyPerTrans: string;
+  requestedTaxableRebate: string;
+  requestedTaxCategoryId: string | null;
+  requestedAgeRestrictionId: string | null;
+};
+
+function resolveCommanderProductFields(
+  context: CommanderProductContext,
+  fields: ProductFormCommanderFields,
+  edits: Record<keyof ProductFormCommanderFields, boolean>,
+): ProductFormCommanderFields {
+  return {
+    paymentProductCode: edits.paymentProductCode
+      ? fields.paymentProductCode
+      : context.commander_payment_product_code,
+    sellingUnit: edits.sellingUnit
+      ? fields.sellingUnit
+      : context.commander_selling_unit,
+    maxQtyPerTrans: edits.maxQtyPerTrans
+      ? fields.maxQtyPerTrans
+      : context.commander_max_qty_per_trans,
+    taxableRebate: edits.taxableRebate
+      ? fields.taxableRebate
+      : context.commander_taxable_rebate,
+  };
+}
 
 type CommanderProductContextResponse =
   | { ok: true; context: CommanderProductContext | null }
@@ -1077,8 +1114,9 @@ function ProductModal({
   upcInputRef,
   productNameInputRef,
   writeBlocked,
-  posPriceStatus,
-  onRetryPosPrice,
+  posUpdateStatus,
+  onRetryPosVerification,
+  onRetryPosUpdate,
   commanderFields,
   commanderFlagIds,
   commanderProductCodeOptions,
@@ -1111,8 +1149,9 @@ function ProductModal({
   upcInputRef: RefObject<HTMLInputElement>;
   productNameInputRef: RefObject<HTMLInputElement>;
   writeBlocked?: boolean;
-  posPriceStatus?: string | null;
-  onRetryPosPrice?: () => void;
+  posUpdateStatus?: string | null;
+  onRetryPosVerification?: () => void;
+  onRetryPosUpdate?: () => void;
   commanderFields?: ProductFormCommanderFields | null;
   commanderFlagIds?: string[];
   commanderProductCodeOptions?: ProductFormCommanderProductCodeOption[];
@@ -1160,8 +1199,9 @@ function ProductModal({
           upcInputRef={upcInputRef}
           productNameInputRef={productNameInputRef}
           writeBlocked={writeBlocked}
-          posPriceStatus={posPriceStatus}
-          onRetryPosPrice={onRetryPosPrice}
+          posUpdateStatus={posUpdateStatus}
+          onRetryPosVerification={onRetryPosVerification}
+          onRetryPosUpdate={onRetryPosUpdate}
           commanderFields={commanderFields}
           commanderFlagIds={commanderFlagIds}
           commanderProductCodeOptions={commanderProductCodeOptions}
@@ -1258,10 +1298,6 @@ export default function ProductsPage() {
   const addProductNameInputRef = useRef<HTMLInputElement | null>(null);
   const addProductBarcodeRequestRef = useRef(0);
   const addProductBarcodeInFlightRef = useRef<string | null>(null);
-  const [editingCommanderPriceContext, setEditingCommanderPriceContext] = useState<ProductFormCommanderPriceContext | null>(null);
-  const [editingCommanderPriceContextLoading, setEditingCommanderPriceContextLoading] = useState(false);
-  const [editingCommanderPriceContextError, setEditingCommanderPriceContextError] = useState<string | null>(null);
-  const editingCommanderPriceContextRequestRef = useRef(0);
   const [editingCommanderProductContext, setEditingCommanderProductContext] = useState<CommanderProductContext | null>(null);
   const [editingCommanderProductContextLoading, setEditingCommanderProductContextLoading] = useState(false);
   const [editingCommanderProductContextError, setEditingCommanderProductContextError] = useState<string | null>(null);
@@ -1503,7 +1539,7 @@ export default function ProductsPage() {
     [commanderPriceIdentities]
   );
 
-  const commanderPriceTarget = useMemo(() => {
+  const commanderPriceTarget = useMemo<CommanderPriceTarget | null>(() => {
     if (commanderPriceObservation) {
       return {
         source_product_key: commanderPriceObservation.source_product_key,
@@ -1512,14 +1548,8 @@ export default function ProductsPage() {
         commander_price: commanderPriceObservation.price,
       };
     }
-    if (
-      editingCommanderPriceContext
-      && editingCommanderPriceContext.product_id === commanderPriceProductId
-    ) {
-      return editingCommanderPriceContext;
-    }
     return null;
-  }, [commanderPriceObservation, commanderPriceProductId, editingCommanderPriceContext]);
+  }, [commanderPriceObservation]);
 
   const closeCommanderPrice = useCallback(() => {
     if (commanderPriceSubmitting) return;
@@ -1544,33 +1574,6 @@ export default function ProductsPage() {
     setCommanderPriceJob(null);
     setCommanderPriceError(null);
   }, [commanderPriceIdentityByKey, items]);
-
-  const loadEditingCommanderPriceContext = useCallback(async (productId: string) => {
-    if (!activeStoreId || !productId) return;
-    const requestId = editingCommanderPriceContextRequestRef.current + 1;
-    editingCommanderPriceContextRequestRef.current = requestId;
-    setEditingCommanderPriceContext(null);
-    setEditingCommanderPriceContextError(null);
-    setEditingCommanderPriceContextLoading(true);
-    try {
-      const response = await fetch(
-        `/api/products/commander-price?storeId=${encodeURIComponent(activeStoreId)}&productId=${encodeURIComponent(productId)}&context=1`,
-        { credentials: 'same-origin' },
-      );
-      const json = (await response.json().catch(() => null)) as CommanderPriceContextResponse | null;
-      if (!response.ok || !json || !json.ok) throw new Error('commander_price_context_unavailable');
-      if (editingCommanderPriceContextRequestRef.current !== requestId) return;
-      setEditingCommanderPriceContext(json.context);
-    } catch {
-      if (editingCommanderPriceContextRequestRef.current === requestId) {
-        setEditingCommanderPriceContextError('commander_price_context_unavailable');
-      }
-    } finally {
-      if (editingCommanderPriceContextRequestRef.current === requestId) {
-        setEditingCommanderPriceContextLoading(false);
-      }
-    }
-  }, [activeStoreId]);
 
   const loadEditingCategoryMapping = useCallback(async (
     sourceData: Extract<CommanderSourceMasterDataResponse, { ok: true; available: true }>,
@@ -1730,8 +1733,8 @@ export default function ProductsPage() {
     ));
   }, [editingCategoryMappingLoading, editingCategoryOptions, form.category, form.department, modalMode, modalOpen]);
 
-  const loadEditingCommanderProductContext = useCallback(async (productId: string) => {
-    if (!activeStoreId || !productId) return;
+  const loadEditingCommanderProductContext = useCallback(async (productId: string): Promise<CommanderProductContext | null> => {
+    if (!activeStoreId || !productId) return null;
     const requestId = editingCommanderProductContextRequestRef.current + 1;
     editingCommanderProductContextRequestRef.current = requestId;
     setEditingCommanderProductContext(null);
@@ -1744,7 +1747,7 @@ export default function ProductsPage() {
       );
       const json = (await response.json().catch(() => null)) as CommanderProductContextResponse | null;
       if (!response.ok || !json || !json.ok) throw new Error('commander_product_context_unavailable');
-      if (editingCommanderProductContextRequestRef.current !== requestId) return;
+      if (editingCommanderProductContextRequestRef.current !== requestId) return null;
       setEditingCommanderProductContext(json.context);
       setEditingCommanderProductFields(json.context
         ? {
@@ -1760,11 +1763,13 @@ export default function ProductsPage() {
       } else {
         void loadEditingCommanderProductCodeOptions('', true);
       }
+      return json.context;
     } catch {
       if (editingCommanderProductContextRequestRef.current === requestId) {
         setEditingCommanderProductContextError('commander_product_context_unavailable');
         void loadEditingCommanderProductCodeOptions('', true);
       }
+      return null;
     } finally {
       if (editingCommanderProductContextRequestRef.current === requestId) {
         setEditingCommanderProductContextLoading(false);
@@ -1842,13 +1847,12 @@ export default function ProductsPage() {
         await loadCommanderObservations();
         if (commanderProductJobProductId && editingProduct?.id === commanderProductJobProductId) {
           await loadEditingCommanderProductContext(commanderProductJobProductId);
-          await loadEditingCommanderPriceContext(commanderProductJobProductId);
         }
       }
     } catch {
       setCommanderProductPollingError('Product update was queued, but its current status could not be loaded.');
     }
-  }, [activeStoreId, commanderProductJobProductId, editingProduct?.id, loadCommanderObservations, loadEditingCommanderPriceContext, loadEditingCommanderProductContext, refreshStoreData]);
+  }, [activeStoreId, commanderProductJobProductId, editingProduct?.id, loadCommanderObservations, loadEditingCommanderProductContext, refreshStoreData]);
 
   useEffect(() => {
     if (!commanderProductJob || !COMMANDER_PRICE_ACTIVE_JOB_STATUSES.has(commanderProductJob.status)) return;
@@ -1947,6 +1951,61 @@ export default function ProductsPage() {
     }
   }, [activeStoreId]);
 
+  const buildCommanderProductUpdateRequest = useCallback(({
+    product,
+    commanderProductContext,
+    commanderFields,
+  }: {
+    product: Product;
+    commanderProductContext: CommanderProductContext;
+    commanderFields: ProductFormCommanderFields;
+  }): { request: CommanderProductUpdateRequest } | { error: string } => {
+    if (!editingProduct?.id) {
+      return { error: 'The mapped StorePulse product is unavailable.' };
+    }
+
+    const requestedPrice = product.sellPrice !== editingProduct.sellPrice
+      ? normalizeCommanderPublishPrice(String(product.sellPrice))
+      : commanderProductContext.commander_price;
+    if (!requestedPrice) {
+      return { error: 'The POS product update could not be validated. Confirmed StorePulse product fields were left unchanged.' };
+    }
+
+    const selectedTaxOptions = product.taxable
+      ? taxCategoryOptions.filter((tax) => tax.is_active && tax.name === product.taxCategory && Number(tax.rate) === product.taxRate)
+      : [];
+    const selectedAgeOptions = product.ageVerification
+      ? ageRestrictionPresets.filter((preset) => (
+        preset.is_active
+        && preset.restriction_type === product.ageRestrictionType
+        && preset.minimum_age === product.minimumAge
+      ))
+      : [];
+    if ((product.taxable && selectedTaxOptions.length !== 1) || (product.ageVerification && selectedAgeOptions.length !== 1)) {
+      return { error: 'Select one current tax category and age restriction before saving this Commander product.' };
+    }
+
+    const commanderNameChangedByUser = product.name !== editingProduct.name;
+    const commanderDepartmentChangedByUser =
+      product.department !== (editingCommanderMappedDepartmentName || editingProduct.department);
+    return {
+      request: {
+        productId: editingProduct.id,
+        requestedDescription: commanderNameChangedByUser
+          ? product.name
+          : commanderProductContext.commander_description,
+        requestedDepartment: commanderDepartmentChangedByUser ? (product.department ?? null) : null,
+        requestedPrice,
+        requestedPaymentProductCode: commanderFields.paymentProductCode,
+        requestedSellingUnit: commanderFields.sellingUnit,
+        requestedMaxQtyPerTrans: commanderFields.maxQtyPerTrans,
+        requestedTaxableRebate: commanderFields.taxableRebate,
+        requestedTaxCategoryId: product.taxable ? selectedTaxOptions[0].id : null,
+        requestedAgeRestrictionId: product.ageVerification ? selectedAgeOptions[0].id : null,
+      },
+    };
+  }, [ageRestrictionPresets, editingCommanderMappedDepartmentName, editingProduct, taxCategoryOptions]);
+
   const submitCommanderProductCreate = useCallback(async ({
     productId,
     requestedTaxCategoryId,
@@ -2006,7 +2065,7 @@ export default function ProductsPage() {
     requireConfirmation = true,
   }: {
     productId?: string | null;
-    target?: Pick<ProductFormCommanderPriceContext, 'commander_price'> | null;
+    target?: Pick<CommanderPriceTarget, 'commander_price'> | null;
     requestedPrice?: string;
     requireConfirmation?: boolean;
   } = {}) => {
@@ -3333,23 +3392,16 @@ export default function ProductsPage() {
     setModalMode('edit');
     setEditingProduct(product);
     setForm(productToForm(product));
-    setEditingCommanderPriceContext(null);
-    setEditingCommanderPriceContextError(null);
     setEditingCommanderProductContext(null);
     setEditingCommanderProductContextError(null);
     setEditingCommanderProductFields(EMPTY_COMMANDER_PRODUCT_FIELDS);
     setEditingCommanderProductFieldEdits(EMPTY_COMMANDER_PRODUCT_FIELD_EDITS);
     setEditingCategoryMapping(null);
     setEditingCategoryMappingLoading(true);
-    setCommanderPriceJob(null);
-    setCommanderPriceJobProductId(null);
-    setCommanderPriceError(null);
-    setCommanderPricePollingError(null);
     setCommanderProductJob(null);
     setCommanderProductJobProductId(null);
     setCommanderProductPollingError(null);
     if (product.id) {
-      void loadEditingCommanderPriceContext(product.id);
       void loadEditingCommanderProductContext(product.id);
     } else {
     }
@@ -3366,10 +3418,6 @@ export default function ProductsPage() {
   const closeProductModal = () => {
     setModalOpen(false);
     setEditingProduct(null);
-    editingCommanderPriceContextRequestRef.current += 1;
-    setEditingCommanderPriceContext(null);
-    setEditingCommanderPriceContextLoading(false);
-    setEditingCommanderPriceContextError(null);
     editingCommanderProductContextRequestRef.current += 1;
     setEditingCommanderProductContext(null);
     setEditingCommanderProductContextLoading(false);
@@ -3388,8 +3436,12 @@ export default function ProductsPage() {
     clearAddProductBarcodeResolution();
   };
 
-  const editPosPriceStatus = useMemo(() => {
+  const editPosUpdateStatus = useMemo(() => {
     if (modalMode !== 'edit') return null;
+    if (editingCommanderProductContextLoading) return 'Checking current POS product...';
+    if (editingCommanderProductContextError) {
+      return 'POS product could not be verified. Commander-supported changes cannot be saved until verification succeeds.';
+    }
     const isCurrentCommanderProductJob = commanderProductJobProductId === editingProduct?.id;
     if (commanderProductJob && isCurrentCommanderProductJob && COMMANDER_PRICE_ACTIVE_JOB_STATUSES.has(commanderProductJob.status)) {
       if (commanderProductPollingError) return commanderProductPollingError;
@@ -3402,41 +3454,71 @@ export default function ProductsPage() {
         ? 'Product created in Commander. StorePulse now reflects the confirmed POS state.'
         : 'Commander verified. StorePulse now reflects the confirmed POS state.';
     }
-    if (isCurrentCommanderProductJob && (commanderProductJob?.status === 'failed' || commanderProductJob?.status === 'cancelled')) {
+    if (
+      isCurrentCommanderProductJob
+      && commanderProductJob?.operation === 'update_product'
+      && (commanderProductJob.status === 'failed' || commanderProductJob.status === 'cancelled')
+    ) {
       return 'POS product update failed. Confirmed StorePulse product fields were left unchanged.';
     }
-    const isCurrentProductJob = commanderPriceJobProductId === editingProduct?.id;
-    if (commanderPriceJob && isCurrentProductJob && COMMANDER_PRICE_ACTIVE_JOB_STATUSES.has(commanderPriceJob.status)) {
-      if (commanderPricePollingError) return commanderPricePollingError;
-      return commanderPriceJob.status === 'pending'
-        ? 'Product saved. POS price update queued.'
-        : 'Updating POS price...';
-    }
-    if (isCurrentProductJob && commanderPriceJob?.status === 'completed') return 'Saved and synchronized with POS.';
-    if (isCurrentProductJob && (commanderPriceJob?.status === 'failed' || commanderPriceJob?.status === 'cancelled')) {
-      return 'Product details saved, but POS price update failed.';
-    }
-    if (editingCommanderPriceContextLoading) return 'Checking POS price...';
-    if (editingCommanderPriceContextError) return 'POS price could not be verified. Selling price will remain unchanged when saved.';
-    if (!editingCommanderPriceContext) return null;
+    if (!editingCommanderProductContext) return null;
     const requestedPrice = normalizeCommanderPublishPrice(form.sellPrice);
-    if (requestedPrice === editingCommanderPriceContext.commander_price) {
-      return `POS price synchronized at ${formatCurrency(Number(editingCommanderPriceContext.commander_price))}`;
+    if (requestedPrice === editingCommanderProductContext.commander_price) {
+      return `POS price synchronized at ${formatCurrency(Number(editingCommanderProductContext.commander_price))}`;
     }
     return requestedPrice
-      ? `Saving will update POS price: ${formatCurrency(Number(editingCommanderPriceContext.commander_price))} to ${formatCurrency(Number(requestedPrice))}`
+      ? `Saving will update POS price: ${formatCurrency(Number(editingCommanderProductContext.commander_price))} to ${formatCurrency(Number(requestedPrice))}`
       : 'Enter a valid positive selling price before saving to update POS price.';
-  }, [commanderPriceJob, commanderPriceJobProductId, commanderPricePollingError, commanderProductJob, commanderProductJobProductId, commanderProductPollingError, editingCommanderPriceContext, editingCommanderPriceContextError, editingCommanderPriceContextLoading, editingProduct?.id, form.sellPrice, modalMode]);
+  }, [commanderProductJob, commanderProductJobProductId, commanderProductPollingError, editingCommanderProductContext, editingCommanderProductContextError, editingCommanderProductContextLoading, editingProduct?.id, form.sellPrice, modalMode]);
 
-  const retryEditPosPrice = useCallback(() => {
-    if (!editingCommanderPriceContext || !editingProduct?.id) return;
-    void submitCommanderPrice({
-      productId: editingProduct.id,
-      target: editingCommanderPriceContext,
-      requestedPrice: form.sellPrice,
-      requireConfirmation: false,
+  const retryEditingCommanderProductVerification = useCallback(() => {
+    if (!editingProduct?.id) return;
+    void loadEditingCommanderProductContext(editingProduct.id);
+  }, [editingProduct?.id, loadEditingCommanderProductContext]);
+
+  const retryFailedCommanderProductUpdate = useCallback(async () => {
+    if (
+      !editingProduct?.id
+      || !commanderProductJob
+      || commanderProductJobProductId !== editingProduct.id
+      || commanderProductJob.operation !== 'update_product'
+      || (commanderProductJob.status !== 'failed' && commanderProductJob.status !== 'cancelled')
+    ) return;
+
+    const desiredProduct = formToProduct(form);
+    const desiredCommanderFields = editingCommanderEffectiveProductFields;
+    const desiredCommanderFieldEdits = editingCommanderProductFieldEdits;
+    setSaving(true);
+    setFormError(null);
+    const currentCommanderProductContext = await loadEditingCommanderProductContext(editingProduct.id);
+    if (!currentCommanderProductContext) {
+      setSaving(false);
+      return;
+    }
+
+    const request = buildCommanderProductUpdateRequest({
+      product: desiredProduct,
+      commanderProductContext: currentCommanderProductContext,
+      commanderFields: resolveCommanderProductFields(
+        currentCommanderProductContext,
+        desiredCommanderFields,
+        desiredCommanderFieldEdits,
+      ),
     });
-  }, [editingCommanderPriceContext, editingProduct?.id, form.sellPrice, submitCommanderPrice]);
+    setEditingCommanderProductFields(desiredCommanderFields);
+    setEditingCommanderProductFieldEdits(desiredCommanderFieldEdits);
+    if ('error' in request) {
+      setSaving(false);
+      setFormError(request.error);
+      return;
+    }
+
+    const queued = await submitCommanderProduct(request.request);
+    setSaving(false);
+    if (!queued.queued) {
+      setFormError(queued.message ?? 'Unable to queue the Commander product update. Confirmed StorePulse product fields were left unchanged.');
+    }
+  }, [buildCommanderProductUpdateRequest, commanderProductJob, commanderProductJobProductId, editingCommanderEffectiveProductFields, editingCommanderProductFieldEdits, editingProduct?.id, form, loadEditingCommanderProductContext, submitCommanderProduct]);
 
   const checkUpcDuplicate = (value = form.upc) => {
     if (modalMode !== 'add') return;
@@ -3507,10 +3589,7 @@ export default function ProductsPage() {
       return;
     }
 
-    if (
-      modalMode === 'edit'
-      && (editingCommanderPriceContextLoading || editingCommanderProductContextLoading)
-    ) {
+    if (modalMode === 'edit' && editingCommanderProductContextLoading) {
       setFormError('Checking the current POS product before saving. Please try again in a moment.');
       return;
     }
@@ -3566,15 +3645,12 @@ export default function ProductsPage() {
     setCommanderProductPollingError(null);
 
     const product = formToProduct(form);
-    const commanderPriceContext = editingCommanderPriceContext;
     const commanderProductContext = editingCommanderProductContext;
     const requestedCommanderPrice = normalizeCommanderPublishPrice(form.sellPrice);
     const commanderLinkedEdit =
       modalMode === 'edit'
       && Boolean(
-        editingCommanderPriceContext
-        || editingCommanderPriceContextError
-        || editingCommanderProductContext
+        editingCommanderProductContext
         || editingCommanderProductContextError
       );
     const commanderUnlinkedEdit =
@@ -3663,45 +3739,18 @@ export default function ProductsPage() {
     // performs its fresh pre-read, one uPLUs mutation, and verified vPLUs
     // readback. A successful report transaction owns the canonical update.
     if (commanderProductFieldChange && commanderProductContext && editingProduct?.id) {
-      const productRequestedPrice = commanderPriceChangedByUser
-        ? requestedCommanderPrice
-        : commanderProductContext.commander_price;
-      if (!productRequestedPrice) {
-        setSaving(false);
-        setFormError('The POS product update could not be validated. Confirmed StorePulse product fields were left unchanged.');
-        return;
-      }
-
-      const selectedTaxOptions = product.taxable
-        ? taxCategoryOptions.filter((tax) => tax.is_active && tax.name === product.taxCategory && Number(tax.rate) === product.taxRate)
-        : [];
-      const selectedAgeOptions = product.ageVerification
-        ? ageRestrictionPresets.filter((preset) => (
-          preset.is_active
-          && preset.restriction_type === product.ageRestrictionType
-          && preset.minimum_age === product.minimumAge
-        ))
-        : [];
-      if ((product.taxable && selectedTaxOptions.length !== 1) || (product.ageVerification && selectedAgeOptions.length !== 1)) {
-        setSaving(false);
-        setFormError('Select one current tax category and age restriction before saving this Commander product.');
-        return;
-      }
-
-      const queued = await submitCommanderProduct({
-        productId: editingProduct.id,
-        requestedDescription: commanderNameChangedByUser
-          ? product.name
-          : commanderProductContext.commander_description,
-        requestedDepartment: commanderDepartmentChangedByUser ? (product.department ?? null) : null,
-        requestedPrice: productRequestedPrice,
-        requestedPaymentProductCode: editingCommanderEffectiveProductFields.paymentProductCode,
-        requestedSellingUnit: editingCommanderEffectiveProductFields.sellingUnit,
-        requestedMaxQtyPerTrans: editingCommanderEffectiveProductFields.maxQtyPerTrans,
-        requestedTaxableRebate: editingCommanderEffectiveProductFields.taxableRebate,
-        requestedTaxCategoryId: product.taxable ? selectedTaxOptions[0].id : null,
-        requestedAgeRestrictionId: product.ageVerification ? selectedAgeOptions[0].id : null,
+      const request = buildCommanderProductUpdateRequest({
+        product,
+        commanderProductContext,
+        commanderFields: editingCommanderEffectiveProductFields,
       });
+      if ('error' in request) {
+        setSaving(false);
+        setFormError(request.error);
+        return;
+      }
+
+      const queued = await submitCommanderProduct(request.request);
       if (!queued.queued) {
         setSaving(false);
         setFormError(queued.message ?? 'Unable to queue the Commander product update. Confirmed StorePulse product fields were left unchanged.');
@@ -3709,7 +3758,6 @@ export default function ProductsPage() {
       }
 
       setSaving(false);
-      closeProductModal();
       return;
     }
 
@@ -6727,12 +6775,22 @@ const nextBreakdown = getCaseBreakdown(nextStock, unitsPerCase);
         upcInputRef={addProductUpcInputRef}
         productNameInputRef={addProductNameInputRef}
         writeBlocked={productsWriteBlocked}
-        posPriceStatus={editPosPriceStatus}
-        onRetryPosPrice={
+        posUpdateStatus={editPosUpdateStatus}
+        onRetryPosVerification={
           modalMode === 'edit'
-          && commanderPriceJobProductId === editingProduct?.id
-          && (commanderPriceJob?.status === 'failed' || commanderPriceJob?.status === 'cancelled')
-            ? retryEditPosPrice
+          && Boolean(editingCommanderProductContextError)
+          && !editingCommanderProductContextLoading
+            ? retryEditingCommanderProductVerification
+            : undefined
+        }
+        onRetryPosUpdate={
+          modalMode === 'edit'
+          && Boolean(editingCommanderProductContext)
+          && !editingCommanderProductContextError
+          && commanderProductJobProductId === editingProduct?.id
+          && commanderProductJob?.operation === 'update_product'
+          && (commanderProductJob.status === 'failed' || commanderProductJob.status === 'cancelled')
+            ? retryFailedCommanderProductUpdate
             : undefined
         }
         commanderFields={

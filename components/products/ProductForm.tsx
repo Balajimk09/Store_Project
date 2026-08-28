@@ -69,16 +69,6 @@ export type ProductFormBarcodeResolution = {
   productUpc?: string | null;
 };
 
-export type ProductFormCommanderPriceContext = {
-  product_id: string;
-  source_product_key: string;
-  source_upc: string;
-  source_modifier: string;
-  commander_price: string;
-  canonical_price: string;
-  observed_at: string;
-};
-
 export type ProductFormCommanderProductCodeOption = {
   key: string;
   name: string;
@@ -124,8 +114,9 @@ type ProductFormProps = {
   barcodeResolution?: ProductFormBarcodeResolution;
   onUpcEnter?: (value: string) => void;
   onClearBarcode?: () => void;
-  posPriceStatus?: string | null;
-  onRetryPosPrice?: () => void;
+  posUpdateStatus?: string | null;
+  onRetryPosVerification?: () => void;
+  onRetryPosUpdate?: () => void;
   commanderFields?: ProductFormCommanderFields | null;
   commanderFlagIds?: string[];
   commanderProductCodeOptions?: ProductFormCommanderProductCodeOption[];
@@ -177,8 +168,9 @@ export function ProductForm({
   barcodeResolution,
   onUpcEnter,
   onClearBarcode,
-  posPriceStatus,
-  onRetryPosPrice,
+  posUpdateStatus,
+  onRetryPosVerification,
+  onRetryPosUpdate,
   commanderFields,
   commanderFlagIds = [],
   commanderProductCodeOptions = [],
@@ -328,12 +320,17 @@ export function ProductForm({
             {fieldErrors?.name && <span className="text-xs font-medium text-destructive">{fieldErrors.name}</span>}
           </label>
 
-          {mode === 'edit' && posPriceStatus && (
+          {mode === 'edit' && posUpdateStatus && (
             <div className="flex items-center justify-between gap-3 text-xs text-muted-foreground">
-              <span>{posPriceStatus}</span>
-              {onRetryPosPrice && (
-                <Button type="button" size="sm" variant="outline" onClick={onRetryPosPrice}>
-                  Retry
+              <span>{posUpdateStatus}</span>
+              {onRetryPosVerification && (
+                <Button type="button" size="sm" variant="outline" onClick={onRetryPosVerification}>
+                  Retry verification
+                </Button>
+              )}
+              {onRetryPosUpdate && (
+                <Button type="button" size="sm" variant="outline" onClick={onRetryPosUpdate}>
+                  Retry POS Update
                 </Button>
               )}
             </div>

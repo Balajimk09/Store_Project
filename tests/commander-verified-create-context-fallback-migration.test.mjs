@@ -56,6 +56,8 @@ test('only a completed create with a valid payload and exact verification identi
     assert.match(source, /public\.pos_publish_payload_is_valid\(/)
     assert.match(source, /verification_upc' = (?:identity_row|base)\.source_upc/)
     assert.match(source, /verification_modifier' = (?:identity_row|base)\.source_modifier/)
+    assert.match(source, /job\.payload ->> 'upc' = job\.audit_metadata ->> 'verification_upc'/)
+    assert.match(source, /job\.payload ->> 'modifier' = job\.audit_metadata ->> 'verification_modifier'/)
     assert.match(source, /verification_description' = job\.payload ->> 'description'/)
     assert.match(source, /verification_department' = job\.payload ->> 'department'/)
     assert.match(source, /verification_price'\)::numeric = job\.requested_price/)

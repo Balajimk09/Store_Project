@@ -90,6 +90,8 @@ as $$
       and jsonb_typeof(job.audit_metadata -> 'verification_price') = 'number'
       and job.audit_metadata ->> 'verification_upc' = identity_row.source_upc
       and job.audit_metadata ->> 'verification_modifier' = identity_row.source_modifier
+      and job.payload ->> 'upc' = job.audit_metadata ->> 'verification_upc'
+      and job.payload ->> 'modifier' = job.audit_metadata ->> 'verification_modifier'
       and job.audit_metadata ->> 'verification_description' = job.payload ->> 'description'
       and job.audit_metadata ->> 'verification_department' = job.payload ->> 'department'
       and job.audit_metadata ->> 'verification_description' !~ '[[:cntrl:]]'
@@ -347,6 +349,8 @@ as $$
       and jsonb_typeof(job.audit_metadata -> 'verification_price') = 'number'
       and job.audit_metadata ->> 'verification_upc' = base.source_upc
       and job.audit_metadata ->> 'verification_modifier' = base.source_modifier
+      and job.payload ->> 'upc' = job.audit_metadata ->> 'verification_upc'
+      and job.payload ->> 'modifier' = job.audit_metadata ->> 'verification_modifier'
       and job.audit_metadata ->> 'verification_description' = job.payload ->> 'description'
       and job.audit_metadata ->> 'verification_department' = job.payload ->> 'department'
       and job.audit_metadata ->> 'verification_description' !~ '[[:cntrl:]]'
